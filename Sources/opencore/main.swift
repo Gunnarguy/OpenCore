@@ -88,6 +88,12 @@ func usage() {
       opencore sync calendar                 Apple Calendar via EventKit
       opencore sync reminders                Apple Reminders via EventKit
       opencore sync notes                    Apple Notes via AppleScript
+      opencore sync mcp NAME                 a configured MCP server
+
+    MCP SOURCES  (any of ~9,650 registry servers becomes a source)
+      opencore mcp-source discover --command CMD    list tools, call nothing
+      opencore mcp-source add NAME --command CMD --tool T   allowlist and record
+      opencore mcp-source list | remove NAME
 
     RETRIEVAL
       opencore embed [--batch N]             build on-device vectors for every passage
@@ -643,9 +649,24 @@ do {
         case "github": try await syncGitHub()
         case "files": try await syncFiles()
         case "calendar", "reminders", "notes": try await syncApple(positional(1)!)
+        case "mcp":
+            guard let name = positional(2) else { print("usage: opencore sync mcp NAME"); exit(1) }
+            try await MCPSourceCommands.sync(name)
         default:
-            print("usage: opencore sync github | files | calendar | reminders | notes")
+            print("usage: opencore sync github | files | calendar | reminders | notes | mcp NAME")
             exit(1)
+        }
+    case "mcp-source":
+        switch positional(1) {
+        case "discover": try await MCPSourceCommands.discover()
+        case "add":
+            guard let name = positional(2) else { print("usage: opencore mcp-source add NAME --command CMD --tool TOOL"); exit(1) }
+            try await MCPSourceCommands.add(name)
+        case "list": try await MCPSourceCommands.list()
+        case "remove":
+            guard let name = positional(2) else { print("usage: opencore mcp-source remove NAME"); exit(1) }
+            try await MCPSourceCommands.remove(name)
+        default: MCPSourceCommands.usage()
         }
     case "embed":
         try await embed()

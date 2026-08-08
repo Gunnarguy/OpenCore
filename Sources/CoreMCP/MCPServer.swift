@@ -1,4 +1,5 @@
 import CoreGraph
+import CoreJSONRPC
 import CoreModel
 import CoreReason
 import CoreSearch
@@ -191,6 +192,18 @@ public actor MCPServer {
                 "type": .string("object"),
                 "properties": .object(schemaProperties),
                 "required": .array(required.map { .string($0) }),
+            ]),
+            // Every tool this server exposes is read-only: OpenCore answers questions and
+            // never mutates on a caller's behalf. Declared because a client reviewing this
+            // server deserves the signal — while remembering that a client must not *trust*
+            // it. Our own client treats annotations as advisory and still requires an
+            // explicit allowlist, which is the correct posture toward any server including
+            // this one.
+            "annotations": .object([
+                "readOnlyHint": .bool(true),
+                "destructiveHint": .bool(false),
+                "idempotentHint": .bool(true),
+                "openWorldHint": .bool(false),
             ]),
         ])
     }

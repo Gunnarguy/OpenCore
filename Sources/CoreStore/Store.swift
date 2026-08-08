@@ -26,18 +26,21 @@ extension Store {
     public func upsert(_ source: Source) async throws {
         try await database.execute(
             """
-            INSERT INTO source (id, kind, handle, display_name, default_authority, default_domain, last_synced_at, sync_cursor)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO source (id, kind, handle, display_name, default_authority, default_domain, last_synced_at, sync_cursor, config)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 display_name = excluded.display_name,
                 default_authority = excluded.default_authority,
-                default_domain = excluded.default_domain
+                default_domain = excluded.default_domain,
+                -- Keep the stored config when the caller does not supply one. A connector
+                -- constructing a Source in passing must not wipe setup the user did.
+                config = COALESCE(excluded.config, source.config)
             """,
             [
                 .text(source.id.value), .text(source.kind.rawValue), .text(source.handle),
                 .text(source.displayName), .integer(Int64(source.defaultAuthority.rawValue)),
                 .text(source.defaultDomain.rawValue), SQLValue(date: source.lastSyncedAt),
-                SQLValue(text: source.syncCursor),
+                SQLValue(text: source.syncCursor), SQLValue(text: source.config),
             ]
         )
     }
@@ -63,8 +66,29 @@ extension Source {
             defaultAuthority: Authority(rawValue: row.requireInt("default_authority")) ?? .thirdPartyRecord,
             defaultDomain: Domain(rawValue: row.requireString("default_domain")) ?? .project,
             lastSyncedAt: row.date("last_synced_at"),
-            syncCursor: row.string("sync_cursor")
+            syncCursor: row.string("sync_cursor"),
+            config: row.string("config")
         )
+    }
+}
+
+extension Store {
+    /// Remove a source and everything derived from it.
+    ///
+    /// Objects cascade, and so does everything below them. This is the one place a user can
+    /// legitimately delete from the floor, because "I no longer want this source" is a
+    /// different statement from "I changed my mind about a fact".
+    public func removeSource(_ id: SourceID) async throws -> Int {
+        let objects = try await database.scalarInt("SELECT COUNT(*) FROM object WHERE source_id = ?", [.text(id.value)])
+        try await database.execute("DELETE FROM source WHERE id = ?", [.text(id.value)])
+        return objects
+    }
+
+    public func source(handle: String, kind: SourceKind) async throws -> Source? {
+        try await database.query(
+            "SELECT * FROM source WHERE kind = ? AND handle = ?",
+            [.text(kind.rawValue), .text(handle)]
+        ).first.map(Source.init(row:))
     }
 }
 

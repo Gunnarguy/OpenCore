@@ -19,6 +19,11 @@ public struct Source: Hashable, Sendable, Codable, Identifiable {
     public var lastSyncedAt: Date?
     /// Opaque per-connector resume token (an ETag, a cursor, a high-water timestamp).
     public var syncCursor: String?
+    /// Connector-specific setup, as JSON. Shape is the connector's business.
+    ///
+    /// **Never a place for a credential.** Configuration records the *names* of environment
+    /// variables to read; the values stay in the environment. The store is not encrypted.
+    public var config: String?
 
     public init(
         kind: SourceKind,
@@ -27,7 +32,8 @@ public struct Source: Hashable, Sendable, Codable, Identifiable {
         defaultAuthority: Authority,
         defaultDomain: Domain,
         lastSyncedAt: Date? = nil,
-        syncCursor: String? = nil
+        syncCursor: String? = nil,
+        config: String? = nil
     ) {
         self.id = SourceID.derived(from: kind.rawValue, handle)
         self.kind = kind
@@ -37,6 +43,7 @@ public struct Source: Hashable, Sendable, Codable, Identifiable {
         self.defaultDomain = defaultDomain
         self.lastSyncedAt = lastSyncedAt
         self.syncCursor = syncCursor
+        self.config = config
     }
 }
 

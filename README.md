@@ -138,6 +138,27 @@ Rows 2 and 3 are why both legs exist: each was near-invisible to one retriever a
 top of the other. Embeddings are Apple's `NLContextualEmbedding`, 512-dimensional, computed
 on device — 966 passages in 25 seconds, nothing uploaded.
 
+### Any MCP server is a source
+
+The official registry passed 9,650 servers. Rather than hand-writing an integration per
+service, OpenCore speaks the protocol they already speak.
+
+```bash
+opencore mcp-source discover --command some-mcp-server     # lists tools, calls nothing
+opencore mcp-source add work --command some-mcp-server --tool list_issues --domain work
+opencore sync mcp work
+```
+
+**Nothing is called unless you name it.** An MCP server advertises write tools too —
+`send_message`, `delete_file` — and a sync that guessed wrong would not return a bad answer,
+it would send an email. So the policy is default-deny with an explicit allowlist, and there is
+no automatic path around it: the server's own `readOnlyHint` is a claim from an untrusted peer,
+and `get_message` reads while `get_approval` might send one. `discover` prints an advisory to
+shorten your review; the call path never reads it.
+
+`--env NAME` forwards a variable **by name**. Values are read from your environment at launch
+and never touch the database.
+
 ### As MCP infrastructure
 
 ```bash

@@ -1,4 +1,82 @@
-# OpenCore as MCP infrastructure
+# MCP, both directions
+
+OpenCore is an MCP **server** (other tools query your history) and an MCP **client** (any of
+~9,650 registry servers becomes a source). The client is the more consequential half: rather
+than hand-writing an integration per service, OpenCore speaks the protocol those services
+already speak.
+
+---
+
+# Part 1 — OpenCore as an MCP client
+
+## Three commands
+
+```bash
+opencore mcp-source discover --command some-mcp-server
+```
+
+Connects, lists every tool with a read-only advisory, and **calls nothing**. Run this first.
+
+```bash
+opencore mcp-source add work --command some-mcp-server --tool list_issues --tool get_issue --domain work
+```
+
+```bash
+opencore sync mcp work
+```
+
+## The tool policy
+
+An MCP server advertises whatever tools it likes, and plenty of them **write**:
+`send_message`, `create_issue`, `delete_file`. A sync that guessed wrong would not return a bad
+answer, it would send an email.
+
+So: **default-deny with an explicit allowlist**, and no automatic path around it.
+
+- The server's `readOnlyHint` is **not sufficient**. The specification says plainly that
+  annotations come from an untrusted server and must not drive safety decisions.
+- Name heuristics are **not sufficient**. `get_message` reads; `get_approval` might send one.
+- The advisory in `discover` exists to shorten a human's review list. The call path never
+  consults it. `[source]` — `MCPClientConnector`
+
+`[test]` — a source with no allowlisted tools throws before launching anything.
+
+That friction is the feature. Nothing gets called because it looked safe.
+
+## Credentials
+
+`--env NAME` forwards an environment variable **by name**. The value is read from your
+environment when the server launches and is never written to the database, a log line, or the
+repository. `[test]` — the serialised config never contains a value, and only declared
+variables reach the child process; the rest of your environment is not inherited.
+
+A declared-but-unset variable is reported rather than passed as empty, because an empty
+credential produces a confusing auth error instead of an obvious missing-variable one.
+
+## What content from a server is
+
+Third-party text OpenCore did not author. It enters at `Authority.thirdPartyRecord` — below
+anything the user wrote — in the `personal` domain by default, which a project query cannot
+read. `[test]`
+
+It is stored as evidence to be cited, never as anything to be acted on. Text inside a tool
+result that looks like an instruction is simply text.
+
+## Protocol versions
+
+`initialize` is tried first (`2025-11-25`). If the server reports the method does not exist,
+`server/discover` is tried instead, which is how a `2026-07-28` stateless server answers. The
+newer specification explicitly endorses that probe on stdio. `[source]`
+
+## Verified
+
+`[measured]` 2026-08-08, against OpenCore's own MCP server: discovery listed 6 tools with
+advisories; a 3-tool allowlist produced 3 objects and 5 chunks; re-sync reported
+`0 new, 0 changed, 3 unchanged`; `remove` cascaded all 3 objects away.
+
+---
+
+# Part 2 — OpenCore as an MCP server
 
 This is where OpenCore stops being an app you look at and becomes something other tools
 ask. An MCP client gets `core_ask` and `core_trace`, and can therefore cite *your* history

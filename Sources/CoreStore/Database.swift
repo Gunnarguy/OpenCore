@@ -238,6 +238,7 @@ public actor Database {
     static let migrations: [(version: Int, resource: String)] = [
         (1, "schema"),
         (2, "migration_002"),
+        (3, "migration_003"),
     ]
 
     public static var schemaVersion: Int { migrations.map(\.version).max() ?? 0 }

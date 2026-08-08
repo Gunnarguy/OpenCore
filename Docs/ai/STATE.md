@@ -1,80 +1,84 @@
 # Current State
 
-Updated: 2026-08-08 11:30 PT
+Updated: 2026-08-08 13:10 PT
 Branch/worktree: `main`, primary checkout (not a linked worktree)
-Last verified commit: `3e02ba6`
+Last verified commit: `6925546`
 
 ## Objective
 
-Build the **MCP client** so OpenCore can consume any MCP server as a source. It is one of only
-two items classified `force multiplier` on the roadmap, and it makes most of the remaining
-connector work unnecessary.
+The MCP client is done. **Next objective: the eval harness** — the second and last item
+classified `force multiplier` on the roadmap, and the one every unmeasured constant in this
+repository is waiting on.
 
 ## Status
 
-v0.2 is pushed and working end to end. The engine ingests GitHub, local files, Calendar,
-Reminders and Notes; chunks and embeds on device; retrieves with dense + BM25 fused by RRF then
-MMR; and serves MCP over stdio. Nothing is in flight — the tree is clean and the next objective
-has not been started.
+v0.3's headline work has landed and is verified against a real server. OpenCore now both
+serves MCP and consumes it, so any of the ~9,650 registry servers can be a source without
+writing a connector for it.
+
+Nothing is in flight. The tree is clean and the next objective has not been started.
 
 ## Completed
 
-- v0.1 (`43c1581`): four primitives, bitemporal claims, ordinal authority, SQLite + FTS5,
-  contradiction detection, versioned beliefs, domain firewall, receipts, CLI, macOS app.
-- v0.2 (`80fa667`): chunks + vectors (migration 2), NLContextualEmbedding on device,
-  `PassageSearch` with RRF and MMR, filesystem/Calendar/Reminders/Notes connectors,
-  `IngestPipeline`, MCP server over stdio, external-caller domain policy.
-- `95bcd96`: roadmap moved to Notion; force multipliers identified.
-- `3e02ba6`: Claude Context OS installed — `Docs/ai/` knowledge plane, four path-scoped rules,
-  three skills, three lifecycle hooks. Tree clean.
+- v0.1 (`43c1581`), v0.2 (`80fa667`) — see `Docs/ROADMAP.md`.
+- `3e02ba6` — Claude Context OS: `Docs/ai/`, rules, skills, lifecycle hooks.
+- `6925546` — SessionStart staleness counts source commits, not all commits.
+- **MCP client** (this session, uncommitted at time of writing → see git log):
+  `CoreJSONRPC` extracted so client and server share types without CoreIngest depending on the
+  reasoning stack; `StdioTransport`; `MCPClient` with `initialize` → `server/discover`
+  fallback; `MCPClientConnector` with default-deny tool policy; migration 3 (`source.config`);
+  `mcp-source discover|add|list|remove` and `sync mcp`.
 
 ## Active Constraints
 
-- **Objects are the floor.** Nothing derived may be the only copy of anything. If a change
-  makes `opencore rebuild` unable to reconstruct a layer, the change is wrong.
-- **Zero external dependencies.** Including the MCP server. This is why JSON-RPC is hand-rolled.
-- **Unmeasured stays `nil`.** Never write a plausible default into a receipt field.
-- **Authority never multiplies.** It is an ordinal tier, not a probability.
-- No accuracy number may be quoted anywhere; none has been measured.
+- **Objects are the floor.** `opencore rebuild` must reconstruct every derived layer.
+- **Zero external dependencies**, including all MCP code.
+- **Unmeasured stays `nil`.** No accuracy number may be quoted; none has been measured.
+- **Authority never multiplies.** Ordinal tier, not a probability.
+- **Default-deny for MCP tools.** Never derive an allowlist automatically, however strong the
+  server's annotation looks. Widening this is a safety regression, not a convenience.
 
 ## Working Set
 
-- `Sources/CoreIngest/Connector.swift`: the protocol an MCP client connector must conform to.
-- `Sources/CoreMCP/JSONRPC.swift`: `JSONValue` and the RPC types are reusable for a client;
-  the server currently owns them.
-- `Sources/CoreMCP/MCPServer.swift`: the server side, and the reference for framing and
-  the external-caller policy a client must respect in reverse.
-- `Sources/CoreGraph/IngestPipeline.swift`: whatever the client produces flows through here.
-- `Docs/MCP.md`: the protocol notes, including the two rules that must not break.
+For the next objective (eval harness):
+
+- `Benchmarks/` does not exist yet. OpenIntelligence's `Benchmarks/rag_eval_v1.jsonl` is the
+  reference format worth copying.
+- `Sources/CoreSearch/PassageSearch.swift`: every constant to be replaced by measurement lives
+  here — RRF `k=60`, MMR `λ=0.7`, the `0.02` signal scaling.
+- `Sources/CoreModel/Receipt.swift`: `confidence` is `nil` and stays that way until the harness
+  produces a calibrated number.
+- `Sources/CoreModel/Chunker.swift`: 1200-char target, 150 overlap, both chosen.
 
 ## Verification
 
 Last run 2026-08-08, all green:
 
-- `swift build --scratch-path /private/tmp/opencore-build` -> builds clean
-- `swift test --scratch-path /private/tmp/opencore-build` -> 24 tests passed (7 + 17)
-- `xcodebuild ... -scheme OpenCore` -> BUILD SUCCEEDED
-- `opencore rebuild` -> 691 objects, 966 chunks, 38 entities, 82 claims (identical to pre-rebuild)
-- `opencore embed` -> 966/966 passages, 25s on device
-- MCP handshake by hand -> initialize, tools/list, tools/call all correct; medical query
-  correctly blocked for an external caller
+- `swift build --scratch-path /private/tmp/opencore-build` -> clean
+- `swift test --scratch-path /private/tmp/opencore-build` -> **32 tests passed** (7 + 25)
+- `mcp-source discover` against OpenCore's own MCP server -> 6 tools, protocol 2025-11-25
+- `sync mcp selftest` -> 3 objects, 5 chunks; re-sync -> `0 new, 0 changed, 3 unchanged`
+- `mcp-source remove selftest` -> cascaded all 3 objects
+- macOS app: not rebuilt this session; last verified at `80fa667`
 
 ## Blockers / Unknowns
 
-- **Unknown:** whether the Calendar, Reminders and Notes connectors work against real data.
-  They compile and are `[source]`-level only. *Verify:* run `sync calendar` from the built
-  macOS app (not the CLI — EventKit needs Info.plist usage strings the SwiftPM binary lacks)
-  and check `opencore doctor` object counts.
-- **Known gap, not a blocker:** the shipped MCP server implements protocol `2025-11-25`.
-  `2026-07-28` removed the `initialize` handshake, made `server/discover` mandatory, and
-  requires `resultType` on every result. Tracked as Critical in Notion.
-- **Known gap:** only GitHub produces claims. Files, notes, calendar and reminders are
-  retrievable but invisible to `claims`, `contradictions`, and `memory log`.
+- **Unknown:** whether the client works against a third-party MCP server. It has only been run
+  against OpenCore's own, which is a real server but one we wrote. *Verify:* install any
+  registry server (a filesystem or fetch server needs no credentials) and run `discover`
+  then `sync mcp`.
+- **Unknown:** whether Calendar, Reminders and Notes work against real data. Unchanged from
+  before; must be run from the built app, not the CLI.
+- **Known gap:** the MCP *server* still implements `2025-11-25`. The *client* handles both
+  generations. Server upgrade tracked Critical in Notion.
+- **Known gap:** only GitHub produces claims. MCP, files, notes and calendar are retrievable
+  but invisible to `claims`, `contradictions`, and `memory log`.
 
 ## Exact Next Action
 
-Create `Sources/CoreIngest/MCPClientConnector.swift`: a `Connector` that launches a configured
-MCP server as a subprocess over stdio, calls `tools/list`, invokes the read-only tools it
-advertises, and maps each result into a `CoreObject` with `authority: .thirdPartyRecord` and a
-domain chosen per-server at configuration time. Reuse `JSONValue` from `CoreMCP` by moving the
-RPC types into a shared location both the client and server can import.
+Create `Benchmarks/` with a ground-truthed fixture corpus and
+`Sources/opencore/EvalCommands.swift` exposing `opencore eval`. Report recall@k, MRR and nDCG
+per retrieval stage over `PassageSearch`, so the lexical and dense legs can be scored
+separately and RRF's contribution measured rather than assumed. Start with 20 hand-written
+question/expected-passage pairs against the existing GitHub corpus; that is enough to detect a
+regression and to answer the first real question — does the dense leg beat BM25 alone here.
