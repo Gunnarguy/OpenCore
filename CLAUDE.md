@@ -36,6 +36,17 @@ These are the project's whole thesis. A change that breaks one is wrong even if 
   there rather than reaching into the database.
 - **Connectors produce objects and nothing else.** No claims, no entities, no interpretation.
 - **Counter-evidence is a row**, never an absence.
+- **Nothing but MCP messages may reach stdout** anywhere in the `opencore mcp` call path.
+  Every log line goes to stderr. A stray `print` corrupts the JSON-RPC stream, and the
+  symptom is a client that hangs rather than an error you can find.
+- **An MCP caller is not the user.** Sensitive domains stay unreachable through the server
+  regardless of query wording, because the query text is written by a model and a model
+  asking about a diagnosis is not consent. Only `--unsafe-expose-sensitive` lifts it.
+- **A chosen constant says it is chosen.** RRF k, MMR λ, chunk size, the language-share
+  floor: every one carries a comment saying it was picked rather than measured. Removing
+  that comment is a bigger change than changing the number.
+- **Ingest goes through `IngestPipeline`.** Adding a derivation stage anywhere else means
+  the CLI, the app, or `rebuild` silently stops performing it.
 
 ## Documentation discipline
 
@@ -70,6 +81,15 @@ DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcodebuild -projec
 
 The built CLI lands at `/private/tmp/opencore-build/out/Products/Debug/opencore`, not
 `.build/debug/`, when using `--scratch-path`.
+
+`gh repo create --source=.` fails here: `gh` does not follow the `.git` gitdir pointer and
+reports "not a git repository". Create the repo by name and add the remote by hand.
+
+Exercise the MCP server without a client:
+
+```bash
+echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | /private/tmp/opencore-build/out/Products/Debug/opencore mcp 2>/dev/null
+```
 
 ## Working style
 

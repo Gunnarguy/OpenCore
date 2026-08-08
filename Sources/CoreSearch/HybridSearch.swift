@@ -26,13 +26,6 @@ public struct SearchOutcome: Sendable {
     public var unavailableSignals: [String: String]
 }
 
-/// Something that turns text into a vector. Optional by design.
-public protocol EmbeddingProvider: Sendable {
-    var modelIdentifier: String { get }
-    var dimensions: Int { get }
-    func embed(_ text: String) async throws -> [Float]
-}
-
 /// Lexical + temporal + authority + graph scoring over objects, weighted by query class.
 ///
 /// The semantic signal is optional and its absence is reported rather than defaulted. A

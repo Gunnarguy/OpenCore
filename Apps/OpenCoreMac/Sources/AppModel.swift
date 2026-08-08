@@ -92,6 +92,13 @@ final class AppModel {
             openContradictionCount = try await store.contradictions(unresolvedOnly: true).count
             sources = try await store.sources()
             countsByKind = try await store.objectCountsByKind()
+            chunkCount = try await store.chunkCount()
+            if let run = try await store.embeddingRuns().first {
+                embeddingModel = run.model
+                embeddedCount = run.chunksDone
+            } else {
+                embeddedCount = 0
+            }
         } catch {
             state = .failed("\(error)")
         }
@@ -99,14 +106,15 @@ final class AppModel {
 
     // MARK: - Sync
 
+    var chunkCount = 0
+    var embeddedCount = 0
+    var embeddingModel: String?
+
     func syncGitHub() async {
-        guard let store else { return }
         guard let token = GitHubConnector.resolveToken() else {
             state = .failed("No GitHub token. Set GITHUB_TOKEN or run `gh auth login` in Terminal.")
             return
         }
-
-        state = .working("resolving account")
         do {
             struct User: Decodable { let login: String }
             var request = URLRequest(url: URL(string: "https://api.github.com/user")!)
@@ -117,30 +125,70 @@ final class AppModel {
                 state = .failed("Could not resolve the GitHub account for this token.")
                 return
             }
+            await sync(GitHubConnector(login: login, token: token, commitsPerRepo: 100), label: "github:\(login)")
+        } catch {
+            state = .failed("\(error)")
+        }
+    }
 
-            let connector = GitHubConnector(login: login, token: token, commitsPerRepo: 100)
+    func syncCalendar() async { await sync(AppleEventKitConnector(scope: .calendar), label: "Calendar") }
+    func syncReminders() async { await sync(AppleEventKitConnector(scope: .reminders), label: "Reminders") }
+    func syncNotes() async { await sync(AppleNotesConnector(), label: "Notes") }
+
+    func syncFolder(_ url: URL, domain: Domain) async {
+        let connector = FilesystemConnector(
+            handle: url.lastPathComponent,
+            roots: [FilesystemConnector.Root(url: url, domain: domain)]
+        )
+        await sync(connector, label: "\(url.lastPathComponent) [\(domain.rawValue)]")
+    }
+
+    /// One sync path for every connector, so the app cannot drift from the CLI.
+    private func sync(_ connector: any Connector, label: String) async {
+        guard let store else { return }
+        state = .working("connecting to \(label)")
+        do {
             try await store.upsert(connector.source)
+            let since = try await store.sources().first { $0.id == connector.source.id }?.lastSyncedAt
 
-            state = .working("fetching from github:\(login)")
-            let batch = try await connector.fetch(since: nil, cursor: nil) { _ in }
+            state = .working("fetching from \(label)")
+            let batch = try await connector.fetch(since: since, cursor: nil) { _ in }
 
-            state = .working("storing \(batch.objects.count) objects")
-            try await store.ingest(batch.objects)
+            guard !batch.objects.isEmpty else {
+                try await store.markSynced(connector.source.id, at: Date(), cursor: batch.cursor)
+                await refresh()
+                state = .idle
+                return
+            }
 
-            state = .working("resolving entities")
-            try await EntityResolver(store: store).resolve(objects: batch.objects)
-
-            state = .working("extracting claims")
-            try await ClaimExtractor(store: store).extract(from: batch.objects)
-
-            state = .working("reconciling beliefs")
-            try await BeliefEngine(store: store).reconcile()
-
+            state = .working("deriving from \(batch.objects.count) objects")
+            _ = try await IngestPipeline(store: store).run(objects: batch.objects)
             try await store.markSynced(connector.source.id, at: Date(), cursor: batch.cursor)
+
             await refresh()
             state = .idle
         } catch {
-            state = .failed("\(error)")
+            state = .failed("\(label): \(error)")
+        }
+    }
+
+    /// Build vectors for every passage that lacks one. Resumable: interrupting it and
+    /// running again continues rather than restarting.
+    func buildEmbeddings() async {
+        guard let store else { return }
+        do {
+            let provider = try NLEmbeddingProvider()
+            embeddingModel = provider.modelIdentifier
+            state = .working("preparing \(provider.modelIdentifier)")
+
+            let indexer = EmbeddingIndexer(store: store, provider: provider)
+            _ = try await indexer.run(batchSize: 32) { [weak self] message in
+                Task { @MainActor in self?.state = .working(message) }
+            }
+            await refresh()
+            state = .idle
+        } catch {
+            state = .failed("embedding: \(error)")
         }
     }
 

@@ -28,10 +28,18 @@ targets:
       path: Generated/Info.plist
       properties:
         CFBundleDisplayName: OpenCore
-        CFBundleShortVersionString: "0.1.0"
-        CFBundleVersion: "1"
+        CFBundleShortVersionString: "0.2.0"
+        CFBundleVersion: "2"
         LSMinimumSystemVersion: "15.0"
         NSHumanReadableCopyright: "© 2026 Gunnar Hostetler"
+        # EventKit reads these from the *calling binary's* Info.plist. Without them the
+        # request is denied with no prompt, which looks exactly like an empty calendar.
+        # This is why Calendar and Reminders sync works from the app and not from the CLI.
+        NSCalendarsFullAccessUsageDescription: "OpenCore reads your calendar so you can ask questions about your own history. Events are stored locally, tagged personal, and are never reachable from a project question or through the MCP server."
+        NSRemindersFullAccessUsageDescription: "OpenCore reads your reminders so you can ask questions about your own history. They are stored locally, tagged personal, and are never reachable from a project question or through the MCP server."
+        NSAppleEventsUsageDescription: "OpenCore reads Apple Notes through AppleScript, which is the only interface Notes provides. Notes stay on this device."
+        # Notes has no public API; this is the bundle whose events we send.
+        NSAppleEventsUsageDescriptionAppleScript: "Reading your notes."
     entitlements:
       path: Generated/OpenCore.entitlements
       properties:

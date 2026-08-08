@@ -22,7 +22,27 @@ Status: `todo` · `doing` · `done` · `dropped`
 
 ---
 
-## v0.2 — make the central claim falsifiable  ·  todo
+## v0.2 — passages, senses, and surfaces  ·  done
+
+- [x] Schema migration 2: chunks, chunk FTS5, chunk vectors, embedding-run coverage
+- [x] Structure-first chunker (paragraph → sentence → hard cut) with overlap
+- [x] `NLContextualEmbedding` provider, 512-dim, mean-pooled, on device
+- [x] Resumable embedding indexer with coverage reporting
+- [x] `PassageSearch`: dense + BM25 legs, RRF fusion, MMR diversification, context expansion
+- [x] Filesystem connector with per-root domain assignment
+- [x] Apple Calendar and Reminders via EventKit
+- [x] Apple Notes via AppleScript, isolated in one file
+- [x] `IngestPipeline` so CLI, app, and rebuild cannot drift apart
+- [x] MCP server over stdio, hand-rolled, protocol 2025-11-25
+- [x] External-caller policy: sensitive domains unreachable through MCP regardless of wording
+- [x] 24 tests
+
+Measured `[measured]`: 691 objects → 966 chunks; embedding 966 passages took 25s on device;
+a passage query runs dense in ~190ms and lexical in ~8ms over 966 chunks.
+
+---
+
+## v0.3 — make the central claim falsifiable  ·  todo
 
 **This is the priority, and it is deliberately before more features.** Everything below it is
 unfalsifiable without it, and every number this project might quote is currently unmeasured.
@@ -37,33 +57,37 @@ unfalsifiable without it, and every number this project might quote is currently
 4. **Fix the BM25 clustering** found in the first run, and prove the fix with (1) rather than
    by eye.
 
-## v0.3 — the second sync  ·  todo
+## v0.4 — the second sync  ·  todo
 
 Contradiction detection is test-verified but has never fired on real data, because a first sync
-has nothing to disagree with.
+has nothing to disagree with. Incremental sync landed in v0.2, so the machinery is in place and
+what remains is the extraction that makes conflicts appear.
 
-5. **Incremental sync** using the stored cursor, so re-syncs are cheap and the second one is
-   the interesting one.
-6. **README claim extraction.** A README asserting something the code contradicts is the
+4b. **Claim extraction for non-GitHub sources.** Files, notes, calendar and reminders are
+   ingested, chunked and retrievable but produce zero claims, because `ClaimExtractor` only
+   understands GitHub object shapes. They are half-citizens until this lands: searchable,
+   but invisible to `claims`, `contradictions`, and `memory log`.
+
+5. **README claim extraction.** A README asserting something the code contradicts is the
    flagship demo, and it is a real problem: a documented capability that no longer exists gets
    retrieved and cited back as fact.
-7. **Belief-change notifications** when a sync changes what the system thinks.
+6. **Belief-change notifications** when a sync changes what the system thinks.
 
-## v0.4 — semantic retrieval, measured  ·  todo
+## v0.5 — retrieval, measured  ·  todo
 
-8. **`NLContextualEmbedding` provider.** Apple-authored, on-device, no model download. It has
-   never been measured on a personal corpus, which makes measuring it interesting rather than
-   routine.
-9. **Vector storage and ANN search** over `object_vector`. The schema keys vectors by model so
-   two embedders' vectors can never end up in one similarity search.
-10. **Only then** turn the semantic weight on, with a before/after number from the harness.
+7. **ANN index** over chunk vectors, once `doctor` shows brute-force cosine taking real
+   time. Not before: an approximate index adds a tuning surface and a recall cliff, and
+   trading recall for speed you do not need is a bad trade made twice.
+8. **Compare embedders.** `NLContextualEmbedding` versus a bundled alternative, on the
+   harness, with the losing result published.
 
-## v0.5 — more of your history  ·  todo
+## v0.6 — more of your history  ·  todo
 
-11. **Filesystem connector** over notes and documents.
-12. **Model-proposed claims**, entering at `modelInference` and outranked by every rule.
-13. **MCP server** — `search_core`, `inspect_claim`, `get_evidence`, `trace_receipt`. This is
-    where OpenCore stops being an app and becomes something other tools query.
+9. **PDF and Office extraction.** Currently skipped rather than half-read.
+10. **Mail connector**, tagged by folder the way Notes is.
+11. **Model-proposed claims**, entering at `modelInference` and outranked by every rule.
+12. **Cross-source contradiction.** The flagship case: a README claiming something a
+    calendar or a commit contradicts.
 
 ---
 
@@ -82,6 +106,12 @@ has nothing to disagree with.
   the entity with no record of the seam; a missed merge can be joined later with history intact.
 - **`opencore rebuild` loads all objects into memory** in 500-row pages. Fine at 691 objects,
   not fine at 100k.
+- **Dense search is brute-force cosine** over every stored vector. Deliberate at this scale;
+  see v0.5 item 7 for when that stops being true.
+- **Retrieval constants are all chosen, none measured**: RRF k=60, MMR λ=0.7, the 0.02
+  scaling on authority and recency, the 1200-character chunk target, the 5% language-share
+  floor, `dormantAfter` at 180 days. Each is labelled as chosen where it appears. The eval
+  harness exists to replace them with numbers.
 
 ## Explicitly not doing
 

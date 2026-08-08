@@ -5,7 +5,7 @@ let package = Package(
     name: "OpenCore",
     platforms: [.macOS(.v15)],
     products: [
-        .library(name: "OpenCoreKit", targets: ["CoreModel", "CoreStore", "CoreIngest", "CoreGraph", "CoreSearch", "CoreReason"]),
+        .library(name: "OpenCoreKit", targets: ["CoreModel", "CoreStore", "CoreIngest", "CoreGraph", "CoreSearch", "CoreReason", "CoreMCP"]),
         .executable(name: "opencore", targets: ["opencore"]),
     ],
     targets: [
@@ -16,7 +16,7 @@ let package = Package(
         .target(
             name: "CoreStore",
             dependencies: ["CoreModel"],
-            resources: [.copy("Resources/schema.sql")],
+            resources: [.copy("Resources")],
             linkerSettings: [.linkedLibrary("sqlite3")]
         ),
 
@@ -29,12 +29,14 @@ let package = Package(
         .target(name: "CoreReason", dependencies: ["CoreModel", "CoreStore", "CoreSearch", "CoreGraph"]),
 
         // Layer 4 — surfaces.
+        .target(name: "CoreMCP", dependencies: ["CoreModel", "CoreStore", "CoreGraph", "CoreSearch", "CoreReason"]),
+
         .executableTarget(
             name: "opencore",
-            dependencies: ["CoreModel", "CoreStore", "CoreIngest", "CoreGraph", "CoreSearch", "CoreReason"]
+            dependencies: ["CoreModel", "CoreStore", "CoreIngest", "CoreGraph", "CoreSearch", "CoreReason", "CoreMCP"]
         ),
 
         .testTarget(name: "CoreStoreTests", dependencies: ["CoreStore", "CoreModel"]),
-        .testTarget(name: "CoreGraphTests", dependencies: ["CoreGraph", "CoreSearch", "CoreStore", "CoreModel"]),
+        .testTarget(name: "CoreGraphTests", dependencies: ["CoreGraph", "CoreSearch", "CoreIngest", "CoreStore", "CoreModel"]),
     ]
 )

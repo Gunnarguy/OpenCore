@@ -46,15 +46,24 @@ public struct Reasoner: Sendable {
         self.search = search
     }
 
-    public func answer(_ query: String, limit: Int = 12) async throws -> Answer {
+    /// - Parameter externalCaller: `true` when the query text was written by something
+    ///   other than the user — an MCP client, an automation. Naming a sensitive domain in
+    ///   a query is treated as consent when a person types it and as nothing at all when a
+    ///   model generates it, so an external caller can neither unlock a sensitive domain
+    ///   nor be classified into one.
+    public func answer(_ query: String, limit: Int = 12, externalCaller: Bool = false) async throws -> Answer {
         let recorder = ReceiptRecorder()
 
         let classification = classifier.classify(query)
-        let (domain, requested) = AdmissionPolicy.classifyDomain(
+        let (rawDomain, requested) = AdmissionPolicy.classifyDomain(
             query,
             knownEntitySurfaces: try await store.aliasSurfaces()
         )
-        let policy = AdmissionPolicy(queryDomain: domain, explicitlyRequested: requested)
+        let domain = (externalCaller && rawDomain.isSensitive) ? .project : rawDomain
+        let policy = AdmissionPolicy(
+            queryDomain: domain,
+            explicitlyRequested: externalCaller ? [] : requested
+        )
 
         let outcome = try await recorder.record(
             "retrieve",

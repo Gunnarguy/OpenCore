@@ -209,24 +209,22 @@ extension Receipt: @retroactive Identifiable {}
 
 struct SourcesView: View {
     @Environment(AppModel.self) private var model
+    @State private var folderDomain: Domain = .personal
+    @State private var showingFolderPicker = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Sources").font(.title2.weight(.semibold))
-                    Text("Objects are the floor. Everything above them can be rebuilt from here.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Button {
-                    Task { await model.syncGitHub() }
-                } label: {
-                    Label("Sync GitHub", systemImage: "arrow.triangle.2.circlepath")
-                }
-                .disabled(isWorking)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Sources").font(.title2.weight(.semibold))
+                Text("Objects are the floor. Everything above them can be rebuilt from here.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
+
+            ConnectorGrid(isWorking: isWorking, showingFolderPicker: $showingFolderPicker, folderDomain: $folderDomain)
+
+            EmbeddingPanel(isWorking: isWorking)
 
             if model.sources.isEmpty {
                 Text("No sources connected. GitHub uses the token from `gh auth login` or GITHUB_TOKEN.")
@@ -263,17 +261,132 @@ struct SourcesView: View {
                     }
                 }
             }
-
-            Spacer()
+            }
+            .padding(24)
         }
-        .padding(24)
         .navigationTitle("Sources")
         .task { await model.refresh() }
+        .fileImporter(isPresented: $showingFolderPicker, allowedContentTypes: [.folder]) { result in
+            guard case .success(let url) = result else { return }
+            let domain = folderDomain
+            Task { await model.syncFolder(url, domain: domain) }
+        }
     }
 
     private var isWorking: Bool {
         if case .working = model.state { return true }
         return false
+    }
+}
+
+private struct ConnectorGrid: View {
+    @Environment(AppModel.self) private var model
+    let isWorking: Bool
+    @Binding var showingFolderPicker: Bool
+    @Binding var folderDomain: Domain
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 190), spacing: 10)], spacing: 10) {
+                ConnectorButton(title: "GitHub", subtitle: "repos, commits, docs", symbol: "chevron.left.forwardslash.chevron.right", disabled: isWorking) {
+                    Task { await model.syncGitHub() }
+                }
+                ConnectorButton(title: "Calendar", subtitle: "events · personal", symbol: "calendar", disabled: isWorking) {
+                    Task { await model.syncCalendar() }
+                }
+                ConnectorButton(title: "Reminders", subtitle: "tasks · personal", symbol: "checklist", disabled: isWorking) {
+                    Task { await model.syncReminders() }
+                }
+                ConnectorButton(title: "Notes", subtitle: "via AppleScript", symbol: "note.text", disabled: isWorking) {
+                    Task { await model.syncNotes() }
+                }
+                ConnectorButton(title: "Add folder", subtitle: "as \(folderDomain.rawValue)", symbol: "folder", disabled: isWorking) {
+                    showingFolderPicker = true
+                }
+            }
+
+            HStack(spacing: 8) {
+                Text("New folders are tagged").font(.caption).foregroundStyle(.secondary)
+                Picker("", selection: $folderDomain) {
+                    ForEach(Domain.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                }
+                .labelsHidden()
+                .frame(width: 130)
+                Text("— a folder is the coarsest honest signal about what is inside it, and the tag decides which questions can ever reach it.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+    }
+}
+
+private struct ConnectorButton: View {
+    let title: String
+    let subtitle: String
+    let symbol: String
+    let disabled: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: symbol).font(.title3).frame(width: 24)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title).font(.callout.weight(.medium))
+                    Text(subtitle).font(.caption2).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(.rect)
+        }
+        .buttonStyle(.bordered)
+        .disabled(disabled)
+    }
+}
+
+/// Embedding coverage, shown as a correctness fact rather than a progress bar. Partial
+/// coverage means the dense retrieval leg literally cannot see the remainder, and a user
+/// who does not know that will read a thin answer as "nothing there".
+private struct EmbeddingPanel: View {
+    @Environment(AppModel.self) private var model
+    let isWorking: Bool
+
+    private var coverage: Double {
+        model.chunkCount > 0 ? Double(model.embeddedCount) / Double(model.chunkCount) : 0
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Semantic index").font(.callout.weight(.medium))
+                    Text(model.embeddingModel ?? "not built").font(.caption2.monospaced()).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Build") { Task { await model.buildEmbeddings() } }
+                    .disabled(isWorking || model.chunkCount == 0)
+            }
+
+            ScoreBar(value: coverage)
+
+            if model.embeddedCount < model.chunkCount {
+                Label(
+                    "\(model.embeddedCount) of \(model.chunkCount) passages embedded. Semantic search cannot see the rest.",
+                    systemImage: "exclamationmark.triangle"
+                )
+                .font(.caption)
+                .foregroundStyle(.orange)
+            } else if model.chunkCount > 0 {
+                Text("\(model.chunkCount) passages indexed, on device.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quaternary.opacity(0.3), in: .rect(cornerRadius: 10))
     }
 }
 

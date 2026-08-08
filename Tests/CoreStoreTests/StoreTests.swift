@@ -15,14 +15,45 @@ private func makeSource() -> Source {
     Source(kind: .github, handle: "tester", displayName: "test", defaultAuthority: .authoredArtifact, defaultDomain: .project)
 }
 
-@Test("migration creates the schema and is idempotent")
+@Test("every migration applies exactly once, however many times migrate() runs")
 func migrationIsIdempotent() async throws {
     let store = try await temporaryStore()
-    try await store.database.migrate()
-    try await store.database.migrate()
 
-    let applied = try await store.database.query("SELECT COUNT(*) AS n FROM schema_migration")
-    #expect(applied.first?.requireInt("n") == 1)
+    // `Store.open` already migrated. Running it twice more must change nothing.
+    let afterFirst = try await store.database.scalarInt("SELECT COUNT(*) FROM schema_migration")
+    try await store.database.migrate()
+    try await store.database.migrate()
+    let afterThird = try await store.database.scalarInt("SELECT COUNT(*) FROM schema_migration")
+
+    #expect(afterFirst == afterThird)
+    #expect(afterThird == Database.schemaVersion)
+
+    // Versions must be contiguous from 1. A gap means a migration silently did not run,
+    // which surfaces much later as a missing table.
+    let versions = try await store.database
+        .query("SELECT version FROM schema_migration ORDER BY version")
+        .map { $0.requireInt("version") }
+    #expect(versions == Array(1...Database.schemaVersion))
+}
+
+@Test("migration 2 tables exist and chunks cascade from their object")
+func chunkSchemaIsWired() async throws {
+    let store = try await temporaryStore()
+    let source = makeSource()
+    try await store.upsert(source)
+
+    let object = CoreObject(
+        sourceID: source.id, kind: .document, externalID: "doc1",
+        title: "doc", text: "some body text", domain: .project, authority: .authoredArtifact
+    )
+    try await store.ingest([object])
+    try await store.save([CoreChunk(objectID: object.id, ordinal: 0, text: "some body text", range: 0..<14)])
+    #expect(try await store.chunkCount() == 1)
+
+    // Deleting the object must take its chunks with it, or a rebuild leaves orphaned
+    // passages that retrieval can still return with no object to cite.
+    try await store.database.execute("DELETE FROM object WHERE id = ?", [.text(object.id.value)])
+    #expect(try await store.chunkCount() == 0)
 }
 
 @Test("re-ingesting unchanged text leaves the row alone")

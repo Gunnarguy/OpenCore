@@ -1,5 +1,6 @@
 import CoreGraph
 import CoreIngest
+import CoreMCP
 import CoreModel
 import CoreReason
 import CoreSearch
@@ -20,15 +21,33 @@ func option(_ name: String) -> String? {
     return arguments[index + 1]
 }
 
-func positional(_ index: Int) -> String? {
-    let values = arguments.filter { !$0.hasPrefix("--") }
-    let skipped = arguments.enumerated().compactMap { offset, value -> String? in
-        guard offset > 0, arguments[offset - 1].hasPrefix("--") else { return nil }
-        return value
+/// All values of a repeatable option, e.g. `--root A --root B`.
+func options(_ name: String) -> [String] {
+    var values: [String] = []
+    for (index, argument) in arguments.enumerated() where argument == "--" + name {
+        if index + 1 < arguments.count { values.append(arguments[index + 1]) }
     }
-    let cleaned = values.filter { !skipped.contains($0) }
+    return values
+}
+
+func positional(_ index: Int) -> String? {
+    var cleaned: [String] = []
+    var skipNext = false
+    for argument in arguments {
+        if skipNext { skipNext = false; continue }
+        if argument.hasPrefix("--") {
+            // Only value-taking options consume the next token.
+            skipNext = !Self_booleanFlags.contains(String(argument.dropFirst(2)))
+            continue
+        }
+        cleaned.append(argument)
+    }
     return index < cleaned.count ? cleaned[index] : nil
 }
+
+let Self_booleanFlags: Set<String> = [
+    "open", "include-forks", "help", "unsafe-expose-sensitive", "no-context", "verbose",
+]
 
 func parseDuration(_ text: String) -> TimeInterval? {
     guard let unit = text.last, let value = Double(text.dropLast()) else { return nil }
@@ -52,37 +71,65 @@ func bar(_ value: Double, width: Int = 20) -> String {
     return String(repeating: "█", count: filled) + String(repeating: "░", count: width - filled)
 }
 
+/// Progress goes to stderr so stdout stays clean for piping, and so `opencore mcp` can
+/// never accidentally contaminate its JSON-RPC stream.
+func progress(_ message: String) {
+    FileHandle.standardError.write(Data(("  " + message + "\n").utf8))
+}
+
 func usage() {
     print("""
     opencore — an evidence-native store for your own digital history
 
-    USAGE
-      opencore doctor                        check the database and credentials
-      opencore sync github [--login NAME]    ingest repositories, commits, READMEs, languages
-                           [--commits N]     commits per repository (default 100)
-                           [--include-forks]
-      opencore search "TEXT"                 hybrid retrieval over objects, with signals
-      opencore ask "QUESTION"                assemble an answer from claims, with a receipt
-      opencore claims [ENTITY]               current claims, optionally for one entity
-      opencore contradictions [--open]       detected conflicts and how they were settled
-      opencore memory log [--since 30d]      belief changes over a window
-      opencore memory checkout YYYY-MM-DD    what OpenCore believed at a past instant
-      opencore receipts [--limit N]          recent answer receipts
+    SOURCES
+      opencore sync github [--login NAME] [--commits N] [--include-forks]
+      opencore sync files --root PATH [--domain project|personal|work|medical|financial]
+                          (repeat --root/--domain in pairs)
+      opencore sync calendar                 Apple Calendar via EventKit
+      opencore sync reminders                Apple Reminders via EventKit
+      opencore sync notes                    Apple Notes via AppleScript
+
+    RETRIEVAL
+      opencore embed [--batch N]             build on-device vectors for every passage
+      opencore search "TEXT"                 object-level hybrid retrieval, signals shown
+      opencore passages "TEXT" [--no-context]  passage retrieval: dense + BM25, RRF, MMR
+      opencore ask "QUESTION"                an answer assembled from claims, with a receipt
+
+    KNOWLEDGE
+      opencore claims [ENTITY]               current claims, observed vs inferred
+      opencore contradictions [--open]       conflicts, and how each was settled
+      opencore memory log [--since 30d]      what it learned or changed its mind about
+      opencore memory checkout YYYY-MM-DD    what it believed on a past date
+      opencore receipts [--limit N]
       opencore trace CODE                    the evidence behind one answer
-      opencore rebuild                       drop derived layers and re-derive from objects
+
+    INFRASTRUCTURE
+      opencore mcp [--unsafe-expose-sensitive]   serve MCP over stdio
+      opencore doctor                            database, credentials, coverage
+      opencore rebuild                           re-derive everything from objects
 
     Objects are the floor. Everything above them is rebuildable.
     """)
 }
 
-// MARK: - Commands
+// MARK: - Shared
 
 func openStore() async throws -> Store {
     let path = option("db").map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }
     return try await Store.open(at: path)
 }
 
-/// Render a claim's object side: an entity's name if it points at one, otherwise its literal.
+/// The embedding provider, or nil with the reason printed. Never fabricates a fallback:
+/// a search that silently ran without its dense leg is not the same search.
+func embedder(quiet: Bool = false) -> (any EmbeddingProvider)? {
+    do {
+        return try NLEmbeddingProvider()
+    } catch {
+        if !quiet { progress("no embedding provider: \(error)") }
+        return nil
+    }
+}
+
 func claimValue(_ claim: CoreClaim, in store: Store) async throws -> String {
     if let objectEntity = claim.objectEntity, let entity = try await store.entity(objectEntity) {
         return entity.canonicalName
@@ -94,19 +141,32 @@ func subjectName(_ claim: CoreClaim, in store: Store) async throws -> String {
     try await store.entity(claim.subject)?.canonicalName ?? String(claim.subject.value.prefix(8))
 }
 
+func report(_ outcome: IngestPipeline.Outcome) {
+    print("objects     \(outcome.ingest.inserted) new, \(outcome.ingest.updated) changed, \(outcome.ingest.unchanged) unchanged")
+    print("chunks      \(outcome.chunks)")
+    print("entities    \(outcome.entities) resolved, \(outcome.aliases) aliases")
+    print("claims      \(outcome.claims) from \(outcome.evidence) evidence spans")
+    print("events      \(outcome.events)")
+    print("beliefs     \(outcome.beliefs) written")
+    print("conflicts   \(outcome.contradictions) found — \(outcome.contradictionsResolved) resolved, \(outcome.contradictionsOpen) left open")
+    if outcome.chunks > 0 {
+        print("\nnext: opencore embed   (passages are indexed lexically; vectors are separate)")
+    }
+}
+
+// MARK: - Doctor
+
 func doctor() async throws {
     let store = try await openStore()
     print("database    \(await store.database.path.path)")
 
     let objects = try await store.objectCount()
-    let claims = try await store.claimCount()
-    let entities = try await store.entities().count
-    let unresolved = try await store.contradictions(unresolvedOnly: true).count
-
+    let chunks = try await store.chunkCount()
     print("objects     \(objects)")
-    print("entities    \(entities)")
-    print("claims      \(claims) current")
-    print("conflicts   \(unresolved) unresolved")
+    print("chunks      \(chunks)")
+    print("entities    \(try await store.entities().count)")
+    print("claims      \(try await store.claimCount()) current")
+    print("conflicts   \(try await store.contradictions(unresolvedOnly: true).count) unresolved")
 
     let sources = try await store.sources()
     if sources.isEmpty {
@@ -114,23 +174,38 @@ func doctor() async throws {
     } else {
         for source in sources {
             let synced = source.lastSyncedAt.map { dateFormatter.string(from: $0) } ?? "never"
-            print("sources     \(source.displayName)  last synced \(synced)")
+            print("sources     \(source.displayName.padding(toLength: 22, withPad: " ", startingAt: 0)) last synced \(synced)")
         }
     }
 
-    if GitHubConnector.resolveToken() != nil {
-        print("github      token available")
+    print(GitHubConnector.resolveToken() != nil
+        ? "github      token available"
+        : "github      NO TOKEN — set GITHUB_TOKEN or run: gh auth login")
+
+    // Embedding coverage. Partial coverage is a correctness problem, not a progress bar:
+    // the dense leg cannot see what it has not embedded.
+    let runs = try await store.embeddingRuns()
+    if runs.isEmpty {
+        print("embeddings  none — run: opencore embed")
     } else {
-        print("github      NO TOKEN — set GITHUB_TOKEN or run: gh auth login")
+        for run in runs {
+            let coverage = chunks > 0 ? Double(run.chunksDone) / Double(chunks) : 0
+            let warning = run.chunksDone < chunks ? "  ⚠ dense retrieval cannot see the remainder" : ""
+            print("embeddings  \(run.model)")
+            print("            \(bar(coverage)) \(run.chunksDone)/\(chunks)\(warning)")
+        }
     }
 
-    if !(try await store.objectCountsByKind()).isEmpty {
+    let kinds = try await store.objectCountsByKind()
+    if !kinds.isEmpty {
         print("\nby kind")
-        for (kind, count) in try await store.objectCountsByKind() {
-            print("  \(kind.rawValue.padding(toLength: 12, withPad: " ", startingAt: 0)) \(count)")
+        for (kind, count) in kinds {
+            print("  \(kind.rawValue.padding(toLength: 14, withPad: " ", startingAt: 0)) \(count)")
         }
     }
 }
+
+// MARK: - Sync
 
 func syncGitHub() async throws {
     guard let token = GitHubConnector.resolveToken(explicit: option("token")) else {
@@ -139,7 +214,6 @@ func syncGitHub() async throws {
 
     var login = option("login")
     if login == nil {
-        // Ask GitHub who the token belongs to rather than making the user repeat it.
         struct User: Decodable { let login: String }
         var request = URLRequest(url: URL(string: "https://api.github.com/user")!)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
@@ -149,45 +223,117 @@ func syncGitHub() async throws {
     }
     guard let login else { throw ConnectorError.missingCredential("could not determine GitHub login; pass --login") }
 
-    let store = try await openStore()
     let connector = GitHubConnector(
         login: login,
         token: token,
         commitsPerRepo: option("commits").flatMap(Int.init) ?? 100,
         includeForks: flag("include-forks")
     )
-    try await store.upsert(connector.source)
+    try await runSync(connector, label: "github:\(login)")
+}
 
-    print("syncing github:\(login)")
-    let started = Date()
-    let batch = try await connector.fetch(since: nil, cursor: nil) { message in
-        FileHandle.standardError.write(Data(("  " + message + "\n").utf8))
+func syncFiles() async throws {
+    let rootPaths = options("root")
+    guard !rootPaths.isEmpty else {
+        print("usage: opencore sync files --root PATH [--domain DOMAIN] [--root PATH --domain DOMAIN ...]")
+        print("\nDomain is per root, because a folder is the coarsest honest signal about")
+        print("what is inside it. A root tagged medical is unreachable from a project query.")
+        exit(1)
     }
 
-    let ingest = try await store.ingest(batch.objects)
-    print("objects     \(ingest.inserted) new, \(ingest.updated) changed, \(ingest.unchanged) unchanged")
+    let domainNames = options("domain")
+    var roots: [FilesystemConnector.Root] = []
+    for (index, path) in rootPaths.enumerated() {
+        let expanded = (path as NSString).expandingTildeInPath
+        let domainName = index < domainNames.count ? domainNames[index] : "personal"
+        guard let domain = Domain(rawValue: domainName) else {
+            print("unknown domain '\(domainName)'. One of: \(Domain.allCases.map(\.rawValue).joined(separator: ", "))")
+            exit(1)
+        }
+        guard FileManager.default.fileExists(atPath: expanded) else {
+            print("no such path: \(expanded)")
+            exit(1)
+        }
+        roots.append(FilesystemConnector.Root(url: URL(fileURLWithPath: expanded), domain: domain))
+    }
 
-    let entities = try await EntityResolver(store: store).resolve(objects: batch.objects)
-    print("entities    \(entities.entities) resolved, \(entities.aliases) aliases")
+    let handle = roots.map { $0.url.lastPathComponent }.joined(separator: "+")
+    try await runSync(FilesystemConnector(handle: handle, roots: roots), label: "files")
+}
 
-    let extraction = try await ClaimExtractor(store: store).extract(from: batch.objects)
-    print("claims      \(extraction.claims) extracted from \(extraction.evidence) evidence spans")
-    print("events      \(extraction.events)")
+func syncApple(_ what: String) async throws {
+    switch what {
+    case "calendar":
+        try await runSync(AppleEventKitConnector(scope: .calendar), label: "Apple Calendar")
+    case "reminders":
+        try await runSync(AppleEventKitConnector(scope: .reminders), label: "Apple Reminders")
+    case "notes":
+        try await runSync(AppleNotesConnector(), label: "Apple Notes")
+    default:
+        print("unknown Apple source: \(what)")
+        exit(1)
+    }
+}
 
-    let reconciled = try await BeliefEngine(store: store).reconcile()
-    print("beliefs     \(reconciled.beliefsWritten) written")
-    print("conflicts   \(reconciled.contradictionsFound) found — \(reconciled.resolved) resolved, \(reconciled.unresolved) left open")
+func runSync(_ connector: any Connector, label: String) async throws {
+    let store = try await openStore()
+    try await store.upsert(connector.source)
 
+    print("syncing \(label)")
+    let started = Date()
+
+    // Incremental where the connector supports it: pick up where the last sync stopped.
+    let since = try await store.sources().first { $0.id == connector.source.id }?.lastSyncedAt
+    if let since { progress("incremental since \(dateFormatter.string(from: since))") }
+
+    let batch = try await connector.fetch(since: since, cursor: nil, log: progress)
+    guard !batch.objects.isEmpty else {
+        print("nothing new")
+        try await store.markSynced(connector.source.id, at: Date(), cursor: batch.cursor)
+        return
+    }
+
+    let outcome = try await IngestPipeline(store: store).run(objects: batch.objects, log: progress)
     try await store.markSynced(connector.source.id, at: Date(), cursor: batch.cursor)
+
+    report(outcome)
     print("\ndone in \(Int(Date().timeIntervalSince(started)))s")
 }
 
+// MARK: - Embed
+
+func embed() async throws {
+    let store = try await openStore()
+    guard let provider = embedder() else {
+        print("No embedding provider available on this system.")
+        exit(1)
+    }
+
+    let total = try await store.chunkCount()
+    guard total > 0 else {
+        print("No chunks to embed. Sync a source first.")
+        return
+    }
+
+    print("model       \(provider.modelIdentifier)")
+    print("dimensions  \(provider.dimensions)")
+    print("chunks      \(total)")
+    print("")
+
+    let started = Date()
+    let added = try await EmbeddingIndexer(store: store, provider: provider)
+        .run(batchSize: option("batch").flatMap(Int.init) ?? 32, log: progress)
+
+    let covered = try await store.embeddedChunkCount(model: provider.modelIdentifier)
+    print("embedded    \(added) new, \(covered)/\(total) covered")
+    print("done in \(Int(Date().timeIntervalSince(started)))s")
+}
+
+// MARK: - Retrieval
+
 func runSearch(_ query: String) async throws {
     let store = try await openStore()
-    let (domain, requested) = AdmissionPolicy.classifyDomain(
-        query,
-        knownEntitySurfaces: try await store.aliasSurfaces()
-    )
+    let (domain, requested) = AdmissionPolicy.classifyDomain(query, knownEntitySurfaces: try await store.aliasSurfaces())
     let policy = AdmissionPolicy(queryDomain: domain, explicitlyRequested: requested)
     let classification = QueryClassifier().classify(query)
 
@@ -202,22 +348,53 @@ func runSearch(_ query: String) async throws {
     print("domains     admitted \(policy.admitted.map(\.rawValue).sorted().joined(separator: ", "))")
     print("            blocked  \(policy.blocked.map(\.rawValue).sorted().joined(separator: ", "))")
     print("searched    \(outcome.objectsSearched) objects → \(outcome.candidatesConsidered) candidates → \(outcome.hits.count) hits")
-    if outcome.blockedByDomain > 0 {
-        print("            \(outcome.blockedByDomain) candidates withheld by domain policy")
-    }
+    if outcome.blockedByDomain > 0 { print("            \(outcome.blockedByDomain) candidates withheld by domain policy") }
     for (signal, reason) in outcome.unavailableSignals.sorted(by: { $0.key < $1.key }) {
         print("unavailable \(signal): \(reason)")
     }
     print("")
 
     for (index, hit) in outcome.hits.enumerated() {
-        let signals = hit.signals
-            .sorted { $0.key < $1.key }
+        let signals = hit.signals.sorted { $0.key < $1.key }
             .map { "\($0.key.prefix(3)) \(String(format: "%.2f", $0.value))" }
             .joined(separator: "  ")
         print("\(String(format: "%2d", index + 1)). \(bar(hit.score)) \(String(format: "%.3f", hit.score))  \(hit.object.title)")
         print("    \(hit.object.kind.rawValue) · \(hit.object.authority.label) · \(signals)")
         if let uri = hit.object.uri, !uri.isEmpty { print("    \(uri)") }
+    }
+}
+
+func runPassages(_ query: String) async throws {
+    let store = try await openStore()
+    let (domain, requested) = AdmissionPolicy.classifyDomain(query, knownEntitySurfaces: try await store.aliasSurfaces())
+    let policy = AdmissionPolicy(queryDomain: domain, explicitlyRequested: requested)
+    let classification = QueryClassifier().classify(query)
+
+    let search = PassageSearch(store: store, embedder: embedder(quiet: true))
+    let outcome = try await search.search(
+        query: query,
+        queryClass: classification.queryClass,
+        policy: policy,
+        limit: option("limit").flatMap(Int.init) ?? 8,
+        expandContext: !flag("no-context")
+    )
+
+    print("class       \(classification.queryClass.rawValue)")
+    print("legs        lexical \(outcome.lexicalCandidates) · dense \(outcome.denseCandidates) → fused \(outcome.afterFusion)")
+    print("timings     " + outcome.stageTimings.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)ms" }.joined(separator: " · "))
+    print("chunks      \(outcome.chunksSearched) searched, \(outcome.blockedByDomain) withheld by domain, \(outcome.droppedByDiversity) dropped by MMR")
+    for (signal, reason) in outcome.unavailableSignals.sorted(by: { $0.key < $1.key }) {
+        print("unavailable \(signal): \(reason)")
+    }
+    print("")
+
+    for (index, hit) in outcome.hits.enumerated() {
+        let legs = hit.ranks.sorted { $0.key < $1.key }.map { "\($0.key)#\($0.value)" }.joined(separator: " ")
+        print("\(String(format: "%2d", index + 1)). \(bar(hit.score / max(0.0001, outcome.hits[0].score))) \(String(format: "%.4f", hit.score))  [\(legs.isEmpty ? "—" : legs)]")
+        print("    \(hit.object.title) · \(hit.object.kind.rawValue) · \(hit.object.authority.label)")
+        print("    \(hit.chunk.text.replacingOccurrences(of: "\n", with: " ").prefix(220))")
+        if hit.context.count > 1 { print("    (+\(hit.context.count - 1) neighbouring passages available)") }
+        print("")
     }
 }
 
@@ -234,8 +411,7 @@ func ask(_ query: String) async throws {
     } else {
         print(answer.summary + "\n")
         for point in answer.points.prefix(12) {
-            let marker = point.derivation == .observed ? "•" : "~"
-            print("\(marker) \(point.statement)")
+            print("\(point.derivation == .observed ? "•" : "~") \(point.statement)")
             print("  confidence \(String(format: "%.2f", point.confidence)) · \(point.authority.label) · \(point.derivation.rawValue)")
             for evidence in point.supporting.prefix(2) {
                 print("  ← \(evidence.snippet.replacingOccurrences(of: "\n", with: " ").prefix(110))")
@@ -280,13 +456,14 @@ func printReceipt(_ receipt: Receipt) {
     print("    trace with: opencore trace \(receipt.shortCode)")
 }
 
+// MARK: - Knowledge
+
 func listClaims(_ entityName: String?) async throws {
     let store = try await openStore()
 
     let claims: [CoreClaim]
     if let entityName {
-        let matches = try await store.resolve(surface: entityName)
-        guard let entity = matches.first?.0 else {
+        guard let entity = try await store.resolve(surface: entityName).first?.0 else {
             print("no entity known as '\(entityName)'")
             return
         }
@@ -299,9 +476,8 @@ func listClaims(_ entityName: String?) async throws {
     for claim in claims {
         let value = try await claimValue(claim, in: store)
         let subject = try await subjectName(claim, in: store)
-        let marker = claim.derivation == .observed ? "•" : "~"
         let validity = claim.validity.validFrom.map { " from \(dateFormatter.string(from: $0))" } ?? ""
-        print("\(marker) \(subject) \(claim.predicate) \(value)")
+        print("\(claim.derivation == .observed ? "•" : "~") \(subject) \(claim.predicate) \(value)")
         print("   conf \(String(format: "%.2f", claim.confidence)) · \(claim.authority.label)\(validity)")
     }
     print("\n\(claims.count) claims  · observed  ~ inferred")
@@ -345,11 +521,9 @@ func memoryLog() async throws {
         guard let claim = try await store.claim(belief.claimID) else { continue }
         let subject = try await subjectName(claim, in: store)
         let value = try await claimValue(claim, in: store)
-        let verb = belief.version == 1 ? "LEARNED" : "UPDATED"
-        print("\(dateFormatter.string(from: belief.decidedAt))  \(verb)  v\(belief.version)")
+        print("\(dateFormatter.string(from: belief.decidedAt))  \(belief.version == 1 ? "LEARNED" : "UPDATED")  v\(belief.version)")
         print("  \(subject) \(claim.predicate) → \(value)")
-        print("  \(belief.reason)")
-        print("")
+        print("  \(belief.reason)\n")
     }
     print("\(beliefs.count) belief change\(beliefs.count == 1 ? "" : "s")")
 }
@@ -417,38 +591,45 @@ func trace(_ code: String) async throws {
     printReceipt(receipt)
 }
 
+// MARK: - Rebuild
+
 func rebuild() async throws {
     let store = try await openStore()
     let objectCount = try await store.objectCount()
     print("re-deriving from \(objectCount) objects (objects themselves are not touched)")
 
-    // Proof that the trust stack holds: everything below `object` is disposable.
-    try await store.database.execute("DELETE FROM claim")
-    try await store.database.execute("DELETE FROM evidence")
-    try await store.database.execute("DELETE FROM contradiction")
-    try await store.database.execute("DELETE FROM belief")
-    try await store.database.execute("DELETE FROM event")
-    try await store.database.execute("DELETE FROM edge")
+    // Proof that the trust stack holds. Vectors go too: they are derived from chunk text,
+    // and a chunk whose boundaries moved has a vector that describes text that no longer
+    // exists. Re-embed with `opencore embed`.
+    for table in ["claim", "evidence", "contradiction", "belief", "event", "edge", "chunk_vector", "chunk", "embedding_run"] {
+        try await store.database.execute("DELETE FROM \(table)")
+    }
 
     var offset = 0
     var all: [CoreObject] = []
     while true {
         let rows = try await store.database.query("SELECT id FROM object LIMIT 500 OFFSET ?", [.integer(Int64(offset))])
         if rows.isEmpty { break }
-        let ids = rows.map { ObjectID($0.requireString("id")) }
-        all.append(contentsOf: try await store.objects(ids: ids))
+        all.append(contentsOf: try await store.objects(ids: rows.map { ObjectID($0.requireString("id")) }))
         offset += 500
     }
 
-    let entities = try await EntityResolver(store: store).resolve(objects: all)
-    let extraction = try await ClaimExtractor(store: store).extract(from: all)
-    let reconciled = try await BeliefEngine(store: store).reconcile()
+    let outcome = try await IngestPipeline(store: store).run(objects: all, storeObjects: false, log: progress)
+    report(outcome)
+}
 
-    print("entities    \(entities.entities)")
-    print("claims      \(extraction.claims)")
-    print("events      \(extraction.events)")
-    print("beliefs     \(reconciled.beliefsWritten)")
-    print("conflicts   \(reconciled.contradictionsFound)")
+// MARK: - MCP
+
+func serveMCP() async throws {
+    let store = try await openStore()
+    let server = MCPServer(
+        store: store,
+        embedder: embedder(quiet: true),
+        // Opt-in, and named to be uncomfortable to type. An MCP client's query text is
+        // written by a model, and a model asking about your diagnosis is not consent.
+        sensitiveDomainsUnlockable: flag("unsafe-expose-sensitive")
+    )
+    await server.run()
 }
 
 // MARK: - Dispatch
@@ -458,11 +639,22 @@ do {
     case "doctor":
         try await doctor()
     case "sync":
-        guard positional(1) == "github" else { print("only `sync github` exists so far"); exit(1) }
-        try await syncGitHub()
+        switch positional(1) {
+        case "github": try await syncGitHub()
+        case "files": try await syncFiles()
+        case "calendar", "reminders", "notes": try await syncApple(positional(1)!)
+        default:
+            print("usage: opencore sync github | files | calendar | reminders | notes")
+            exit(1)
+        }
+    case "embed":
+        try await embed()
     case "search":
         guard let query = positional(1) else { print("usage: opencore search \"TEXT\""); exit(1) }
         try await runSearch(query)
+    case "passages":
+        guard let query = positional(1) else { print("usage: opencore passages \"TEXT\""); exit(1) }
+        try await runPassages(query)
     case "ask":
         guard let query = positional(1) else { print("usage: opencore ask \"QUESTION\""); exit(1) }
         try await ask(query)
@@ -485,6 +677,8 @@ do {
         try await trace(code)
     case "rebuild":
         try await rebuild()
+    case "mcp":
+        try await serveMCP()
     case "help", "--help", "-h", nil:
         usage()
     case let unknown?:

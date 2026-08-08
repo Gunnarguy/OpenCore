@@ -231,8 +231,16 @@ public actor Database {
     private let connection: Connection
     public let path: URL
 
-    /// Current schema version. Bump alongside a new migration.
-    public static let schemaVersion = 1
+    /// Migrations, in application order. Adding one means adding its `.sql` to
+    /// `Resources/` and its filename here. Never renumber or edit a shipped migration:
+    /// a store in the wild has already applied it, and rewriting history in a schema is
+    /// how you get two databases that claim the same version and disagree.
+    static let migrations: [(version: Int, resource: String)] = [
+        (1, "schema"),
+        (2, "migration_002"),
+    ]
+
+    public static var schemaVersion: Int { migrations.map(\.version).max() ?? 0 }
 
     public init(path: URL) throws {
         self.path = path
@@ -257,21 +265,29 @@ public actor Database {
         return base.appendingPathComponent("OpenCore", isDirectory: true).appendingPathComponent("opencore.sqlite3")
     }
 
+    /// Apply every migration this build knows about that the store has not seen.
+    ///
+    /// Migration 1 creates `schema_migration` itself, so it always runs; its statements
+    /// are all `IF NOT EXISTS` and applying it to an existing store is a no-op.
     public func migrate() throws {
-        guard let url = Bundle.module.url(forResource: "schema", withExtension: "sql"),
-              let sql = try? String(contentsOf: url, encoding: .utf8)
-        else { throw StoreError.schemaMissing }
+        for migration in Self.migrations {
+            guard let url = Bundle.module.url(forResource: migration.resource, withExtension: "sql", subdirectory: "Resources")
+                    ?? Bundle.module.url(forResource: migration.resource, withExtension: "sql"),
+                  let sql = try? String(contentsOf: url, encoding: .utf8)
+            else { throw StoreError.schemaMissing }
 
-        try connection.executeScript(sql)
+            if migration.version > 1 {
+                let applied = try connection.query(
+                    "SELECT version FROM schema_migration WHERE version = ?",
+                    [.integer(Int64(migration.version))]
+                )
+                if !applied.isEmpty { continue }
+            }
 
-        let applied = try connection.query(
-            "SELECT version FROM schema_migration WHERE version = ?",
-            [.integer(Int64(Self.schemaVersion))]
-        )
-        if applied.isEmpty {
+            try connection.executeScript(sql)
             try connection.execute(
-                "INSERT INTO schema_migration (version, applied_at) VALUES (?, ?)",
-                [.integer(Int64(Self.schemaVersion)), .real(Date().timeIntervalSince1970)]
+                "INSERT OR IGNORE INTO schema_migration (version, applied_at) VALUES (?, ?)",
+                [.integer(Int64(migration.version)), .real(Date().timeIntervalSince1970)]
             )
         }
     }

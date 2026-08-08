@@ -75,6 +75,8 @@ public struct IngestOutcome: Sendable {
     public var updated: Int = 0
     public var unchanged: Int = 0
 
+    public init() {}
+
     public var total: Int { inserted + updated + unchanged }
 }
 
