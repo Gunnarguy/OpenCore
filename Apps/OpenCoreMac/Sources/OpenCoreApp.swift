@@ -17,22 +17,30 @@ struct OpenCoreApp: App {
 
 enum Section: String, CaseIterable, Identifiable, Hashable {
     case ask = "Ask"
+    case passages = "Passages"
     case claims = "Claims"
     case beliefs = "Beliefs"
+    case timeTravel = "Time travel"
     case contradictions = "Contradictions"
     case receipts = "Receipts"
     case sources = "Sources"
+    case mcp = "MCP"
+    case maintenance = "Maintenance"
 
     var id: String { rawValue }
 
     var symbol: String {
         switch self {
         case .ask: "text.magnifyingglass"
+        case .passages: "doc.text.magnifyingglass"
         case .claims: "list.bullet.rectangle"
-        case .beliefs: "clock.arrow.circlepath"
+        case .beliefs: "checkmark.seal"
+        case .timeTravel: "clock.arrow.circlepath"
         case .contradictions: "exclamationmark.triangle"
-        case .receipts: "doc.text.magnifyingglass"
+        case .receipts: "receipt"
         case .sources: "arrow.triangle.2.circlepath"
+        case .mcp: "powerplug"
+        case .maintenance: "stethoscope"
         }
     }
 }
@@ -53,11 +61,15 @@ struct RootView: View {
         } detail: {
             switch section {
             case .ask: AskView()
+            case .passages: PassagesView()
             case .claims: ClaimsView()
             case .beliefs: BeliefsView()
+            case .timeTravel: TimeTravelView()
             case .contradictions: ContradictionsView()
             case .receipts: ReceiptsView()
             case .sources: SourcesView()
+            case .mcp: MCPSourcesView()
+            case .maintenance: MaintenanceView()
             }
         }
     }

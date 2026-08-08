@@ -82,3 +82,22 @@ per retrieval stage over `PassageSearch`, so the lexical and dense legs can be s
 separately and RRF's contribution measured rather than assumed. Start with 20 hand-written
 question/expected-passage pairs against the existing GitHub corpus; that is enough to detect a
 regression and to answer the first real question — does the dense leg beat BM25 alone here.
+
+---
+
+## Addendum 2026-08-08 14:20 — app parity
+
+The app had fallen far behind the engine. Now wired: **Passages** (PassageSearch with the dense
+leg, RRF and MMR, showing per-leg ranks), **Time travel** (`beliefs(asOfKnowledge:)`), **MCP**
+(discover → tick tools → allowlist → sync), **Maintenance** (diagnostics + rebuild with
+before/after invariant check). App builds; 10 sidebar sections.
+
+**Known rule violation, deliberate and recorded rather than hidden:** `AppModel+Maintenance.swift`
+contains `DELETE FROM <table>` and `SELECT id FROM object LIMIT ... OFFSET ?`, duplicating
+`Sources/opencore/main.swift:611-617`. This breaks `.claude/rules/store.md` ("every SQL string
+lives in CoreStore") and the two copies will drift. **Fix:** add `Store.dropDerivedLayers()`
+and `Store.allObjects(pageSize:)` to `CoreStore`, then delete both inline copies. Small, and it
+should happen before anything else touches rebuild.
+
+**Not verified:** the four new views have been type-checked and the app builds, but none has
+been clicked through against real data.
