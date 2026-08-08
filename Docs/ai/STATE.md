@@ -1,8 +1,8 @@
 # Current State
 
-Updated: 2026-08-08 11:00 PT
+Updated: 2026-08-08 11:30 PT
 Branch/worktree: `main`, primary checkout (not a linked worktree)
-Last verified commit: `95bcd96`
+Last verified commit: `3e02ba6`
 
 ## Objective
 
@@ -25,6 +25,8 @@ has not been started.
   `PassageSearch` with RRF and MMR, filesystem/Calendar/Reminders/Notes connectors,
   `IngestPipeline`, MCP server over stdio, external-caller domain policy.
 - `95bcd96`: roadmap moved to Notion; force multipliers identified.
+- `3e02ba6`: Claude Context OS installed — `Docs/ai/` knowledge plane, four path-scoped rules,
+  three skills, three lifecycle hooks. Tree clean.
 
 ## Active Constraints
 
