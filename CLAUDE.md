@@ -3,7 +3,17 @@
 An evidence-native store for personal history. Swift 6, SwiftPM engine plus an XcodeGen'd
 macOS app. Zero external dependencies, deliberately.
 
-Read `Docs/ARCHITECTURE.md` before changing anything in `CoreGraph` or `CoreStore`.
+## Orientation
+
+- **Read `Docs/ai/STATE.md` at the start of substantive work.** It carries the current
+  objective, last verified state, and the exact next action. It is written to stand without
+  any prior transcript.
+- Load the rest **only when the task needs it**. `Docs/ai/INDEX.md` says which document
+  answers which question. Do not load all project documentation by default.
+- Repository source, tests, and configuration outrank every document here. When a doc and the
+  code disagree, the code is right and the doc is a bug to fix.
+- `Docs/ARCHITECTURE.md` before changing `CoreGraph`, `CoreStore`, or retrieval.
+- **Roadmap truth is the Notion database**, not `Docs/ROADMAP.md`. Ids are in that file.
 
 ## Before your first action
 
@@ -48,20 +58,43 @@ These are the project's whole thesis. A change that breaks one is wrong even if 
 - **Ingest goes through `IngestPipeline`.** Adding a derivation stage anywhere else means
   the CLI, the app, or `rebuild` silently stops performing it.
 
+## Context governance
+
+Route information to one home. Do not duplicate a fact across layers without a reason.
+
+| Information | Goes to |
+|---|---|
+| Repository-wide invariant | this file |
+| Path-specific requirement | `.claude/rules/` |
+| Repeatable procedure | `.claude/skills/` |
+| Current objective, verified state, next action | `Docs/ai/STATE.md` |
+| Stable scope and constraints | `Docs/ai/PROJECT.md` |
+| Rationale that code cannot show | `Docs/ai/DECISIONS.md` |
+| Verified operational command | `Docs/ai/RUNBOOK.md` |
+| System structure | `Docs/ARCHITECTURE.md` |
+| Recurring learned quirk | auto memory |
+| Broad exploration whose intermediate output is not needed | isolated subagent |
+| Ephemeral reasoning | this conversation only |
+
+Remove stale or contradictory context when you find it rather than adding a correction beside
+it. `Docs/ai/DECISIONS.md` is append-only; everything else is maintained in place.
+
 ## Documentation discipline
 
 - Every claim in `Docs/` carries `[measured]`, `[test]`, `[source]` or `[design]`. Do not
   upgrade a label without actually doing the thing.
 - The README's "What is not true yet" section is not a disclaimer to trim. It is the point.
   Add to it when you find a new limitation.
-- Never quote an accuracy number. None has been measured. When one exists it comes from the
-  eval harness in `Docs/ROADMAP.md` v0.2 and it carries its corpus and date.
+- Never quote an accuracy number. None has been measured. When one exists it will come from
+  the eval harness (Notion, v0.3) and will carry its corpus and date.
 - A bug found and fixed gets a regression test that names the original failure in a comment.
   See the OpenClinic domain-classification test for the pattern.
+- `RUNBOOK.md` marks commands verified or unverified. Do not promote one without running it.
 
 ## Commands
 
-Verified in this repository:
+The two needed every session. Everything else, including app builds and recovery procedures,
+is in `Docs/ai/RUNBOOK.md` with its verification status.
 
 ```bash
 DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer swift build --scratch-path /private/tmp/opencore-build
@@ -71,25 +104,19 @@ DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer swift build --scra
 DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer swift test --scratch-path /private/tmp/opencore-build
 ```
 
-```bash
-cd Apps/OpenCoreMac && xcodegen generate
-```
-
-```bash
-DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcodebuild -project Apps/OpenCoreMac/OpenCore.xcodeproj -scheme OpenCore -derivedDataPath /private/tmp/opencore-app-dd -destination 'platform=macOS,arch=arm64' CODE_SIGN_IDENTITY=- build
-```
-
 The built CLI lands at `/private/tmp/opencore-build/out/Products/Debug/opencore`, not
 `.build/debug/`, when using `--scratch-path`.
 
-`gh repo create --source=.` fails here: `gh` does not follow the `.git` gitdir pointer and
-reports "not a git repository". Create the repo by name and add the remote by hand.
+## Verification and handoff
 
-Exercise the MCP server without a client:
-
-```bash
-echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | /private/tmp/opencore-build/out/Products/Debug/opencore mcp 2>/dev/null
-```
+- Verify material changes with the actual build and test commands before claiming completion.
+  Never report a command passed unless you ran it and read the output.
+- Before ending substantial unfinished work, and after any change of objective, update
+  `Docs/ai/STATE.md` so a fresh session can continue **without this transcript**. The
+  `project-handoff` skill does this.
+- Prefer an isolated Explore subagent for broad repository research whose intermediate output
+  is not needed in the main context. `project-orient` wraps that.
+- Use separate git worktrees for parallel write-capable sessions in this checkout.
 
 ## Working style
 
