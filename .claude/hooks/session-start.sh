@@ -36,14 +36,18 @@ if [ ! -f "$STATE" ]; then
   exit 0
 fi
 
-# Staleness: does the commit STATE was written against still exist in history, and how far
-# behind is it? A large gap means the handoff describes a repository that has moved on.
+# Staleness.
+#
+# Counts only commits since the recorded one that touched SOURCE. Counting all commits is
+# wrong and self-defeating: writing the handoff is itself a commit, so STATE can never name
+# the commit that contains it and the warning would fire permanently. What matters is whether
+# the code moved on without the handoff, not whether HEAD advanced at all.
 RECORDED=$(sed -n 's/^Last verified commit:[[:space:]]*`\{0,1\}\([0-9a-f]\{7,40\}\)`\{0,1\}.*/\1/p' "$STATE" | head -1)
 if [ -n "$RECORDED" ]; then
   if git cat-file -e "${RECORDED}^{commit}" 2>/dev/null; then
-    BEHIND=$(git rev-list --count "${RECORDED}..HEAD" 2>/dev/null || echo 0)
+    BEHIND=$(git rev-list --count "${RECORDED}..HEAD" -- Sources Tests Apps Package.swift 2>/dev/null || echo 0)
     if [ "${BEHIND:-0}" -gt 0 ]; then
-      echo "WARNING: STATE.md was written at ${RECORDED}, HEAD is ${BEHIND} commit(s) ahead. Treat it as possibly stale."
+      echo "WARNING: ${BEHIND} source commit(s) since STATE.md was written at ${RECORDED}. Treat it as possibly stale."
     fi
   else
     echo "WARNING: STATE.md references commit ${RECORDED}, which is not in this history."
