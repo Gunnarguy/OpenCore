@@ -33,13 +33,45 @@ public struct GitHubConnector: Connector {
     }
 
     /// Resolve a token without ever storing one in the repo.
-    /// Order: explicit argument, `GITHUB_TOKEN`, then the already-authenticated `gh` CLI.
+    ///
+    /// Order: explicit argument, `GITHUB_TOKEN`, the keychain, then the already-authenticated
+    /// `gh` CLI. The environment beats the keychain deliberately, so a one-off
+    /// `GITHUB_TOKEN=... opencore sync github` overrides a saved token without having to
+    /// change the saved one.
+    ///
+    /// The keychain entry is what makes the **app** work. Launched from Finder it inherits no
+    /// shell environment, and a sandboxed or differently-pathed process may not find `gh`
+    /// either, so before this the app had no way to authenticate at all.
     public static func resolveToken(explicit: String? = nil) -> String? {
-        if let explicit, !explicit.isEmpty { return explicit }
+        resolveTokenWithSource(explicit: explicit).token
+    }
+
+    /// The same resolution, reporting which source won.
+    ///
+    /// The UI shows this. Four sources with a precedence order and no way to see which one is
+    /// in effect makes "why is it still using the old token" unanswerable.
+    public static func resolveTokenWithSource(explicit: String? = nil) -> (token: String?, source: CredentialSource) {
+        if let explicit, !explicit.isEmpty { return (explicit, .explicit) }
         if let fromEnvironment = ProcessInfo.processInfo.environment["GITHUB_TOKEN"], !fromEnvironment.isEmpty {
-            return fromEnvironment
+            return (fromEnvironment, .environment)
         }
-        return ghCLIToken()
+        if let fromKeychain = Keychain.read(.githubToken) { return (fromKeychain, .keychain) }
+        if let fromCLI = ghCLIToken() { return (fromCLI, .ghCLI) }
+        return (nil, .none)
+    }
+
+    /// Ask GitHub who a token belongs to. Used to confirm a saved token actually works, so the
+    /// Settings screen can say "authenticated as X" rather than "saved" — saved and valid are
+    /// different facts and only one of them is useful.
+    public static func verify(token: String) async -> String? {
+        struct User: Decodable { let login: String }
+        var request = URLRequest(url: URL(string: "https://api.github.com/user")!)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("OpenCore", forHTTPHeaderField: "User-Agent")
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200
+        else { return nil }
+        return (try? JSONDecoder().decode(User.self, from: data))?.login
     }
 
     private static func ghCLIToken() -> String? {

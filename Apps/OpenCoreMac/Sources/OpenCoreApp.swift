@@ -26,6 +26,7 @@ enum Section: String, CaseIterable, Identifiable, Hashable {
     case sources = "Sources"
     case mcp = "MCP"
     case maintenance = "Maintenance"
+    case settings = "Settings"
 
     var id: String { rawValue }
 
@@ -41,6 +42,7 @@ enum Section: String, CaseIterable, Identifiable, Hashable {
         case .sources: "arrow.triangle.2.circlepath"
         case .mcp: "powerplug"
         case .maintenance: "stethoscope"
+        case .settings: "gearshape"
         }
     }
 }
@@ -70,6 +72,7 @@ struct RootView: View {
             case .sources: SourcesView()
             case .mcp: MCPSourcesView()
             case .maintenance: MaintenanceView()
+            case .settings: SettingsView()
             }
         }
     }

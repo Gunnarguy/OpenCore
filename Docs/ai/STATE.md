@@ -99,5 +99,12 @@ lives in CoreStore") and the two copies will drift. **Fix:** add `Store.dropDeri
 and `Store.allObjects(pageSize:)` to `CoreStore`, then delete both inline copies. Small, and it
 should happen before anything else touches rebuild.
 
-**Not verified:** the four new views have been type-checked and the app builds, but none has
-been clicked through against real data.
+**Settings tab added.** The app had no way to enter a GitHub token: it resolved only from
+`GITHUB_TOKEN` or the `gh` CLI, and launched from Finder it inherits neither. Now
+`Keychain.swift` in CoreIngest stores it, `resolveTokenWithSource` reports which of the four
+sources won, and Settings verifies against the API before saving so "saved" and "works" are
+not confused. Credentials stay out of the store, per the connectors rule.
+
+**Not verified:** the five new views type-check and the app builds, but none has been clicked
+through against real data. The Settings token round-trip in particular (save, quit, relaunch,
+sync) has not been exercised.

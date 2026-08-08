@@ -30,6 +30,8 @@ final class AppModel {
     var openContradictionCount = 0
     var sources: [Source] = []
     var countsByKind: [(ObjectKind, Int)] = []
+    /// Shown in Settings so it is obvious the app and the CLI share one file.
+    var storePath: String?
 
     // Browsing
     var claims: [ClaimRow] = []
@@ -75,7 +77,9 @@ final class AppModel {
     func start() async {
         state = .working("opening store")
         do {
-            store = try await Store.open()
+            let opened = try await Store.open()
+            store = opened
+            storePath = await opened.database.path.path
             await refresh()
             state = .idle
         } catch {
