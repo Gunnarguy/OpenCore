@@ -1,0 +1,62 @@
+name: OpenCore
+options:
+  bundleIdPrefix: com.gunndamental
+  deploymentTarget:
+    macOS: "15.0"
+  createIntermediateGroups: true
+  # DerivedData must live outside ~/Documents: iCloud stamps extended attributes on
+  # build inputs there and codesign rejects them. This repo is in ~/Documents/GitHub.
+  defaultConfig: Debug
+
+packages:
+  OpenCore:
+    path: ../..
+
+targets:
+  OpenCore:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources
+      - path: Resources
+        buildPhase: resources
+        optional: true
+    dependencies:
+      - package: OpenCore
+        product: OpenCoreKit
+    info:
+      path: Generated/Info.plist
+      properties:
+        CFBundleDisplayName: OpenCore
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        LSMinimumSystemVersion: "15.0"
+        NSHumanReadableCopyright: "© 2026 Gunnar Hostetler"
+    entitlements:
+      path: Generated/OpenCore.entitlements
+      properties:
+        # Sandbox is OFF for v0.1, deliberately, and this is the tradeoff:
+        #
+        # Sandboxed, `Store.defaultPath()` resolves inside the app container, so the app
+        # and the `opencore` CLI would quietly maintain two separate databases that look
+        # identical and never agree. For a tool whose entire claim is that you can inspect
+        # what it knows, two divergent stores is the worst possible failure.
+        #
+        # The sandbox also blocks shelling out to `gh auth token`, which is how the
+        # GitHub connector avoids asking you to paste a credential.
+        #
+        # Turning this back on is one line plus a security-scoped bookmark to a shared
+        # store location. That is the right move before any distribution, and it is
+        # tracked in Docs/ROADMAP.md rather than left as a surprise.
+        com.apple.security.app-sandbox: false
+        com.apple.security.network.client: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.gunndamental.OpenCore
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_STYLE: Automatic
+        GENERATE_INFOPLIST_FILE: NO
