@@ -113,6 +113,8 @@ func usage() {
       opencore mcp [--unsafe-expose-sensitive]   serve MCP over stdio
       opencore doctor                            database, credentials, coverage
       opencore rebuild                           re-derive everything from objects
+      opencore export [--format jsonl|markdown] [--to DIR]
+                                                 everything back out, in a format you own
 
     Objects are the floor. Everything above them is rebuildable.
     """)
@@ -624,6 +626,35 @@ func rebuild() async throws {
     report(outcome)
 }
 
+// MARK: - Export
+
+func exportStore() async throws {
+    let store = try await openStore()
+    let name = option("format") ?? "jsonl"
+    guard let format = Exporter.Format(rawValue: name) else {
+        print("unknown format '\(name)'. One of: \(Exporter.Format.allCases.map(\.rawValue).joined(separator: ", "))")
+        exit(1)
+    }
+
+    let directory: URL
+    if let path = option("to") {
+        directory = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+    } else {
+        let stamp = dateFormatter.string(from: Date())
+        directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("opencore-export-\(stamp)", isDirectory: true)
+    }
+
+    print("exporting as \(format.rawValue)")
+    let outcome = try await Exporter(store: store).export(to: directory, format: format, log: progress)
+
+    for file in outcome.files.sorted(by: { $0.name < $1.name }) {
+        print("  \(file.name.padding(toLength: 26, withPad: " ", startingAt: 0)) \(file.rows) rows, \(file.bytes / 1024)KB")
+    }
+    print("\n\(outcome.files.count) file(s), \(outcome.totalBytes / 1024)KB total")
+    print(outcome.directory.path)
+}
+
 // MARK: - MCP
 
 func serveMCP() async throws {
@@ -698,6 +729,8 @@ do {
         try await trace(code)
     case "rebuild":
         try await rebuild()
+    case "export":
+        try await exportStore()
     case "mcp":
         try await serveMCP()
     case "help", "--help", "-h", nil:

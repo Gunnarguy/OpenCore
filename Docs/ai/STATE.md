@@ -105,6 +105,15 @@ should happen before anything else touches rebuild.
 sources won, and Settings verifies against the API before saving so "saved" and "works" are
 not confused. Credentials stay out of the store, per the connectors rule.
 
-**Not verified:** the five new views type-check and the app builds, but none has been clicked
-through against real data. The Settings token round-trip in particular (save, quit, relaunch,
-sync) has not been exercised.
+**Settings is now real**, not one text field: GitHub credential with source precedence shown,
+retrieval tuning (`RetrievalTuning` threaded through `PassageSearch` so the constants are data,
+not `static let`), chunking with a dirty warning, the domain firewall matrix, the MCP server
+config snippet, sync parameters, and **export**. Export was a stated project principle with no
+implementation until now: `Exporter` in CoreStore writes JSONL (archival, one file per table,
+re-importable) or Markdown (readable, lossy), and `opencore export` does the same.
+
+**Calendar sync is no longer an unknown** — it has run against real data. See `doctor`.
+
+**Not verified:** none of the six new views has been clicked through. The Settings token
+round-trip (save, quit, relaunch, sync) and the MCP discover→tick→sync flow are both
+unexercised.

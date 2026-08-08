@@ -38,23 +38,57 @@ public struct PassageOutcome: Sendable {
 /// -1...1, so any attempt to blend the raw values requires inventing a normalisation, and
 /// the invented constant ends up doing more work than either retriever. Ranks are
 /// comparable by construction.
+/// The knobs.
+///
+/// Every value here is **chosen, not measured**, and they are gathered into one type for two
+/// reasons. First, so the honesty is in one place rather than scattered across comments.
+/// Second, so they can be varied: an eval harness sweeping these, or a laboratory comparing
+/// two configurations side by side, both need them to be data rather than constants.
+///
+/// Changing any of these invalidates nothing on disk. Chunking parameters are the exception
+/// and live on `Chunker`, because changing those requires re-chunking and re-embedding.
+public struct RetrievalTuning: Sendable, Hashable, Codable {
+    /// RRF damping. 60 is the value from the original Cormack et al. formulation, used
+    /// unchanged because nothing here has measured an alternative. It controls how quickly
+    /// rank advantage decays: higher means a top-1 hit in one leg matters less relative to
+    /// appearing in both.
+    public var rrfK: Double
+
+    /// MMR trade-off. Higher keeps relevance dominant; lower penalises a result that says the
+    /// same thing as one already selected. At 1.0 MMR is off entirely.
+    public var mmrLambda: Double
+
+    /// How many candidates each leg contributes before fusion. Raising it costs a linear scan
+    /// on the dense side and finds more of the tail.
+    public var candidatesPerLeg: Int
+
+    /// Scaling applied to the authority and recency terms so they do not swamp RRF output,
+    /// which is small (~0.03). Arbitrary, and the most obviously unprincipled number here.
+    public var signalScale: Double
+
+    public static let `default` = RetrievalTuning(rrfK: 60, mmrLambda: 0.7, candidatesPerLeg: 100, signalScale: 0.02)
+
+    public init(rrfK: Double, mmrLambda: Double, candidatesPerLeg: Int, signalScale: Double) {
+        self.rrfK = rrfK
+        self.mmrLambda = mmrLambda
+        self.candidatesPerLeg = candidatesPerLeg
+        self.signalScale = signalScale
+    }
+
+    /// True when every value still matches the shipped default, so a UI can say whether what
+    /// you are looking at is the baseline or something you changed.
+    public var isDefault: Bool { self == .default }
+}
+
 public struct PassageSearch: Sendable {
     private let store: Store
     private let embedder: (any EmbeddingProvider)?
+    public let tuning: RetrievalTuning
 
-    /// RRF damping. 60 is the value from the original Cormack et al. formulation and is
-    /// used unchanged here because nothing in this repo has measured an alternative.
-    /// It controls how quickly rank advantage decays: higher means a top-1 hit in one leg
-    /// matters less relative to appearing in both.
-    public static let rrfK = 60.0
-
-    /// MMR trade-off. 0.7 keeps relevance dominant while still penalising a result that
-    /// says the same thing as one already selected. Chosen, not measured.
-    public static let mmrLambda = 0.7
-
-    public init(store: Store, embedder: (any EmbeddingProvider)? = nil) {
+    public init(store: Store, embedder: (any EmbeddingProvider)? = nil, tuning: RetrievalTuning = .default) {
         self.store = store
         self.embedder = embedder
+        self.tuning = tuning
     }
 
     public func search(
@@ -62,7 +96,7 @@ public struct PassageSearch: Sendable {
         queryClass: QueryClass,
         policy: AdmissionPolicy,
         limit: Int = 12,
-        candidatesPerLeg: Int = 100,
+        candidatesPerLeg: Int? = nil,
         expandContext: Bool = true
     ) async throws -> PassageOutcome {
         var unavailable: [String: String] = [:]
@@ -73,7 +107,8 @@ public struct PassageSearch: Sendable {
         // ---- Leg 1: lexical ----
         let lexicalStart = DispatchTime.now().uptimeNanoseconds
         let match = HybridSearch.ftsQuery(from: query)
-        let lexical = try await store.lexicalChunks(match: match, limit: candidatesPerLeg)
+        let perLeg = candidatesPerLeg ?? tuning.candidatesPerLeg
+        let lexical = try await store.lexicalChunks(match: match, limit: perLeg)
         timings["lexical"] = elapsed(since: lexicalStart)
 
         // ---- Leg 2: dense ----
@@ -88,7 +123,7 @@ public struct PassageSearch: Sendable {
                 if vector.isEmpty {
                     unavailable["semantic"] = "query produced no embedding"
                 } else {
-                    dense = try await store.denseChunks(query: vector, model: embedder.modelIdentifier, limit: candidatesPerLeg)
+                    dense = try await store.denseChunks(query: vector, model: embedder.modelIdentifier, limit: perLeg)
                     if embedded < chunksSearched {
                         // Partial coverage is a correctness problem masquerading as a
                         // performance one: the dense leg silently cannot see the
@@ -110,7 +145,7 @@ public struct PassageSearch: Sendable {
         func absorb(_ candidates: [ChunkCandidate], leg: String) {
             for (index, candidate) in candidates.enumerated() {
                 let rank = index + 1
-                let contribution = 1.0 / (Self.rrfK + Double(rank))
+                let contribution = 1.0 / (tuning.rrfK + Double(rank))
                 if var existing = fused[candidate.chunk.id] {
                     existing.score += contribution
                     existing.ranks[leg] = rank
@@ -155,7 +190,7 @@ public struct PassageSearch: Sendable {
             // rather than swamping it. This scaling is arbitrary and is flagged as such
             // in Docs/RETRIEVAL.md; it is exactly the kind of constant the eval harness
             // exists to replace.
-            hit.score += (weights.authority * authority + weights.temporal * temporal) * 0.02
+            hit.score += (weights.authority * authority + weights.temporal * temporal) * tuning.signalScale
             return hit
         }
         scored.sort { $0.score > $1.score }
@@ -219,7 +254,7 @@ public struct PassageSearch: Sendable {
                 for tokens in selectedTokens {
                     maximumSimilarity = max(maximumSimilarity, Self.jaccard(tokenSets[index], tokens))
                 }
-                let value = Self.mmrLambda * relevance - (1 - Self.mmrLambda) * maximumSimilarity * relevanceScale(pool)
+                let value = tuning.mmrLambda * relevance - (1 - tuning.mmrLambda) * maximumSimilarity * relevanceScale(pool)
                 if value > bestValue {
                     bestValue = value
                     bestIndex = index

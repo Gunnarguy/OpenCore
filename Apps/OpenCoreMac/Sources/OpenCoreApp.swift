@@ -8,6 +8,7 @@ struct OpenCoreApp: App {
         WindowGroup {
             RootView()
                 .environment(model)
+                .environment(model.settings)
                 .task { await model.start() }
                 .frame(minWidth: 900, minHeight: 600)
         }

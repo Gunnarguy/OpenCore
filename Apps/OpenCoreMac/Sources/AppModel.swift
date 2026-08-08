@@ -21,6 +21,8 @@ final class AppModel {
     }
 
     private(set) var store: Store?
+    /// Owned here so there is one instance, injected into the environment by OpenCoreApp.
+    let settings = AppSettings()
     var state: LoadState = .idle
 
     // Overview
@@ -129,13 +131,13 @@ final class AppModel {
                 state = .failed("Could not resolve the GitHub account for this token.")
                 return
             }
-            await sync(GitHubConnector(login: login, token: token, commitsPerRepo: 100), label: "github:\(login)")
+            await sync(GitHubConnector(login: login, token: token, commitsPerRepo: settings.githubCommitsPerRepo, includeForks: settings.githubIncludeForks), label: "github:\(login)")
         } catch {
             state = .failed("\(error)")
         }
     }
 
-    func syncCalendar() async { await sync(AppleEventKitConnector(scope: .calendar), label: "Calendar") }
+    func syncCalendar() async { await sync(AppleEventKitConnector(scope: .calendar, lookBackDays: settings.calendarLookBackDays, lookAheadDays: settings.calendarLookAheadDays), label: "Calendar") }
     func syncReminders() async { await sync(AppleEventKitConnector(scope: .reminders), label: "Reminders") }
     func syncNotes() async { await sync(AppleNotesConnector(), label: "Notes") }
 
@@ -166,7 +168,7 @@ final class AppModel {
             }
 
             state = .working("deriving from \(batch.objects.count) objects")
-            _ = try await IngestPipeline(store: store).run(objects: batch.objects)
+            _ = try await IngestPipeline(store: store, chunker: settings.chunker).run(objects: batch.objects)
             try await store.markSynced(connector.source.id, at: Date(), cursor: batch.cursor)
 
             await refresh()

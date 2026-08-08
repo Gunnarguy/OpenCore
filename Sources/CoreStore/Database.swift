@@ -101,6 +101,26 @@ public struct Row: Sendable {
     public func requireDate(_ name: String) -> Date {
         Date(timeIntervalSince1970: requireDouble(name))
     }
+
+    /// Every column as a JSON-serialisable dictionary, for export.
+    ///
+    /// Blobs become base64 rather than being dropped, so a round-trip is genuinely lossless.
+    /// The only blob column in the schema is `chunk_vector.vector`, which export skips for
+    /// size reasons, but the encoding is here so a future blob column does not silently
+    /// vanish from exports.
+    public func jsonObject() -> [String: Any] {
+        var result: [String: Any] = [:]
+        for (name, value) in columns {
+            switch value {
+            case .null: result[name] = NSNull()
+            case .integer(let number): result[name] = number
+            case .real(let number): result[name] = number
+            case .text(let string): result[name] = string
+            case .blob(let data): result[name] = data.base64EncodedString()
+            }
+        }
+        return result
+    }
 }
 
 // MARK: - Connection
