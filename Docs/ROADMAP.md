@@ -1,8 +1,30 @@
 # OpenCore Roadmap
 
+> **Roadmap truth is the Notion database, not this file.** This is the readable summary;
+> Notion is what gets updated first and carries per-row evidence levels and leverage
+> classification.
+>
+> Database `7dc3bd42-1933-4d25-847a-5bc98acac3fc`,
+> data source `546d4b56-a91a-4324-92e7-738c9637d8d0` (query tools take the data source id).
+
 Ordered by what unblocks what, not by what sounds best.
 
 Status: `todo` · `doing` · `done` · `dropped`
+
+## The two force multipliers
+
+Out of everything unbuilt, exactly two items collapse large parts of the rest. Build these
+before anything they unblock, however tempting the alternative looks:
+
+1. **MCP client.** One `MCPConnector` conforming to the existing `Connector` protocol turns
+   the whole MCP ecosystem into OpenCore sources. The official registry passed 9,652 servers
+   in May 2026. Writing connectors one at a time is volume work this makes unnecessary.
+2. **Eval harness.** Every retrieval constant in this repo is chosen rather than measured,
+   and v0.2 added more of them than v0.1 had.
+
+A third arrives for free from Apple rather than from us: the WWDC26 `LanguageModel` protocol
+is the model-agnostic abstraction this project was going to have to invent, so on-device,
+PCC, Core AI, MLX, Claude and Gemini become one conformance instead of six integrations.
 
 ---
 
