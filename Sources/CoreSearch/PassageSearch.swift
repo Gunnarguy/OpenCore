@@ -66,13 +66,84 @@ public struct RetrievalTuning: Sendable, Hashable, Codable {
     /// which is small (~0.03). Arbitrary, and the most obviously unprincipled number here.
     public var signalScale: Double
 
-    public static let `default` = RetrievalTuning(rrfK: 60, mmrLambda: 0.7, candidatesPerLeg: 100, signalScale: 0.02)
+    /// Per-leg multipliers on the RRF contribution.
+    ///
+    /// Textbook RRF has no such thing: every leg contributes `1/(k+rank)` and the method's
+    /// appeal is that it needs no per-retriever calibration. That assumes the legs are
+    /// *independently informative*, so agreement between them is evidence.
+    ///
+    /// Measured on this corpus 2026-08-09, that assumption is false and expensive. The dense
+    /// leg scores nDCG@6 0.059 while lexical scores 0.420, and fusing them at equal weight
+    /// produces 0.073: worse than either the good leg alone or, arithmetically, than ignoring
+    /// the bad one. A leg that is close to noise still earns full RRF credit, and where its
+    /// noise happens to coincide with the lexical leg's tail, the pair outranks whatever
+    /// lexical put first.
+    ///
+    /// Both default to 1.0, which is exactly the previous behaviour, so this changes nothing
+    /// until someone sets them. They are here to be swept by `opencore eval` rather than
+    /// argued about.
+    public var lexicalWeight: Double
+    public var denseWeight: Double
 
-    public init(rrfK: Double, mmrLambda: Double, candidatesPerLeg: Int, signalScale: Double) {
+    /// The first defaults in this project chosen by measurement rather than by taste.
+    ///
+    /// `denseWeight: 0` and `mmrLambda: 0.85` come from `opencore eval` on 2026-08-09, 20
+    /// cases, nDCG@6 of the fused output:
+    ///
+    /// | denseWeight | mmrLambda 0.7 | mmrLambda 0.85 |
+    /// |---|---|---|
+    /// | 1.0 | 0.073 | 0.073 |
+    /// | 0.5 | 0.136 | 0.140 |
+    /// | 0.25 | 0.235 | 0.242 |
+    /// | **0.0** | 0.417 | **0.422** |
+    ///
+    /// Monotonic, and the effect is enormous: the dense leg at equal weight was destroying
+    /// 83% of the achievable score. At `denseWeight: 0` the pipeline finally beats its own
+    /// lexical leg (0.422 against 0.420) instead of scoring a sixth of it.
+    ///
+    /// **This is a measured disable, not a deletion, and it is loud.** `search` reports the
+    /// dense leg as unavailable-by-tuning so no query silently runs half a retriever. It
+    /// should be reverted the day the embedding question is settled: `NLContextualEmbedding`
+    /// is a mean-pooled token model and was never trained for asymmetric query-to-document
+    /// retrieval, which is the leading hypothesis for why it scores 0.059 alone.
+    ///
+    /// `rrfK` and `signalScale` keep their chosen values. `signalScale` was swept over
+    /// 0.02 / 0.005 / 0 and measured **inert**: identical nDCG at every value. The comment
+    /// calling it the most unprincipled number here was right, and it turns out to be doing
+    /// nothing at all, which is a separate thing to fix rather than tune.
+    public static let `default` = RetrievalTuning(
+        rrfK: 60, mmrLambda: 0.85, candidatesPerLeg: 100, signalScale: 0.02,
+        lexicalWeight: 1.0, denseWeight: 0.0
+    )
+
+    public init(
+        rrfK: Double,
+        mmrLambda: Double,
+        candidatesPerLeg: Int,
+        signalScale: Double,
+        lexicalWeight: Double = 1.0,
+        denseWeight: Double = 1.0
+    ) {
         self.rrfK = rrfK
         self.mmrLambda = mmrLambda
         self.candidatesPerLeg = candidatesPerLeg
         self.signalScale = signalScale
+        self.lexicalWeight = lexicalWeight
+        self.denseWeight = denseWeight
+    }
+
+    /// Decoded by hand so a store or a settings blob written before the leg weights existed
+    /// still loads. Synthesised `Decodable` requires every key, and a settings file that
+    /// silently fails to decode falls back to defaults, which would look like the user's
+    /// tuning being ignored at random.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        rrfK = try container.decode(Double.self, forKey: .rrfK)
+        mmrLambda = try container.decode(Double.self, forKey: .mmrLambda)
+        candidatesPerLeg = try container.decode(Int.self, forKey: .candidatesPerLeg)
+        signalScale = try container.decode(Double.self, forKey: .signalScale)
+        lexicalWeight = try container.decodeIfPresent(Double.self, forKey: .lexicalWeight) ?? 1.0
+        denseWeight = try container.decodeIfPresent(Double.self, forKey: .denseWeight) ?? 1.0
     }
 
     /// True when every value still matches the shipped default, so a UI can say whether what
@@ -136,16 +207,23 @@ public struct PassageSearch: Sendable {
         } else {
             unavailable["semantic"] = "no embedding provider configured; lexical carries this query alone"
         }
+        // A leg switched off by tuning must be as visible as one that failed. Silently
+        // running half a retriever is the failure `rebuild` dropping every vector already
+        // demonstrated, and a deliberate disable does not get to be quieter than an accident.
+        if tuning.denseWeight == 0 {
+            unavailable["semantic-disabled"] = "dense leg weighted to 0; measured 2026-08-09 as net-harmful on this corpus (fused nDCG 0.073 at weight 1.0 against 0.422 at 0)"
+        }
         timings["dense"] = elapsed(since: denseStart)
 
         // ---- Fuse by rank ----
         let fuseStart = DispatchTime.now().uptimeNanoseconds
         var fused: [ChunkID: PassageHit] = [:]
 
-        func absorb(_ candidates: [ChunkCandidate], leg: String) {
+        func absorb(_ candidates: [ChunkCandidate], leg: String, weight: Double) {
+            guard weight > 0 else { return }
             for (index, candidate) in candidates.enumerated() {
                 let rank = index + 1
-                let contribution = 1.0 / (tuning.rrfK + Double(rank))
+                let contribution = weight / (tuning.rrfK + Double(rank))
                 if var existing = fused[candidate.chunk.id] {
                     existing.score += contribution
                     existing.ranks[leg] = rank
@@ -164,8 +242,8 @@ public struct PassageSearch: Sendable {
             }
         }
 
-        absorb(lexical, leg: "lexical")
-        absorb(dense, leg: "dense")
+        absorb(lexical, leg: "lexical", weight: tuning.lexicalWeight)
+        absorb(dense, leg: "dense", weight: tuning.denseWeight)
         timings["fuse"] = elapsed(since: fuseStart)
 
         // ---- Domain admission, before any further ranking ----
@@ -222,6 +300,89 @@ public struct PassageSearch: Sendable {
         )
     }
 
+    // MARK: - Per-leg rankings, for evaluation
+
+    /// Each leg's ranked objects, independently, alongside the real pipeline's output.
+    ///
+    /// `search` cannot answer this. By the time it returns, the two legs have been fused,
+    /// filtered by domain, re-scored by authority and recency, diversified by MMR and cut to
+    /// `limit`, so a leg's own ranking is no longer recoverable from `PassageHit.ranks`:
+    /// anything a leg ranked which did not survive is simply absent.
+    ///
+    /// Ranked by **object**, not by chunk, and deduplicated keeping the best rank. Chunk
+    /// boundaries are a tuned parameter, so a benchmark keyed to chunk ids would be
+    /// invalidated by the very change it exists to evaluate.
+    public struct LegRankings: Sendable {
+        public var lexical: [ObjectID]
+        public var dense: [ObjectID]
+        public var fused: [ObjectID]
+        /// Why the dense leg is empty, when it is. Distinguishes "no vectors" from "found
+        /// nothing", which score identically and mean opposite things.
+        public var denseUnavailable: String?
+    }
+
+    public func rankings(
+        query: String,
+        queryClass: QueryClass,
+        policy: AdmissionPolicy,
+        limit: Int = 12
+    ) async throws -> LegRankings {
+        let perLeg = tuning.candidatesPerLeg
+        let match = HybridSearch.ftsQuery(from: query)
+        let lexical = try await store.lexicalChunks(match: match, limit: perLeg)
+
+        var dense: [ChunkCandidate] = []
+        var denseUnavailable: String?
+        if let embedder {
+            let embedded = try await store.embeddedChunkCount(model: embedder.modelIdentifier)
+            if embedded == 0 {
+                denseUnavailable = "no chunk has a vector; run `opencore embed`"
+            } else {
+                let vector = try await embedder.embed(query)
+                if vector.isEmpty {
+                    denseUnavailable = "query produced no embedding"
+                } else {
+                    dense = try await store.denseChunks(query: vector, model: embedder.modelIdentifier, limit: perLeg)
+                    let total = try await store.chunkCount()
+                    if embedded < total {
+                        denseUnavailable = "\(embedded) of \(total) chunks embedded"
+                    }
+                }
+            }
+        } else {
+            denseUnavailable = "no embedding provider configured"
+        }
+
+        // The domain firewall runs before ranking everywhere else, so it runs here too.
+        // Measuring a leg over passages the pipeline would never admit would flatter it.
+        func objects(_ candidates: [ChunkCandidate]) -> [ObjectID] {
+            var seen = Set<ObjectID>()
+            var ordered: [ObjectID] = []
+            for candidate in candidates where policy.admits(candidate.object.domain) {
+                if seen.insert(candidate.object.id).inserted { ordered.append(candidate.object.id) }
+            }
+            return ordered
+        }
+
+        // Ask for more chunks than the caller wants objects, because several chunks can
+        // belong to one object and would otherwise collapse into fewer than `limit` distinct
+        // answers. Without this the fused list is scored on fewer object slots than each leg
+        // gets, and fusion is charged for a deficit the harness created.
+        let outcome = try await search(
+            query: query, queryClass: queryClass, policy: policy,
+            limit: limit * 3, expandContext: false
+        )
+        var seenFused = Set<ObjectID>()
+        let fused = outcome.hits.map(\.object.id).filter { seenFused.insert($0).inserted }
+
+        return LegRankings(
+            lexical: objects(lexical),
+            dense: objects(dense),
+            fused: fused,
+            denseUnavailable: denseUnavailable
+        )
+    }
+
     // MARK: - MMR
 
     /// Maximal Marginal Relevance.
@@ -237,7 +398,7 @@ public struct PassageSearch: Sendable {
     private func diversify(_ hits: [PassageHit], limit: Int) -> [PassageHit] {
         guard hits.count > 1 else { return hits }
 
-        var pool = Array(hits.prefix(limit * 2))
+        let pool = Array(hits.prefix(limit * 2))
         var selected: [PassageHit] = []
         var selectedTokens: [Set<String>] = []
 

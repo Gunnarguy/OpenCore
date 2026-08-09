@@ -1,6 +1,7 @@
 import CoreModel
 import CoreReason
 import CoreSearch
+import CoreStore
 import SwiftUI
 
 @MainActor
@@ -13,6 +14,23 @@ final class ChatModel {
     /// Source the reader is inspecting, keyed by turn so two answers can be open at once.
     var expandedSource: [UUID: Int] = [:]
     var showingReceipt: Turn?
+
+    /// Held across turns so a follow-up question reaches the model's own `Transcript` instead
+    /// of a summary of previous exchanges pasted into the prompt. Rebuilt when the store or
+    /// the retrieval tuning changes, because both are baked in at construction.
+    private var retained: Conversation?
+    private var retainedKey: (store: ObjectIdentifier, tuning: RetrievalTuning)?
+
+    func conversation(store: Store, tuning: RetrievalTuning) -> Conversation {
+        // `Store` is a value type wrapping the `Database` actor, so the actor's identity is
+        // what actually distinguishes one store from another.
+        let key = (store: ObjectIdentifier(store.database), tuning: tuning)
+        if let retained, let retainedKey, retainedKey == key { return retained }
+        let created = Conversation(store: store, embedder: try? NLEmbeddingProvider(), tuning: tuning)
+        retained = created
+        retainedKey = key
+        return created
+    }
 
     func refreshReadiness() {
         readiness = Conversation.readiness()
@@ -39,7 +57,14 @@ struct ChatView: View {
             composer
         }
         .navigationTitle("Chat")
-        .task { chat.refreshReadiness() }
+        .task {
+            chat.refreshReadiness()
+            // Load the model's assets while the reader is still typing rather than after they
+            // hit return.
+            if chat.readiness.isReady, let store = model.store {
+                await chat.conversation(store: store, tuning: settings.tuning).prepare()
+            }
+        }
         .sheet(item: $chat.showingReceipt) { turn in
             if let receipt = turn.receipt { ChatReceiptSheet(receipt: receipt, turn: turn) }
         }
@@ -114,14 +139,13 @@ struct ChatView: View {
         chat.sending = true
         chat.turns.append(Turn(role: .you, text: question))
 
-        let history = chat.turns
         let tuning = settings.tuning
 
         Task {
-            let conversation = Conversation(store: store, embedder: try? NLEmbeddingProvider(), tuning: tuning)
+            let conversation = chat.conversation(store: store, tuning: tuning)
             var placeholderIndex: Int?
 
-            for await update in await conversation.send(question, history: history) {
+            for await update in conversation.send(question) {
                 if let index = placeholderIndex {
                     chat.turns[index] = update
                 } else {
@@ -208,6 +232,12 @@ private struct TurnView: View {
 }
 
 /// The verification result, quiet when it passes and loud when it does not.
+///
+/// The wording is deliberately narrow. This badge used to read "N of N sentences supported",
+/// which a reader will hear as "this answer is right". It cannot mean that: the check compares
+/// each sentence to the passage it cited, so it verifies that the answer came from your data,
+/// not that the retrieved passages were the right ones. An answer built faithfully from
+/// passages about the wrong project passes this badge and should.
 private struct GroundingBadge: View {
     let turn: Turn
 
@@ -217,10 +247,11 @@ private struct GroundingBadge: View {
         if total == 0 {
             EmptyView()
         } else if bad == 0 {
-            Label("\(total) of \(total) sentences supported", systemImage: "checkmark.seal.fill")
+            Label("\(total) of \(total) sentences match the source they cite", systemImage: "checkmark.seal.fill")
                 .font(.caption2).foregroundStyle(.green)
+                .help("Each sentence was checked against the passage it cites. This does not check whether those were the right passages.")
         } else {
-            Label("\(bad) sentence\(bad == 1 ? "" : "s") not supported by the sources", systemImage: "exclamationmark.triangle.fill")
+            Label("\(bad) sentence\(bad == 1 ? "" : "s") do not match the source cited", systemImage: "exclamationmark.triangle.fill")
                 .font(.caption2).foregroundStyle(.orange)
                 .help(turn.ungrounded.map(\.sentence).joined(separator: "\n\n"))
         }
@@ -363,7 +394,7 @@ private struct ChatReceiptSheet: View {
 
                     if !turn.ungrounded.isEmpty {
                         VStack(alignment: .leading, spacing: 8) {
-                            Label("Sentences the sources do not support", systemImage: "exclamationmark.triangle.fill")
+                            Label("Sentences that do not match the source they cite", systemImage: "exclamationmark.triangle.fill")
                                 .font(.callout.weight(.medium)).foregroundStyle(.orange)
                             ForEach(Array(turn.ungrounded.enumerated()), id: \.offset) { _, verdict in
                                 VStack(alignment: .leading, spacing: 3) {

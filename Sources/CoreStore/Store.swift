@@ -170,6 +170,18 @@ extension Store {
         try await database.scalarInt("SELECT COUNT(*) FROM object")
     }
 
+    /// Objects with exactly this title.
+    ///
+    /// For the eval harness, which keys its expected answers to titles rather than ids:
+    /// object ids are content-derived hashes, so a benchmark written against them would be
+    /// unreadable and would break the moment an object's text changed. Returns every match,
+    /// because a title is not unique by construction.
+    public func objectIDs(title: String) async throws -> [ObjectID] {
+        try await database
+            .query("SELECT id FROM object WHERE title = ?", [.text(title)])
+            .map { ObjectID($0.requireString("id")) }
+    }
+
     public func objectCountsByKind() async throws -> [(ObjectKind, Int)] {
         try await database.query("SELECT kind, COUNT(*) AS n FROM object GROUP BY kind ORDER BY n DESC")
             .compactMap { row in

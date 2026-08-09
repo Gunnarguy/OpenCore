@@ -99,6 +99,8 @@ func usage() {
       opencore embed [--batch N]             build on-device vectors for every passage
       opencore search "TEXT"                 object-level hybrid retrieval, signals shown
       opencore passages "TEXT" [--no-context]  passage retrieval: dense + BM25, RRF, MMR
+      opencore eval [--file F] [--k N] [--verbose]
+                                                 retrieval quality per leg over a benchmark
       opencore ask "QUESTION"                an answer assembled from claims, with a receipt
 
     KNOWLEDGE
@@ -116,7 +118,7 @@ func usage() {
     INFRASTRUCTURE
       opencore mcp [--unsafe-expose-sensitive]   serve MCP over stdio
       opencore doctor                            database, credentials, coverage
-      opencore rebuild                           re-derive everything from objects
+      opencore rebuild [--no-embed]              re-derive everything from objects
       opencore export [--format jsonl|markdown] [--to DIR]
                                                  everything back out, in a format you own
 
@@ -623,7 +625,7 @@ func chat(_ question: String) async throws {
     let conversation = Conversation(store: store, embedder: embedder(quiet: true))
 
     var final: Turn?
-    for await turn in await conversation.send(question) {
+    for await turn in conversation.send(question) {
         final = turn
     }
     guard let turn = final else { return }
@@ -642,15 +644,24 @@ func chat(_ question: String) async throws {
         }
     }
 
-    let ungrounded = turn.ungrounded
+    // Two signals, reported separately because one is a guarantee and the other is a guess.
+    // Reporting a single "grounding" percentage is what let an answer about the wrong
+    // repository read as fully supported.
+    let total = turn.verdicts.count
+    let resolved = turn.verdicts.filter(\.citationResolves).count
+    let weak = turn.verdicts.filter { $0.citationResolves && $0.score < Grounding.overlapThreshold }
     print("")
-    if ungrounded.isEmpty {
-        print("grounding    \(turn.verdicts.count)/\(turn.verdicts.count) sentences supported by the sources")
+    print("citations    \(resolved)/\(total) resolve to a source that was actually supplied")
+    if weak.isEmpty {
+        print("overlap      \(total)/\(total) sentences share vocabulary with the source they cite")
     } else {
-        print("grounding    \(ungrounded.count) of \(turn.verdicts.count) sentences NOT supported:")
-        for verdict in ungrounded {
-            print("  \(String(format: "%.2f", verdict.score))  \(verdict.sentence.prefix(100))")
-            print("        unsupported: \(verdict.unsupported.prefix(6).joined(separator: ", "))")
+        print("overlap      \(weak.count) of \(total) below \(String(format: "%.2f", Grounding.overlapThreshold)):")
+        for verdict in weak {
+            let cited = verdict.citedSource.map { "[\($0)]" } ?? "[uncited]"
+            print("  \(String(format: "%.2f", verdict.score)) \(cited)  \(verdict.sentence.prefix(100))")
+            if !verdict.unsupported.isEmpty {
+                print("        not in that source: \(verdict.unsupported.prefix(6).joined(separator: ", "))")
+            }
         }
     }
     if let model = turn.modelName { print("model        \(model)") }
@@ -768,12 +779,49 @@ func rebuild() async throws {
 
     // Proof that the trust stack holds. Vectors go too: they are derived from chunk text,
     // and a chunk whose boundaries moved has a vector that describes text that no longer
-    // exists. Re-embed with `opencore embed`.
+    // exists.
     try await store.dropDerivedLayers()
     let all = try await store.allObjects()
 
     let outcome = try await IngestPipeline(store: store).run(objects: all, storeObjects: false, log: progress)
     report(outcome)
+
+    // Vectors are a derived layer like every other, and this is the command that promises to
+    // reconstruct all of them. Dropping them and stopping left retrieval silently lexical-only
+    // until someone remembered to run `embed`: the dense leg contributed nothing, no error was
+    // raised, and results looked plausible because BM25 still returned something. Re-embedding
+    // here is what makes "objects are the floor" true for the dense leg too.
+    try await reembed(store: store, because: "rebuild dropped every vector")
+}
+
+/// Re-derive the dense leg, or say loudly that it is empty.
+///
+/// Never silently proceeds without vectors. A search that ran without its dense leg is not the
+/// same search, and the difference is invisible in the output.
+func reembed(store: Store, because reason: String) async throws {
+    let total = try await store.chunkCount()
+    guard total > 0 else { return }
+
+    if flag("no-embed") {
+        print("\n!  dense leg is EMPTY (\(reason)) and --no-embed was passed.")
+        print("   Retrieval is lexical-only until `opencore embed` runs.")
+        return
+    }
+    guard let provider = embedder() else {
+        print("\n!  dense leg is EMPTY (\(reason)) and no embedding provider is available here.")
+        print("   Retrieval is lexical-only. Nothing will say so at query time.")
+        return
+    }
+
+    print("\nre-embedding \(total) chunks with \(provider.modelIdentifier)")
+    _ = try await EmbeddingIndexer(store: store, provider: provider)
+        .run(batchSize: option("batch").flatMap(Int.init) ?? 32, log: progress)
+
+    let covered = try await store.embeddedChunkCount(model: provider.modelIdentifier)
+    print("vectors     \(covered)/\(total) chunks embedded")
+    if covered < total {
+        print("!  \(total - covered) chunks have no vector. The dense leg cannot see them.")
+    }
 }
 
 // MARK: - Export
@@ -857,6 +905,8 @@ do {
     case "passages":
         guard let query = positional(1) else { print("usage: opencore passages \"TEXT\""); exit(1) }
         try await runPassages(query)
+    case "eval":
+        try await Eval.run()
     case "ask":
         guard let query = positional(1) else { print("usage: opencore ask \"QUESTION\""); exit(1) }
         try await ask(query)

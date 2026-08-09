@@ -331,3 +331,203 @@ until `embed` is run again. Retrieval reports this in `unavailableSignals` and `
 "embeddings none", but neither is loud enough. Before re-embedding, the same question returned
 six lexical-only hits and ranked OpenCore's own README third behind two commits from an
 unrelated repository.
+
+---
+
+## 2026-08-09 — The grounding check was grading its own coursework
+
+The previous entry recorded that a well-cited answer about the wrong repository scored 3 of 3.
+Reviewing why that score was reachable at all found a second, worse problem, in the check
+rather than in retrieval.
+
+**The instructions told the model to pass the test.** Rule 3 read: *"Prefer the words in the
+sources over paraphrase. This answer is checked afterwards against the source text, and
+invented phrasing fails that check."* `Grounding` scores lexical overlap. So the prompt was
+coaching the model toward high overlap, and the resulting score measured compliance with an
+instruction rather than fidelity to evidence. A metric a system optimises against stops being
+a measurement. The instruction is gone.
+
+**And the check pooled the sources.** Every passage was concatenated into one haystack, so a
+sentence citing `[1]` was scored against the union of all six. A sentence faithful to source 2
+and attributed to source 1 scored perfectly. Regression test:
+`vocabularyFromAnotherSourceDoesNotCount`.
+
+**Citations are now typed rather than parsed.** `GroundedAnswer` is `@Generable`, and
+`CitedSentence.source` is an `Int` guided to `1...6`, so constrained decoding makes an
+uncited sentence unrepresentable instead of merely unlikely. `[n]` markers are rendered from
+that field afterwards; the model never formats them. This replaces asking for markers in prose
+and hoping to parse them back out.
+
+**Two signals now, reported separately**, because one is a guarantee and the other is a guess:
+citation resolution (structural, hard) and source overlap (lexical, heuristic). Collapsing
+them into a single "grounding" percentage is what let the original failure read as success.
+
+**What has not changed:** failure mode 3 is still uncatchable here, and retrieval is still the
+ceiling. Verified after the rewrite by asking the same question. Both sentences cite correctly
+and both genuinely match the passage cited, and one of them is still the WoWCA rebrand commit.
+The machinery is now honest about that instead of reporting it as full support.
+
+## 2026-08-09 — Written against the SDK, not against recollection
+
+`Sources/CoreReason/Conversation.swift` previously used three FoundationModels calls
+(`SystemLanguageModel.default.availability`, `LanguageModelSession(instructions:)`,
+`streamResponse(to:)`) out of a framework exposing over a hundred public types, and guarded on
+`macOS 26` while the installed SDK was 27.
+
+The source of truth used for this pass was the interface file on disk, not documentation and
+not memory:
+
+```
+$(xcrun --show-sdk-path)/System/Library/Frameworks/FoundationModels.framework/
+  Versions/A/Modules/FoundationModels.swiftmodule/arm64e-apple-macos.swiftinterface
+```
+
+It is 2,903 lines and it is authoritative for the toolchain that will actually compile. Reading
+it caught something no amount of care would have: **every case of
+`LanguageModelSession.GenerationError` is deprecated as of macOS 27**, superseded by
+`LanguageModelError`, `SystemLanguageModel.Error`, and `GeneratedContent.ParsingError`. Error
+handling is written against the replacements.
+
+Also adopted, each for a stated reason rather than for coverage:
+
+- `GenerationOptions(samplingMode: .greedy)` — the same question over the same passages should
+  give the same answer, and creative sampling is how a model smooths a source into something
+  more readable than what it says.
+- A retained `LanguageModelSession` and its `Transcript`, replacing a hand-rolled prompt
+  containing `history.suffix(4)` truncated to 300 characters per turn. On
+  `contextSizeExceeded` the session is rebuilt from the trailing transcript entries and the
+  question is retried exactly once.
+- `prewarm()` on chat appearing, so assets load while the reader is typing.
+- Token counts from `Snapshot.usage` into the receipt's `generate` stage.
+
+**Not adopted, deliberately.** `Tool` would let the model request more retrieval mid-answer,
+which is a real answer to failure mode 3, and `PrivateCloudComputeLanguageModel` would raise
+the ceiling on hard questions. Both are refused for now on the same grounds: they are
+unmeasured changes to answer quality, and PCC additionally breaks `objectsTransmitted: 0`,
+which is a claim the receipt currently makes truthfully.
+
+**Receipts stopped lying by omission.** The chat path wrote `stages: []` while `PassageOutcome`
+was carrying `stageTimings`, `blockedByDomain`, `lexicalCandidates`, `denseCandidates`,
+`afterFusion` and `droppedByDiversity` the whole time, and wrote `model: "Apple on-device"` as
+a hardcoded literal into the field whose entire purpose is recording what actually ran. Both
+fixed. `Receipt.model` now carries `SystemLanguageModel.default` by name and stops there: the
+framework exposes no version or build identifier, and inventing one would be the exact
+"plausible default in a receipt field" the type exists to refuse.
+
+---
+
+## 2026-08-09 — The first measurement says the hybrid retrieval is worse than half of it
+
+`opencore eval` ran for the first time. 20 hand-written cases over the GitHub corpus,
+1,268 objects, 2,237 chunks, 100% vector coverage verified before the run. `[measured]`
+
+| leg | recall@1 | recall@3 | recall@6 | MRR | nDCG@6 | fully missed |
+|---|---|---|---|---|---|---|
+| lexical | 22.5% | 36.7% | 48.3% | 0.523 | 0.420 | 6 / 20 |
+| dense | 0.0% | 7.5% | 10.0% | 0.054 | 0.059 | 17 / 20 |
+| fused | 2.5% | 7.5% | 10.0% | 0.083 | 0.073 | 17 / 20 |
+
+**Fusion scores six times worse than one of its own legs**, and recall@1 falls from 22.5% to
+2.5%. RRF cannot do that by being badly tuned. It was doing exactly what it is designed to do,
+against an assumption this corpus violates.
+
+**The mechanism, traced rather than inferred.** `opencore passages "What is OpenCone?"` shows
+the correct README at fused rank 7, below six commits. A document in one leg at rank 1 scores
+`1/(60+1)` = 0.0164. A document in both legs at ranks 6 and 3 scores `1/66 + 1/63` = 0.0311.
+So anything both legs return outranks anything one leg ranked first. RRF rewards agreement
+between retrievers because agreement is normally evidence of relevance.
+
+Here the legs are not independent. 651 of 1,268 objects are commits, every commit chunk begins
+`Gunnarguy/<repo>`, and both legs therefore return the same repository's commit stream for any
+question naming a repository. Agreement measures redundancy, not relevance, and fusion
+amplifies it.
+
+**This is very likely the same root cause as the WoWCA failure** recorded on 2026-08-08. That
+was diagnosed as "retrieval quality" and left there; it is more specific than that.
+
+**The dense leg is separately weak**, at nDCG 0.059 with full vector coverage, so this is not a
+missing index. `NLContextualEmbedding` is a contextual token embedding model, mean-pooled, and
+was never trained for asymmetric query-to-document retrieval. It did win one case no other leg
+found (a portfolio README with zero lexical overlap), so the signal is real and very weak.
+Recorded as a question with a test plan rather than a conclusion, because the symmetric
+self-retrieval check that would settle it has not been run.
+
+**What this changes.** Cross-encoder reranking was next on the board and has been
+deprioritised: reranking improves the ordering of a candidate set, and the measured problem is
+that fusion ranks the right answer *out* of the set that lexical alone had at position 1.
+Sweeping RRF k, MMR λ and `signalScale` is also premature. The shape is wrong before the
+constants are.
+
+**What it does not license.** No accuracy number goes anywhere. One personal corpus, 20 cases,
+binary judgements, written by the same person who wrote the retriever. It is directional.
+
+**Guarding against the harness grading its own coursework.** The same failure as the coached
+grounding check, one layer up: if the expected passages had been chosen by looking at what
+retrieval returns, every constant in the repository would have been blessed. So expectations
+were written from corpus content before any query ran, half the cases deliberately avoid the
+target's own vocabulary, and `q18` is the known-failing question included as a case that is
+*supposed* to fail. A harness reporting 100% on day one has measured nothing.
+
+**Fixed first, so the numbers meant something.** `rebuild` dropped `chunk_vector` and stopped,
+leaving retrieval silently lexical-only with no error. That violated the schema invariant in
+`.claude/rules/store.md`: dropping every derived table and rebuilding must reconstruct them.
+Both rebuild paths now re-embed, and `opencore eval` prints vector coverage before any metric,
+because a dense leg scoring zero for want of vectors reads identically to one scoring zero for
+want of quality.
+
+---
+
+## 2026-08-09 — The dense leg was destroying 83% of retrieval, and the sweep proved it
+
+Same day as the harness. The fusion defect was isolated by sweeping rather than reasoned about,
+which is the whole point of having built the thing. `[measured]`
+
+Fused nDCG@6, 20 cases:
+
+| denseWeight | mmrLambda 0.7 | mmrLambda 0.85 |
+|---|---|---|
+| 1.0 (shipped) | 0.073 | 0.073 |
+| 0.5 | 0.136 | 0.140 |
+| 0.25 | 0.235 | 0.242 |
+| **0.0** | 0.417 | **0.422** |
+
+Monotonic. At equal weight the dense leg was costing 83% of the achievable score, and removing
+it from fusion took the pipeline from **0.073 to 0.422**, finally beating its own lexical leg
+(0.420) instead of scoring a sixth of it.
+
+**`RetrievalTuning` gained `lexicalWeight` and `denseWeight`.** Textbook RRF has no per-leg
+weights, and that is not an oversight in the method: RRF's appeal is needing no per-retriever
+calibration, which holds when the legs are independently informative. Measured here, that
+assumption is false and very expensive.
+
+**Two corrections to what the previous entry claimed.**
+
+1. The proposed first fix was wrong. `Gunnarguy/<repo>` is in `object.text` for **repositories
+   as well as commits**, so stripping it would not have differentially helped the README. The
+   real asymmetry is 651 short commit objects against 16 READMEs, plus BM25 length
+   normalisation favouring short documents. The fix was written before checking the object
+   text, and checking it took one query.
+2. The residual gap after disabling dense was partly **the harness's own fault**. `rankings`
+   asked `search` for `limit` chunks, which dedupe to fewer than `limit` objects, while each
+   leg deduped 100 candidates into `limit` object slots. Fusion was being charged for a deficit
+   the measurement created. Now requests `limit * 3`.
+
+**`signalScale` is inert.** Swept 0.02 / 0.005 / 0.0 for identical nDCG at every value.
+Switching the authority and recency terms fully off changes no ranking on any case, which means
+`QueryClass.weights` — six rows encoding the idea that different question shapes need different
+signal mixes — is currently decorative. The existing comment called it the most unprincipled
+number here; it is worse than that, it is disconnected. Recorded as its own row, and explicitly
+**not** fixed by raising the constant, because the benchmark is almost entirely `factual` cases
+and could not fairly judge a temporal signal yet.
+
+**The disable is loud.** `denseWeight: 0` adds a `semantic-disabled` entry to
+`unavailableSignals`, carrying the numbers that justify it. A leg switched off by tuning has to
+be as visible as one that failed. `rebuild` silently dropping every vector was the same class
+of fault, and a deliberate decision does not get to be quieter than an accident.
+
+**What did not improve.** Re-running *"what have I been building in OpenCore recently?"*: the
+OpenCore README now reaches the context at rank 4, which it never did before, and three WoWCA
+and spell-parser commits still outrank it, and the model still answered from one of them. The
+aggregate moved 5.8x; that query is still wrong. Benchmark case `q18` is the regression test
+and is still failing exactly as intended. Commit flooding is now the top open retrieval defect,
+and it is a different problem from the one just fixed.

@@ -155,11 +155,9 @@ extension AppModel {
             let before = try await graphCounts(in: store)
 
             // Vectors go too: a vector describes chunk text, and a chunk whose boundaries
-            // moved has a vector for text that no longer exists. Re-embed afterwards.
-            //
-            // The SQL is here rather than in `CoreStore` because the CLI's rebuild writes it
-            // inline as well, and one copy drifting from the other is worse than either
-            // being in the wrong module.
+            // moved has a vector for text that no longer exists. They are rebuilt below,
+            // because a rebuild that leaves the dense leg empty degrades retrieval to
+            // lexical-only without raising anything.
             state = .working("dropping derived layers")
             try await store.dropDerivedLayers()
             // Passages have just been rebuilt with the current parameters.
@@ -172,6 +170,11 @@ extension AppModel {
             let outcome = try await IngestPipeline(store: store).run(objects: all, storeObjects: false) { [weak self] message in
                 Task { @MainActor in self?.state = .working(message) }
             }
+
+            // Rebuild the dense leg before reporting success. `buildEmbeddings` is resumable
+            // and skips chunks that already have a vector, so this is the full cost only
+            // because the drop above emptied the table.
+            await buildEmbeddings()
 
             let after = try await graphCounts(in: store)
             await refresh()

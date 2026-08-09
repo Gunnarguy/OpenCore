@@ -68,6 +68,7 @@ Route information to one home. Do not duplicate a fact across layers without a r
 | Path-specific requirement | `.claude/rules/` |
 | Repeatable procedure | `.claude/skills/` |
 | Current objective, verified state, next action | `Docs/ai/STATE.md` |
+| What is built, what is next, and every finding worth tracking | the Notion roadmap |
 | Stable scope and constraints | `Docs/ai/PROJECT.md` |
 | Rationale that code cannot show | `Docs/ai/DECISIONS.md` |
 | Verified operational command | `Docs/ai/RUNBOOK.md` |
@@ -114,6 +115,15 @@ The built CLI lands at `/private/tmp/opencore-build/out/Products/Debug/opencore`
 - Before ending substantial unfinished work, and after any change of objective, update
   `Docs/ai/STATE.md` so a fresh session can continue **without this transcript**. The
   `project-handoff` skill does this.
+- **Update the Notion roadmap as part of the work, not when asked.** It is the roadmap's
+  source of truth, so a session that ships something and leaves the board stale has left the
+  job unfinished. Ids are in `Docs/ROADMAP.md`; query tools take the data source id.
+  - Close the rows the work actually completed, and set `Evidence` to what was really done.
+    Never upgrade a row to `measured` without a number, or to `test` without a passing test.
+  - Open a row for every finding worth keeping, including the negative ones. A measurement
+    that says the shipped design is wrong is the most valuable row on the board.
+  - Re-prioritise rows the new evidence changed, and say in `Notes` which measurement moved
+    them. A priority change with no stated cause is indistinguishable from a mood.
 - Prefer an isolated Explore subagent for broad repository research whose intermediate output
   is not needed in the main context. `project-orient` wraps that.
 - Use separate git worktrees for parallel write-capable sessions in this checkout.

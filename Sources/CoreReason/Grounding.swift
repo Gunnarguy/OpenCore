@@ -1,25 +1,39 @@
 import CoreModel
 import Foundation
 
-/// Checks that a generated sentence is actually supported by the text it was given.
+/// Checks that a generated sentence is actually answerable from the source it claims.
 ///
-/// This is the gate `DECISIONS.md` said becomes mandatory the moment a model writes prose.
-/// Until now every sentence OpenCore produced was rendered from a claim row, so provenance
-/// was structural. A model can write a fluent sentence about nothing, and a receipt that says
-/// "assembled from claims" while displaying that sentence would be lying about the answer's
-/// origin.
+/// Two independent signals, deliberately kept apart because one is a guarantee and the other
+/// is a guess:
 ///
-/// **What this is not.** It is lexical overlap, not entailment. It catches a sentence about
-/// something absent from the context; it does not catch a sentence that inverts the meaning of
-/// something present. That limit is real and is reported rather than papered over: a passing
-/// grade here means "the words came from your data", not "this is true".
+/// 1. **Citation resolution** — structural, and the one with teeth. The model emits a typed
+///    source number under a constrained range (`CitedSentence`), and this checks it against
+///    the sources actually supplied. A sentence attributed to nothing, or to a source outside
+///    the supplied set, fails outright. Constrained decoding makes this nearly always pass;
+///    it is checked anyway, because "nearly" is not a guarantee and the receipt says it is.
+///
+/// 2. **Source overlap** — heuristic. What fraction of the sentence's content words appear in
+///    *the specific source it cited*, rather than anywhere in the whole context. That change
+///    matters: the previous version pooled all six sources into one haystack, so a sentence
+///    fusing two unrelated passages scored perfectly.
+///
+/// **What overlap is not.** It is lexical, not entailment. It catches a sentence about
+/// something absent from the cited source; it does not catch a sentence that inverts the
+/// meaning of something present. A low score means "paraphrased, or unsupported" and this
+/// test cannot tell you which. Report it as what it is.
+///
+/// **A correction to the previous design.** The instructions used to tell the model to prefer
+/// the words in the sources *because the answer would be checked against them*. That coached
+/// the model to pass this exact test, so a high score measured compliance rather than
+/// grounding, which is why an answer about the wrong repository once scored 3 of 3. The
+/// instruction is gone. Scores are lower now and mean more.
 public struct Grounding: Sendable {
-    /// Fraction of a sentence's content words that must appear in the supplied context.
+    /// Fraction of a sentence's content words that must appear in the cited source.
     ///
-    /// 0.55 is chosen, not measured. It tolerates the connective words a model adds while
-    /// rejecting a sentence built mostly from vocabulary that is not in the evidence. Like
-    /// every other constant here it is a candidate for the eval harness to replace.
-    public static let threshold = 0.55
+    /// 0.5 is chosen, not measured, and was lowered from 0.55 when the instruction that
+    /// inflated the metric was removed: honest paraphrase scores lower than coached copying.
+    /// Like every other constant here it is a candidate for the eval harness to replace.
+    public static let overlapThreshold = 0.5
 
     /// Words that carry no evidence signal. Counting them would let a fluent sentence pass on
     /// grammar alone.
@@ -32,28 +46,100 @@ public struct Grounding: Sendable {
 
     public struct Verdict: Sendable, Hashable {
         public let sentence: String
+        /// The source number the model attributed this sentence to. `nil` when the answer was
+        /// produced without typed citations, which on this path means generation failed part
+        /// way through.
+        public let citedSource: Int?
+        /// Whether `citedSource` names a source that was actually supplied.
+        public let citationResolves: Bool
+        /// Fraction of content words present in the cited source.
         public let score: Double
-        public var isGrounded: Bool { score >= Grounding.threshold }
-        /// Content words that appear nowhere in the context. The specific reason a sentence
-        /// failed, so a reader can judge the judgement.
+        /// Content words that appear nowhere in the cited source. The specific reason a
+        /// sentence failed, so a reader can judge the judgement.
         public let unsupported: [String]
+
+        /// Both signals must hold. An unresolvable citation is a hard failure regardless of
+        /// how well the words happen to overlap.
+        public var isGrounded: Bool { citationResolves && score >= Grounding.overlapThreshold }
+
+        public init(
+            sentence: String,
+            citedSource: Int?,
+            citationResolves: Bool,
+            score: Double,
+            unsupported: [String]
+        ) {
+            self.sentence = sentence
+            self.citedSource = citedSource
+            self.citationResolves = citationResolves
+            self.score = score
+            self.unsupported = unsupported
+        }
     }
 
     public init() {}
 
-    /// Score every sentence of `answer` against `context`.
-    public func verify(answer: String, against context: String) -> [Verdict] {
+    /// Score one attributed sentence against the source it cited.
+    ///
+    /// `sources` is the set actually handed to the model, so an out-of-range citation is
+    /// detectable here even though constrained decoding should have prevented it.
+    public func verify(
+        sentence: String,
+        citedSource: Int?,
+        sources: [GroundingSource]
+    ) -> Verdict {
+        guard let cited = citedSource, let source = sources.first(where: { $0.index == cited }) else {
+            return Verdict(
+                sentence: sentence,
+                citedSource: citedSource,
+                citationResolves: false,
+                score: 0,
+                unsupported: []
+            )
+        }
+
+        let words = Self.contentWords(sentence)
+        guard !words.isEmpty else {
+            // Nothing to check. A sentence of pure connective words is vacuous rather than
+            // ungrounded, and failing it would be noise.
+            return Verdict(
+                sentence: sentence,
+                citedSource: cited,
+                citationResolves: true,
+                score: 1.0,
+                unsupported: []
+            )
+        }
+
+        let missing = words.subtracting(Self.contentWords(source.text))
+        return Verdict(
+            sentence: sentence,
+            citedSource: cited,
+            citationResolves: true,
+            score: 1.0 - Double(missing.count) / Double(words.count),
+            unsupported: missing.sorted()
+        )
+    }
+
+    /// Score free text that carries no citations, against the pooled context.
+    ///
+    /// Only reachable when structured generation failed and the raw text was salvaged. Every
+    /// verdict is marked as having no resolvable citation, because it genuinely has none, and
+    /// so the whole answer reads as ungrounded. That is the correct outcome: text that lost
+    /// its attribution should not be presented as sourced.
+    public func verifyUnattributed(answer: String, against context: String) -> [Verdict] {
         let haystack = Self.contentWords(context)
         return Self.sentences(in: answer).map { sentence in
             let words = Self.contentWords(sentence)
-            guard !words.isEmpty else {
-                // Nothing to check. A sentence of pure connective words is vacuous rather
-                // than ungrounded, and failing it would be noise.
-                return Verdict(sentence: sentence, score: 1.0, unsupported: [])
-            }
             let missing = words.subtracting(haystack)
-            let score = 1.0 - Double(missing.count) / Double(words.count)
-            return Verdict(sentence: sentence, score: score, unsupported: missing.sorted())
+            let score = words.isEmpty ? 1.0 : 1.0 - Double(missing.count) / Double(words.count)
+            return Verdict(
+                sentence: sentence,
+                citedSource: nil,
+                citationResolves: false,
+                score: score,
+                unsupported: missing.sorted()
+            )
         }
     }
 
