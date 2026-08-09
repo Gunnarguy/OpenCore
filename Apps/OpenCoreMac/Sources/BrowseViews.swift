@@ -6,6 +6,7 @@ import SwiftUI
 struct ClaimsView: View {
     @Environment(AppModel.self) private var model
     @State private var filter = ""
+    @State private var correcting: AppModel.ClaimRow?
 
     private var rows: [AppModel.ClaimRow] {
         guard !filter.isEmpty else { return model.claims }
@@ -45,8 +46,18 @@ struct ClaimsView: View {
                     .foregroundStyle(.secondary)
                     .monospaced()
             }
+
+            TableColumn("") { row in
+                // Correcting a belief was implemented in the engine and tested, and had no
+                // caller in any surface. This is it.
+                Button("Correct") { correcting = row }
+                    .controlSize(.small)
+                    .help("Tell OpenCore this is wrong. The old claim is retracted, not deleted.")
+            }
+            .width(70)
         }
         .searchable(text: $filter, prompt: "Filter claims")
+        .sheet(item: $correcting) { CorrectionSheet(row: $0) }
         .navigationTitle("Claims")
         .task { await model.loadClaims() }
         .overlay {

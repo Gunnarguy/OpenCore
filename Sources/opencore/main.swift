@@ -108,6 +108,9 @@ func usage() {
       opencore memory checkout YYYY-MM-DD    what it believed on a past date
       opencore receipts [--limit N]
       opencore trace CODE                    the evidence behind one answer
+      opencore timeline [--since 30d]        what happened, from every source
+      opencore correct CLAIM --to VALUE      tell it that it is wrong
+              --reason "..." [--because "..."]
 
     INFRASTRUCTURE
       opencore mcp [--unsafe-expose-sensitive]   serve MCP over stdio
@@ -488,7 +491,8 @@ func listClaims(_ entityName: String?) async throws {
         let subject = try await subjectName(claim, in: store)
         let validity = claim.validity.validFrom.map { " from \(dateFormatter.string(from: $0))" } ?? ""
         print("\(claim.derivation == .observed ? "•" : "~") \(subject) \(claim.predicate) \(value)")
-        print("   conf \(String(format: "%.2f", claim.confidence)) · \(claim.authority.label)\(validity)")
+        // The id prefix is printed so `opencore correct` has something to name.
+        print("   \(claim.id.value.prefix(8))  conf \(String(format: "%.2f", claim.confidence)) · \(claim.authority.label)\(validity)")
     }
     print("\n\(claims.count) claims  · observed  ~ inferred")
 }
@@ -599,6 +603,108 @@ func trace(_ code: String) async throws {
         print("")
     }
     printReceipt(receipt)
+}
+
+// MARK: - Timeline
+
+/// `opencore timeline` — every event, from every source, in one ordering.
+///
+/// The store held 1,244 events and nothing displayed them. Events are what claims are not:
+/// a claim says what is, an event says what happened, and for sources that yield no claims
+/// (notes, files, most calendar entries) the timeline is the only thing they contribute.
+func timeline() async throws {
+    let store = try await openStore()
+    let window = option("since").flatMap(parseDuration) ?? 90 * 86_400
+    let since = Date().addingTimeInterval(-window)
+
+    let events = try await store.events(from: since, to: Date(), limit: option("limit").flatMap(Int.init) ?? 60)
+    guard !events.isEmpty else {
+        print("no events in the last \(Int(window / 86_400)) days")
+        return
+    }
+
+    var lastDay = ""
+    for event in events {
+        let day = dateFormatter.string(from: event.occurredAt)
+        if day != lastDay {
+            print("\n\(day)")
+            lastDay = day
+        }
+        let subject = try await store.entity(event.subject)?.canonicalName ?? "?"
+        let detail = event.detail.replacingOccurrences(of: "\n", with: " ")
+        print("  \(event.verb.padding(toLength: 10, withPad: " ", startingAt: 0)) \(subject.padding(toLength: 22, withPad: " ", startingAt: 0)) \(detail.prefix(78))")
+    }
+    print("\n\(events.count) events")
+}
+
+// MARK: - Corrections
+
+/// `opencore correct` — the feature the whole design document was built around, and the one
+/// that had no way to be invoked.
+///
+/// A correction does not edit the wrong claim. It asserts a new one at directStatement
+/// authority, retracts the old, and records **why the old belief was reachable**, which is
+/// the part that lets the extractor be fixed rather than the symptom patched.
+func correctClaim(_ prefix: String) async throws {
+    let store = try await openStore()
+
+    let matches = try await store.allClaims(currentOnly: true, limit: 5_000)
+        .filter { $0.id.value.hasPrefix(prefix) }
+    guard let wrong = matches.first, matches.count == 1 else {
+        if matches.isEmpty {
+            print("no current claim whose id starts with '\(prefix)'. Find one with: opencore claims")
+        } else {
+            print("'\(prefix)' matches \(matches.count) claims. Use more characters.")
+        }
+        exit(1)
+    }
+
+    guard let newValue = option("to") else {
+        print("--to is required: the corrected value.")
+        exit(1)
+    }
+    guard let reason = option("reason") else {
+        print("--reason is required. A correction with no stated reason is indistinguishable from a typo.")
+        exit(1)
+    }
+
+    let subject = try await subjectName(wrong, in: store)
+    let oldValue = try await claimValue(wrong, in: store)
+
+    // Resolve the new value to an entity if one exists, so the correction lands in the graph
+    // rather than as a dangling string.
+    let resolved = try await store.resolve(surface: newValue).first?.0
+
+    let asserted = CoreClaim(
+        subject: wrong.subject,
+        predicate: wrong.predicate,
+        objectEntity: resolved?.id,
+        literal: resolved == nil ? newValue : nil,
+        confidence: 1.0,
+        authority: .directStatement,
+        derivation: .corrected,
+        validity: Validity(validFrom: wrong.validity.validFrom, observedAt: Date()),
+        domain: wrong.domain
+    )
+
+    try await BeliefEngine(store: store).correct(
+        supersedingClaim: wrong.id,
+        with: asserted,
+        reason: reason,
+        priorFailure: option("because")
+    )
+
+    print("corrected   \(subject) \(wrong.predicate)")
+    print("  was       \(oldValue)  [\(wrong.authority.label)]")
+    print("  now       \(newValue)  [direct statement]")
+    print("  reason    \(reason)")
+    if let because = option("because") {
+        print("  because   \(because)")
+    } else {
+        print("\n  Consider --because: recording WHY the old belief was reachable is what lets")
+        print("  the extractor be fixed instead of the symptom patched.")
+    }
+    print("\n  The old claim is retracted, not deleted. `opencore memory log` shows the change.")
 }
 
 // MARK: - Rebuild
@@ -719,6 +825,14 @@ do {
     case "trace":
         guard let code = positional(1) else { print("usage: opencore trace CODE"); exit(1) }
         try await trace(code)
+    case "timeline":
+        try await timeline()
+    case "correct":
+        guard let claim = positional(1) else {
+            print("usage: opencore correct CLAIM_ID --to VALUE --reason \"...\" [--because \"...\"]")
+            exit(1)
+        }
+        try await correctClaim(claim)
     case "rebuild":
         try await rebuild()
     case "export":

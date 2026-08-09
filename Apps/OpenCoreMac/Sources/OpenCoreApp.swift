@@ -21,6 +21,7 @@ enum Section: String, CaseIterable, Identifiable, Hashable {
     case passages = "Passages"
     case claims = "Claims"
     case beliefs = "Beliefs"
+    case timeline = "Timeline"
     case timeTravel = "Time travel"
     case contradictions = "Contradictions"
     case receipts = "Receipts"
@@ -38,6 +39,7 @@ enum Section: String, CaseIterable, Identifiable, Hashable {
         case .passages: "doc.text.magnifyingglass"
         case .claims: "list.bullet.rectangle"
         case .beliefs: "checkmark.seal"
+        case .timeline: "calendar.day.timeline.left"
         case .timeTravel: "clock.arrow.circlepath"
         case .contradictions: "exclamationmark.triangle"
         case .receipts: "receipt"
@@ -69,6 +71,7 @@ struct RootView: View {
             case .passages: PassagesView()
             case .claims: ClaimsView()
             case .beliefs: BeliefsView()
+            case .timeline: TimelineView()
             case .timeTravel: TimeTravelView()
             case .contradictions: ContradictionsView()
             case .receipts: ReceiptsView()
