@@ -1,33 +1,39 @@
 # Current State
 
-Updated: 2026-08-08 13:10 PT
+Updated: 2026-08-08 16:00 PT
 Branch/worktree: `main`, primary checkout (not a linked worktree)
-Last verified commit: `6925546`
+Last verified commit: `daa9c63`
 
 ## Objective
 
-The MCP client is done. **Next objective: the eval harness** — the second and last item
-classified `force multiplier` on the roadmap, and the one every unmeasured constant in this
-repository is waiting on.
+**Build the eval harness.** It is the last item classified `force multiplier` on the board,
+every retrieval constant in the repository is waiting on it, and it now also gates the decision
+about whether to port any more of OpenIntelligence's engine.
 
 ## Status
 
-v0.3's headline work has landed and is verified against a real server. OpenCore now both
-serves MCP and consumes it, so any of the ~9,650 registry servers can be a source without
-writing a connector for it.
+Tree is clean, nothing in flight. v0.3's headline work landed: OpenCore both serves MCP and
+consumes it, the registry is browsable in-app, and the macOS app has caught up with the engine
+across ten sidebar sections.
 
-Nothing is in flight. The tree is clean and the next objective has not been started.
+The largest risk is no longer missing features. It is that **nothing in the app has been
+clicked through against real data.**
 
 ## Completed
 
-- v0.1 (`43c1581`), v0.2 (`80fa667`) — see `Docs/ROADMAP.md`.
-- `3e02ba6` — Claude Context OS: `Docs/ai/`, rules, skills, lifecycle hooks.
-- `6925546` — SessionStart staleness counts source commits, not all commits.
-- **MCP client** (this session, uncommitted at time of writing → see git log):
-  `CoreJSONRPC` extracted so client and server share types without CoreIngest depending on the
-  reasoning stack; `StdioTransport`; `MCPClient` with `initialize` → `server/discover`
-  fallback; `MCPClientConnector` with default-deny tool policy; migration 3 (`source.config`);
-  `mcp-source discover|add|list|remove` and `sync mcp`.
+- v0.1 `43c1581`, v0.2 `80fa667` — see `Docs/ROADMAP.md`.
+- `3e02ba6`, `6925546` — Claude Context OS, and a fix to its own staleness check.
+- `5aa3448` — MCP client. `CoreJSONRPC` extracted so client and server share types without
+  ingestion depending on the reasoning stack; default-deny tool policy; migration 3.
+- `4a7e97e` — app parity. The app had never used `PassageSearch` at all: it built embeddings
+  it then never searched. Added Passages, Time travel, MCP sources, Maintenance.
+- `3ee49cb`, `7b3ae89` — Settings, then real settings. `RetrievalTuning` makes the retrieval
+  constants data rather than `static let`; domain matrix; `Exporter`, which had been a README
+  promise with no code behind it.
+- `daa9c63` — Settings rebuilt on `Form`/`.formStyle(.grouped)`; MCP store over the full
+  registry; per-server credentials in the keychain.
+
+Store right now: 1,268 objects, 1,518 chunks, 39 entities, 97 claims, 0 contradictions.
 
 ## Active Constraints
 
@@ -35,85 +41,58 @@ Nothing is in flight. The tree is clean and the next objective has not been star
 - **Zero external dependencies**, including all MCP code.
 - **Unmeasured stays `nil`.** No accuracy number may be quoted; none has been measured.
 - **Authority never multiplies.** Ordinal tier, not a probability.
-- **Default-deny for MCP tools.** Never derive an allowlist automatically, however strong the
-  server's annotation looks. Widening this is a safety regression, not a convenience.
+- **MCP tools are default-deny.** Never derive an allowlist, however good the metadata looks.
+- **OpenCore runs no model.** See `DECISIONS.md`; it is the reason most of OpenIntelligence's
+  engine is absent rather than pending.
 
 ## Working Set
 
-For the next objective (eval harness):
+For the eval harness:
 
 - `Benchmarks/` does not exist yet. OpenIntelligence's `Benchmarks/rag_eval_v1.jsonl` is the
-  reference format worth copying.
-- `Sources/CoreSearch/PassageSearch.swift`: every constant to be replaced by measurement lives
-  here — RRF `k=60`, MMR `λ=0.7`, the `0.02` signal scaling.
-- `Sources/CoreModel/Receipt.swift`: `confidence` is `nil` and stays that way until the harness
-  produces a calibrated number.
-- `Sources/CoreModel/Chunker.swift`: 1200-char target, 150 overlap, both chosen.
+  format worth copying.
+- `Sources/CoreSearch/PassageSearch.swift` — `RetrievalTuning` already makes every constant a
+  value, so a parameter sweep needs no refactor first.
+- `Sources/CoreModel/Receipt.swift` — `confidence` stays `nil` until this produces a real one.
 
 ## Verification
 
-Last run 2026-08-08, all green:
+Last run 2026-08-08:
 
-- `swift build --scratch-path /private/tmp/opencore-build` -> clean
-- `swift test --scratch-path /private/tmp/opencore-build` -> **32 tests passed** (7 + 25)
-- `mcp-source discover` against OpenCore's own MCP server -> 6 tools, protocol 2025-11-25
-- `sync mcp selftest` -> 3 objects, 5 chunks; re-sync -> `0 new, 0 changed, 3 unchanged`
-- `mcp-source remove selftest` -> cascaded all 3 objects
-- macOS app: not rebuilt this session; last verified at `80fa667`
+- `swift build` and `swift test` -> clean, **32 tests pass** (7 + 25)
+- `xcodebuild -scheme OpenCore` -> BUILD SUCCEEDED, 10 sidebar sections
+- `opencore export` -> 19 files, 3.2MB, 1,249 objects, no credential patterns in the output
+- MCP registry -> one page of 100: 64 latest, 23 launchable over stdio
+- `sync mcp selftest` against OpenCore's own server -> 3 objects; re-sync `0 new, 3 unchanged`
+- Calendar **has** run against real data: 558 `calendarEvent` objects in the store
 
 ## Blockers / Unknowns
 
-- **Unknown:** whether the client works against a third-party MCP server. It has only been run
-  against OpenCore's own, which is a real server but one we wrote. *Verify:* install any
-  registry server (a filesystem or fetch server needs no credentials) and run `discover`
-  then `sync mcp`.
-- **Unknown:** whether Calendar, Reminders and Notes work against real data. Unchanged from
-  before; must be run from the built app, not the CLI.
-- **Known gap:** the MCP *server* still implements `2025-11-25`. The *client* handles both
-  generations. Server upgrade tracked Critical in Notion.
-- **Known gap:** only GitHub produces claims. MCP, files, notes and calendar are retrievable
-  but invisible to `claims`, `contradictions`, and `memory log`.
+- **Nothing in the app has been clicked through.** Every screen compiles; none has been used.
+  Riskiest path: MCP store → credentials → Add → Discover → tick tools → Sync. *Verify:* open
+  the app and do it. Tracked Critical in Notion.
+- **Settings responsiveness is fixed but unconfirmed.** Two real causes removed: `AnyView`
+  erasure in the stepper rows, and buttons gated on a background network verify. *Verify:* ask
+  the user; profile with Instruments if it still drags.
+- **The MCP client has never run against a third-party server**, only OpenCore's own. *Verify:*
+  add one from the store and sync it.
+- **Known gap:** the MCP *server* still implements `2025-11-25`; the *client* handles both
+  generations. Tracked Critical in Notion.
+- **Known gap:** only GitHub produces claims. Files, notes, calendar and MCP content are
+  retrievable but invisible to `claims`, `contradictions`, and `memory log`.
+- **Known rule violation:** rebuild SQL is duplicated between `AppModel+Maintenance.swift` and
+  `Sources/opencore/main.swift`, breaking `.claude/rules/store.md`. Fix is
+  `Store.dropDerivedLayers()` plus `Store.allObjects(pageSize:)`, about fifteen lines, and it
+  should land before anything else touches rebuild.
 
 ## Exact Next Action
 
-Create `Benchmarks/` with a ground-truthed fixture corpus and
-`Sources/opencore/EvalCommands.swift` exposing `opencore eval`. Report recall@k, MRR and nDCG
-per retrieval stage over `PassageSearch`, so the lexical and dense legs can be scored
-separately and RRF's contribution measured rather than assumed. Start with 20 hand-written
-question/expected-passage pairs against the existing GitHub corpus; that is enough to detect a
-regression and to answer the first real question — does the dense leg beat BM25 alone here.
+Create `Benchmarks/rag_eval_v1.jsonl` with 20 hand-written question/expected-passage pairs over
+the existing GitHub corpus, and `Sources/opencore/EvalCommands.swift` exposing `opencore eval`.
+Report recall@k, MRR and nDCG **per leg** — lexical alone, dense alone, then fused — so the
+first real question gets an answer: does the dense leg beat BM25 alone on this corpus, or is
+RRF carrying a passenger.
 
----
-
-## Addendum 2026-08-08 14:20 — app parity
-
-The app had fallen far behind the engine. Now wired: **Passages** (PassageSearch with the dense
-leg, RRF and MMR, showing per-leg ranks), **Time travel** (`beliefs(asOfKnowledge:)`), **MCP**
-(discover → tick tools → allowlist → sync), **Maintenance** (diagnostics + rebuild with
-before/after invariant check). App builds; 10 sidebar sections.
-
-**Known rule violation, deliberate and recorded rather than hidden:** `AppModel+Maintenance.swift`
-contains `DELETE FROM <table>` and `SELECT id FROM object LIMIT ... OFFSET ?`, duplicating
-`Sources/opencore/main.swift:611-617`. This breaks `.claude/rules/store.md` ("every SQL string
-lives in CoreStore") and the two copies will drift. **Fix:** add `Store.dropDerivedLayers()`
-and `Store.allObjects(pageSize:)` to `CoreStore`, then delete both inline copies. Small, and it
-should happen before anything else touches rebuild.
-
-**Settings tab added.** The app had no way to enter a GitHub token: it resolved only from
-`GITHUB_TOKEN` or the `gh` CLI, and launched from Finder it inherits neither. Now
-`Keychain.swift` in CoreIngest stores it, `resolveTokenWithSource` reports which of the four
-sources won, and Settings verifies against the API before saving so "saved" and "works" are
-not confused. Credentials stay out of the store, per the connectors rule.
-
-**Settings is now real**, not one text field: GitHub credential with source precedence shown,
-retrieval tuning (`RetrievalTuning` threaded through `PassageSearch` so the constants are data,
-not `static let`), chunking with a dirty warning, the domain firewall matrix, the MCP server
-config snippet, sync parameters, and **export**. Export was a stated project principle with no
-implementation until now: `Exporter` in CoreStore writes JSONL (archival, one file per table,
-re-importable) or Markdown (readable, lossy), and `opencore export` does the same.
-
-**Calendar sync is no longer an unknown** — it has run against real data. See `doctor`.
-
-**Not verified:** none of the six new views has been clicked through. The Settings token
-round-trip (save, quit, relaunch, sync) and the MCP discover→tick→sync flow are both
-unexercised.
+Everything downstream waits on that number: whether reranking is worth adding, whether the
+retrieval constants are anywhere near right, and whether OpenIntelligence's Deep Think is worth
+porting at all.

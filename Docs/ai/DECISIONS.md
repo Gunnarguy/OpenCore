@@ -195,3 +195,76 @@ disagreeing about the system is precisely the failure mode this project exists t
 
 **Consequences.** A reader following the specification literally will find a file missing. The
 omission is stated in `INDEX.md` with the reason.
+
+---
+
+## 2026-08-08 — OpenCore runs no language model
+
+**Decision.** `Reasoner` assembles answers deterministically from claim rows. `Receipt.model`
+is `nil` because nothing generated anything.
+
+**Context.** The obvious build is retrieve-then-prompt-a-model. That is what every comparable
+product does, and it is one afternoon of work.
+
+**Rationale.** Every sentence in an answer maps to a claim row with evidence attached, which
+is what lets the receipt's counters be measurements rather than estimates. A model in that
+position produces prose nobody can attribute, and the receipt would then be describing a
+provenance the answer does not have.
+
+**Consequences.** This is why most of OpenIntelligence's engine is absent rather than
+pending: verification gates, PCC routing, and multi-pass reasoning all operate on generated
+text, and there is none. Measured 2026-08-08, OpenCore has roughly a fifth of that engine —
+the fusion layer only. Answers are also duller than a model would write, and that is the
+trade.
+
+When the WWDC26 `LanguageModel` protocol lands and a model does write the prose, verification
+gates stop being optional: an ungrounded sentence inside a receipt claiming "assembled from
+claims" would be the worst thing this project could ship.
+
+---
+
+## 2026-08-08 — CoreJSONRPC is its own module
+
+**Decision.** JSON-RPC types and the stdio transport live in a dependency-free `CoreJSONRPC`,
+imported by both `CoreMCP` (server) and `CoreIngest` (client).
+
+**Alternatives.** Put them in `CoreModel`; or have `CoreIngest` depend on `CoreMCP`.
+
+**Rationale.** The second would make ingestion depend on the entire reasoning stack, since
+`CoreMCP` pulls in `CoreReason`. The first would put protocol plumbing in the domain
+vocabulary. A third small module costs nothing and keeps the dependency graph a DAG that
+still reads top to bottom.
+
+---
+
+## 2026-08-08 — MCP tools are default-deny, with no automatic path around it
+
+**Decision.** An MCP source calls only tools named in an explicit allowlist. Nothing derives
+one, including the server's own `readOnlyHint`.
+
+**Context.** MCP servers advertise write tools: `send_message`, `create_issue`, `delete_file`.
+
+**Alternatives.** Trust `readOnlyHint`; or allow tools whose names begin with a reading verb.
+
+**Rationale.** The specification states annotations come from an untrusted server and must not
+drive safety decisions. Name heuristics fail on the cases that matter: `get_message` reads,
+`get_approval` might send one. A wrong guess here does not return a bad answer, it sends an
+email. `MCPTool.readOnlyAdvisory` exists only to shorten a human's review list and the call
+path never reads it.
+
+**Consequences.** Adding a server is two steps rather than one, deliberately. Registry
+metadata is rich enough to make auto-allowlisting tempting, and it must stay refused.
+
+---
+
+## 2026-08-08 — App preferences live in UserDefaults, not the store
+
+**Decision.** `AppSettings` writes to `UserDefaults`. The SQLite store holds no preferences.
+
+**Rationale.** The store is the user's data and the thing they export, back up, and move
+between machines. A preference travelling with a dataset is wrong in both directions: an
+export would carry settings nobody asked for, and a fresh install would inherit tuning from
+whoever produced the file.
+
+**Consequences.** The CLI and the app do not share tuning. The CLI takes flags. If they ever
+need to agree, the settings belong in a config file both read, still not in the store.
