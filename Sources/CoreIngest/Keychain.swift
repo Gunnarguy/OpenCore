@@ -18,6 +18,14 @@ public enum Keychain {
         case githubToken = "github.token"
     }
 
+    /// Account name for one environment variable belonging to one MCP server.
+    ///
+    /// Namespaced per server rather than per variable name, because two servers can both want
+    /// `API_KEY` and they are not the same secret.
+    public static func mcpAccount(server: String, variable: String) -> String {
+        "mcp.\(server).env.\(variable)"
+    }
+
     public enum KeychainError: Error, CustomStringConvertible {
         case failed(OSStatus)
 
@@ -32,10 +40,14 @@ public enum Keychain {
     }
 
     public static func read(_ account: Account) -> String? {
+        read(account: account.rawValue)
+    }
+
+    public static func read(account: String) -> String? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: account.rawValue,
+            kSecAttrAccount as String: account,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
@@ -53,13 +65,17 @@ public enum Keychain {
     /// field and save" does what a user expects rather than storing an empty credential that
     /// then fails authentication confusingly.
     public static func write(_ value: String, to account: Account) throws {
+        try write(value, toAccount: account.rawValue)
+    }
+
+    public static func write(_ value: String, toAccount account: String) throws {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return try delete(account) }
+        guard !trimmed.isEmpty else { return try delete(account: account) }
 
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: account.rawValue,
+            kSecAttrAccount as String: account,
         ]
         let attributes: [String: Any] = [
             kSecValueData as String: Data(trimmed.utf8),
@@ -77,10 +93,14 @@ public enum Keychain {
     }
 
     public static func delete(_ account: Account) throws {
+        try delete(account: account.rawValue)
+    }
+
+    public static func delete(account: String) throws {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: account.rawValue,
+            kSecAttrAccount as String: account,
         ]
         let status = SecItemDelete(query as CFDictionary)
         // Deleting something that was never there is a success, not a failure.

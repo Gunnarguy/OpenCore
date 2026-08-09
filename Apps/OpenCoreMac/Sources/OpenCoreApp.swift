@@ -26,6 +26,7 @@ enum Section: String, CaseIterable, Identifiable, Hashable {
     case receipts = "Receipts"
     case sources = "Sources"
     case mcp = "MCP"
+    case mcpStore = "MCP Store"
     case maintenance = "Maintenance"
     case settings = "Settings"
 
@@ -42,6 +43,7 @@ enum Section: String, CaseIterable, Identifiable, Hashable {
         case .receipts: "receipt"
         case .sources: "arrow.triangle.2.circlepath"
         case .mcp: "powerplug"
+        case .mcpStore: "square.grid.2x2"
         case .maintenance: "stethoscope"
         case .settings: "gearshape"
         }
@@ -72,6 +74,7 @@ struct RootView: View {
             case .receipts: ReceiptsView()
             case .sources: SourcesView()
             case .mcp: MCPSourcesView()
+            case .mcpStore: MCPStoreView()
             case .maintenance: MaintenanceView()
             case .settings: SettingsView()
             }

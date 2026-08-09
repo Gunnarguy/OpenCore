@@ -7,97 +7,75 @@ import SwiftUI
 
 /// Credentials, tuning, privacy policy, and getting your data back out.
 ///
-/// The organising idea is that a setting should either change behaviour or reveal state that
-/// is otherwise invisible. The retrieval section does the first; the domain matrix and the
-/// token-source list do the second. Nothing here is a preference for its own sake.
+/// Built on `Form` with `.formStyle(.grouped)` rather than hand-rolled cards. The first
+/// version stacked custom `VStack` panels and looked like a web page pasted into a Mac app:
+/// wrong control sizes, wrong label alignment, wrong spacing. `Form` gets all of that from
+/// the platform for free and matches System Settings.
+///
+/// The rule for what earns a place here: a setting must either change behaviour or reveal
+/// state that is otherwise invisible. The domain matrix and the token-source list do the
+/// second. Nothing is a preference for its own sake.
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
     @Environment(AppSettings.self) private var settings
+    @State private var tab: Tab = .credentials
+
+    enum Tab: String, CaseIterable, Identifiable {
+        case credentials = "Credentials"
+        case retrieval = "Retrieval"
+        case privacy = "Privacy"
+        case sync = "Sync"
+        case data = "Data"
+
+        var id: String { rawValue }
+
+        var symbol: String {
+            switch self {
+            case .credentials: "key"
+            case .retrieval: "slider.horizontal.3"
+            case .privacy: "lock.shield"
+            case .sync: "arrow.triangle.2.circlepath"
+            case .data: "internaldrive"
+            }
+        }
+    }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Settings").font(.title2.weight(.semibold))
-                    Text("Credentials live in your keychain. Preferences live in UserDefaults. Neither is in the store.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+        VStack(spacing: 0) {
+            Picker("", selection: $tab) {
+                ForEach(Tab.allCases) { item in
+                    Label(item.rawValue, systemImage: item.symbol).tag(item)
                 }
-
-                GitHubCredentialPanel()
-                RetrievalPanel()
-                ChunkingPanel()
-                PrivacyPanel()
-                MCPServerPanel()
-                SyncPanel()
-                DataPanel()
-                Spacer(minLength: 0)
             }
-            .padding(24)
-            .frame(maxWidth: 760, alignment: .leading)
-            .frame(maxWidth: .infinity)
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding(12)
+
+            Divider()
+
+            switch tab {
+            case .credentials: CredentialsTab()
+            case .retrieval: RetrievalTab()
+            case .privacy: PrivacyTab()
+            case .sync: SyncTab()
+            case .data: DataTab()
+            }
         }
         .navigationTitle("Settings")
     }
 }
 
-// MARK: - Shared chrome
+// MARK: - Credentials
 
-private struct Panel<Content: View>: View {
-    let title: String
-    let symbol: String
-    var subtitle: String?
-    @ViewBuilder var content: Content
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
-                Label(title, systemImage: symbol).font(.callout.weight(.medium))
-                if let subtitle {
-                    Text(subtitle).font(.caption).foregroundStyle(.tertiary)
-                }
-            }
-            content
-        }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quaternary.opacity(0.3), in: .rect(cornerRadius: 10))
-    }
-}
-
-/// A labelled numeric control with its default shown, so "is this the baseline" never needs
-/// checking against source.
-private struct TunedValue: View {
-    let label: String
-    let help: String
-    let defaultText: String
-    let isDefault: Bool
-    @ViewBuilder var control: () -> AnyView
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack {
-                Text(label).font(.caption.weight(.medium))
-                Spacer()
-                control()
-                if !isDefault {
-                    Text("default \(defaultText)")
-                        .font(.caption2.monospaced())
-                        .foregroundStyle(.orange)
-                }
-            }
-            Text(help).font(.caption2).foregroundStyle(.tertiary)
-        }
-    }
-}
-
-// MARK: - GitHub
-
-private struct GitHubCredentialPanel: View {
+private struct CredentialsTab: View {
     @State private var tokenField = ""
     @State private var status: Status = .unknown
     @State private var source: CredentialSource = .none
-    @State private var checking = false
+    /// Only true during a save. **Not** set by the background verify: gating the buttons on a
+    /// network call is what made them feel dead, since an offline machine left Save disabled
+    /// with no explanation.
+    @State private var saving = false
+    @State private var verifying = false
 
     enum Status: Equatable {
         case unknown, absent
@@ -106,49 +84,76 @@ private struct GitHubCredentialPanel: View {
     }
 
     var body: some View {
-        Panel(title: "GitHub", symbol: "chevron.left.forwardslash.chevron.right") {
-            StatusLine(status: status, source: source, checking: checking)
+        Form {
+            SwiftUI.Section {
+                LabeledContent("Status") { StatusLine(status: status, source: source, busy: verifying) }
 
-            HStack(spacing: 8) {
-                SecureField("ghp_… or github_pat_…", text: $tokenField)
-                    .textFieldStyle(.roundedBorder)
+                SecureField("Token", text: $tokenField, prompt: Text("ghp_… or github_pat_…"))
                     .onSubmit { Task { await save() } }
-                Button("Save") { Task { await save() } }
-                    .disabled(tokenField.trimmingCharacters(in: .whitespaces).isEmpty || checking)
-                if case .present = status {
-                    Button("Clear", role: .destructive) { Task { await clear() } }.disabled(checking)
+
+                HStack {
+                    Button("Save") { Task { await save() } }
+                        .disabled(tokenField.trimmingCharacters(in: .whitespaces).isEmpty || saving)
+                    if case .present = status {
+                        Button("Clear", role: .destructive) { Task { await clear() } }.disabled(saving)
+                    }
+                    Button("Re-check") { Task { await refresh() } }.disabled(verifying)
+                    if saving { ProgressView().controlSize(.small) }
                 }
+            } header: {
+                Text("GitHub")
+            } footer: {
+                Text("Classic tokens need `repo`, or `public_repo` for public repositories only. Saving verifies against the API first, because saved and working are different facts.")
             }
 
-            Text("Classic tokens need `repo`, or `public_repo` for public repositories only. Saving verifies against the API before reporting success.")
-                .font(.caption2).foregroundStyle(.tertiary)
-
-            Divider()
-            PrecedenceList()
+            SwiftUI.Section {
+                ForEach(Array(Self.precedence.enumerated()), id: \.offset) { index, entry in
+                    LabeledContent {
+                        Text(entry.1).font(.caption).foregroundStyle(.secondary)
+                    } label: {
+                        HStack(spacing: 6) {
+                            Text("\(index + 1).").foregroundStyle(.tertiary)
+                            Text(entry.0).monospaced()
+                        }
+                    }
+                }
+            } header: {
+                Text("Where a token is looked for")
+            } footer: {
+                Text("The environment wins over the keychain on purpose, so a one-off GITHUB_TOKEN=… run overrides a saved token without changing it.")
+            }
         }
+        .formStyle(.grouped)
         .task { await refresh() }
     }
 
+    static let precedence: [(String, String)] = [
+        ("--token", "passed to the CLI"),
+        ("GITHUB_TOKEN", "environment variable"),
+        ("keychain", "what this screen saves; the only source the app has on its own"),
+        ("gh auth token", "the GitHub CLI, if installed and signed in"),
+    ]
+
     private func refresh() async {
-        checking = true
-        defer { checking = false }
+        verifying = true
+        defer { verifying = false }
         let resolved = GitHubConnector.resolveTokenWithSource()
         source = resolved.source
         guard let token = resolved.token else { status = .absent; return }
         if let login = await GitHubConnector.verify(token: token) {
             status = .present(login: login)
         } else {
-            status = .invalid("the token found via \(resolved.source.rawValue) was rejected by GitHub")
+            status = .invalid("the token found via \(resolved.source.rawValue) was rejected")
         }
     }
 
     private func save() async {
-        checking = true
-        defer { checking = false }
+        saving = true
+        defer { saving = false }
         let candidate = tokenField.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !candidate.isEmpty else { return }
         guard let login = await GitHubConnector.verify(token: candidate) else {
-            status = .invalid("GitHub rejected that token. Check its scopes and that it has not expired.")
+            status = .invalid("GitHub rejected that token. Check its scopes and expiry.")
             return
         }
         do {
@@ -156,9 +161,7 @@ private struct GitHubCredentialPanel: View {
             tokenField = ""
             status = .present(login: login)
             source = GitHubConnector.resolveTokenWithSource().source
-        } catch {
-            status = .invalid("\(error)")
-        }
+        } catch { status = .invalid("\(error)") }
     }
 
     private func clear() async {
@@ -171,16 +174,16 @@ private struct GitHubCredentialPanel: View {
 }
 
 private struct StatusLine: View {
-    let status: GitHubCredentialPanel.Status
+    let status: CredentialsTab.Status
     let source: CredentialSource
-    let checking: Bool
+    let busy: Bool
 
     private var symbol: String {
         switch status {
         case .unknown: "hourglass"
         case .absent: "exclamationmark.triangle"
-        case .present: "checkmark.circle"
-        case .invalid: "xmark.circle"
+        case .present: "checkmark.circle.fill"
+        case .invalid: "xmark.circle.fill"
         }
     }
 
@@ -196,202 +199,182 @@ private struct StatusLine: View {
     private var message: String {
         switch status {
         case .unknown: "checking"
-        case .absent: "No token found. GitHub sync will not work until you add one."
-        case .present(let login): "Authenticated as \(login), via \(source.rawValue)."
+        case .absent: "no token found"
+        case .present(let login): "\(login), via \(source.rawValue)"
         case .invalid(let reason): reason
         }
     }
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
+        HStack(spacing: 6) {
             Image(systemName: symbol).foregroundStyle(tint)
-            Text(message).font(.callout)
-            Spacer(minLength: 0)
-            if checking { ProgressView().controlSize(.small) }
-        }
-    }
-}
-
-private struct PrecedenceList: View {
-    static let entries: [(String, String)] = [
-        ("--token", "passed to the CLI"),
-        ("GITHUB_TOKEN", "environment variable"),
-        ("keychain", "what this screen saves; the only source the app can use on its own"),
-        ("gh auth token", "the GitHub CLI, if installed and signed in"),
-    ]
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("Looked for in this order").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-            ForEach(Array(Self.entries.enumerated()), id: \.offset) { index, entry in
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text("\(index + 1).").font(.caption.monospaced()).foregroundStyle(.tertiary)
-                    Text(entry.0).font(.caption.monospaced())
-                    Text(entry.1).font(.caption2).foregroundStyle(.tertiary)
-                }
-            }
-            Text("The environment wins over the keychain on purpose, so a one-off GITHUB_TOKEN=… run overrides a saved token without changing it.")
-                .font(.caption2).foregroundStyle(.tertiary).padding(.top, 2)
+            Text(message)
+            if busy { ProgressView().controlSize(.small) }
         }
     }
 }
 
 // MARK: - Retrieval
 
-private struct RetrievalPanel: View {
-    @Environment(AppSettings.self) private var settings
+/// A numeric row.
+///
+/// Generic over its control rather than taking `AnyView`. The first version erased to
+/// `AnyView`, which destroys SwiftUI's view identity and forces the whole subtree to be
+/// rebuilt on every keystroke of a stepper instead of diffed. Every control on the screen
+/// was wrapped in one, which is why they felt unresponsive.
+private struct Tuned<Control: View>: View {
+    let label: String
+    let help: String
+    let isDefault: Bool
+    let defaultText: String
+    @ViewBuilder var control: Control
 
     var body: some View {
-        @Bindable var settings = settings
-        Panel(
-            title: "Retrieval",
-            symbol: "slider.horizontal.3",
-            subtitle: "Every value here was chosen, not measured. Nothing in this project has an accuracy number yet, so treat these as an experiment rather than a configuration."
-        ) {
-            TunedValue(label: "RRF k", help: "How fast rank advantage decays when fusing the two legs. Higher means appearing in both matters more than topping one.", defaultText: "60", isDefault: settings.rrfK == 60) {
-                AnyView(Stepper(value: $settings.rrfK, in: 1...200, step: 5) {
-                    Text(String(format: "%.0f", settings.rrfK)).font(.caption.monospaced()).frame(width: 34, alignment: .trailing)
-                }.labelsHidden())
+        LabeledContent {
+            HStack(spacing: 8) {
+                control
+                if !isDefault {
+                    Text("was \(defaultText)").font(.caption).foregroundStyle(.orange).monospacedDigit()
+                }
             }
-            TunedValue(label: "MMR λ", help: "Relevance versus diversity. At 1.0 diversification is off and near-duplicate passages come back together.", defaultText: "0.70", isDefault: settings.mmrLambda == 0.7) {
-                AnyView(Stepper(value: $settings.mmrLambda, in: 0.1...1.0, step: 0.05) {
-                    Text(String(format: "%.2f", settings.mmrLambda)).font(.caption.monospaced()).frame(width: 34, alignment: .trailing)
-                }.labelsHidden())
-            }
-            TunedValue(label: "Candidates per leg", help: "How many results each retriever contributes before fusion. Higher finds more of the tail and costs a longer scan.", defaultText: "100", isDefault: settings.candidatesPerLeg == 100) {
-                AnyView(Stepper(value: $settings.candidatesPerLeg, in: 10...500, step: 10) {
-                    Text("\(settings.candidatesPerLeg)").font(.caption.monospaced()).frame(width: 34, alignment: .trailing)
-                }.labelsHidden())
-            }
-            TunedValue(label: "Signal scale", help: "How much authority and recency count once relevance is fused. The most obviously unprincipled number in the system.", defaultText: "0.020", isDefault: settings.signalScale == 0.02) {
-                AnyView(Stepper(value: $settings.signalScale, in: 0...0.2, step: 0.005) {
-                    Text(String(format: "%.3f", settings.signalScale)).font(.caption.monospaced()).frame(width: 40, alignment: .trailing)
-                }.labelsHidden())
-            }
-            TunedValue(label: "Results", help: "Passages returned by a search.", defaultText: "8", isDefault: settings.passageLimit == 8) {
-                AnyView(Stepper(value: $settings.passageLimit, in: 1...50) {
-                    Text("\(settings.passageLimit)").font(.caption.monospaced()).frame(width: 34, alignment: .trailing)
-                }.labelsHidden())
-            }
-
-            Toggle("Expand hits into neighbouring passages", isOn: $settings.expandContext)
-                .font(.caption)
-
-            if !settings.retrievalIsDefault {
-                Button("Reset to defaults") { settings.resetRetrieval() }.controlSize(.small)
+        } label: {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(label)
+                Text(help).font(.caption).foregroundStyle(.tertiary)
             }
         }
     }
 }
 
-// MARK: - Chunking
-
-private struct ChunkingPanel: View {
+private struct RetrievalTab: View {
     @Environment(AppSettings.self) private var settings
 
     var body: some View {
         @Bindable var settings = settings
-        Panel(
-            title: "Chunking",
-            symbol: "square.split.2x1",
-            subtitle: "The only settings here that invalidate data already on disk."
-        ) {
-            TunedValue(label: "Target size", help: "Characters per passage. Roughly four characters per token.", defaultText: "1200", isDefault: settings.chunkTargetSize == AppSettings.defaultChunkTargetSize) {
-                AnyView(Stepper(value: $settings.chunkTargetSize, in: 200...4000, step: 100) {
-                    Text("\(settings.chunkTargetSize)").font(.caption.monospaced()).frame(width: 42, alignment: .trailing)
-                }.labelsHidden())
-            }
-            TunedValue(label: "Overlap", help: "Trailing context repeated into the next passage, so a fact split across a boundary stays findable.", defaultText: "150", isDefault: settings.chunkOverlap == AppSettings.defaultChunkOverlap) {
-                AnyView(Stepper(value: $settings.chunkOverlap, in: 0...800, step: 25) {
-                    Text("\(settings.chunkOverlap)").font(.caption.monospaced()).frame(width: 42, alignment: .trailing)
-                }.labelsHidden())
+        Form {
+            SwiftUI.Section {
+                Tuned(label: "RRF k", help: "How fast rank advantage decays when fusing the two legs.", isDefault: settings.rrfK == 60, defaultText: "60") {
+                    Stepper(value: $settings.rrfK, in: 1...200, step: 5) {
+                        Text("\(Int(settings.rrfK))").monospacedDigit().frame(width: 36, alignment: .trailing)
+                    }
+                }
+                Tuned(label: "MMR λ", help: "Relevance versus diversity. At 1.0 diversification is off.", isDefault: settings.mmrLambda == 0.7, defaultText: "0.70") {
+                    Stepper(value: $settings.mmrLambda, in: 0.1...1.0, step: 0.05) {
+                        Text(settings.mmrLambda.formatted(.number.precision(.fractionLength(2)))).monospacedDigit().frame(width: 36, alignment: .trailing)
+                    }
+                }
+                Tuned(label: "Candidates per leg", help: "Results each retriever contributes before fusion.", isDefault: settings.candidatesPerLeg == 100, defaultText: "100") {
+                    Stepper(value: $settings.candidatesPerLeg, in: 10...500, step: 10) {
+                        Text("\(settings.candidatesPerLeg)").monospacedDigit().frame(width: 36, alignment: .trailing)
+                    }
+                }
+                Tuned(label: "Signal scale", help: "How much authority and recency count once relevance is fused.", isDefault: settings.signalScale == 0.02, defaultText: "0.020") {
+                    Stepper(value: $settings.signalScale, in: 0...0.2, step: 0.005) {
+                        Text(settings.signalScale.formatted(.number.precision(.fractionLength(3)))).monospacedDigit().frame(width: 44, alignment: .trailing)
+                    }
+                }
+                Tuned(label: "Results", help: "Passages returned by a search.", isDefault: settings.passageLimit == 8, defaultText: "8") {
+                    Stepper(value: $settings.passageLimit, in: 1...50) {
+                        Text("\(settings.passageLimit)").monospacedDigit().frame(width: 36, alignment: .trailing)
+                    }
+                }
+                Toggle("Expand hits into neighbouring passages", isOn: $settings.expandContext)
+            } header: {
+                Text("Fusion and ranking")
+            } footer: {
+                Text("Every value here was chosen, not measured. Nothing in this project has an accuracy number yet, so treat these as an experiment rather than a configuration.")
             }
 
-            if !settings.chunkingIsDefault {
-                Label(
-                    "Existing passages were built with the old values and will not match until you re-derive, then rebuild embeddings. Until then the store is inconsistent with these settings.",
-                    systemImage: "exclamationmark.triangle.fill"
-                )
-                .font(.caption)
-                .foregroundStyle(.orange)
-                Button("Reset to defaults") { settings.resetChunking() }.controlSize(.small)
+            SwiftUI.Section {
+                Tuned(label: "Target size", help: "Characters per passage, roughly four per token.", isDefault: settings.chunkTargetSize == AppSettings.defaultChunkTargetSize, defaultText: "1200") {
+                    Stepper(value: $settings.chunkTargetSize, in: 200...4000, step: 100) {
+                        Text("\(settings.chunkTargetSize)").monospacedDigit().frame(width: 44, alignment: .trailing)
+                    }
+                }
+                Tuned(label: "Overlap", help: "Trailing context repeated into the next passage.", isDefault: settings.chunkOverlap == AppSettings.defaultChunkOverlap, defaultText: "150") {
+                    Stepper(value: $settings.chunkOverlap, in: 0...800, step: 25) {
+                        Text("\(settings.chunkOverlap)").monospacedDigit().frame(width: 44, alignment: .trailing)
+                    }
+                }
+                if !settings.chunkingIsDefault {
+                    Label("Stored passages were built with the old values. Re-derive on the Maintenance tab, then rebuild embeddings, or the store stays inconsistent with these settings.", systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange).font(.callout)
+                }
+            } header: {
+                Text("Chunking")
+            } footer: {
+                Text("The only settings that invalidate data already on disk.")
+            }
+
+            if !settings.retrievalIsDefault || !settings.chunkingIsDefault {
+                SwiftUI.Section {
+                    Button("Reset everything to defaults") {
+                        settings.resetRetrieval()
+                        settings.resetChunking()
+                    }
+                }
             }
         }
+        .formStyle(.grouped)
     }
 }
 
 // MARK: - Privacy
 
-private struct PrivacyPanel: View {
+private struct PrivacyTab: View {
     @Environment(AppSettings.self) private var settings
 
     var body: some View {
         @Bindable var settings = settings
-        Panel(
-            title: "Domains",
-            symbol: "lock.shield",
-            subtitle: "What a question in one domain is allowed to read. Applied before ranking, so a blocked match is never scored rather than being filtered out afterwards."
-        ) {
-            VStack(alignment: .leading, spacing: 5) {
+        Form {
+            SwiftUI.Section {
                 ForEach(Domain.allCases, id: \.self) { domain in
-                    DomainRow(domain: domain)
+                    LabeledContent {
+                        Text(domain.readableDomains.map(\.rawValue).sorted().joined(separator: ", "))
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                    } label: {
+                        Text(domain.rawValue)
+                            .monospaced()
+                            .foregroundStyle(domain.isSensitive ? Color.orange : Color.primary)
+                    }
                 }
+            } header: {
+                Text("What a question in each domain may read")
+            } footer: {
+                Text("Applied before ranking, so a blocked match is never scored rather than filtered out afterwards. Compiled in and not configurable; shown because a firewall you cannot see is one you cannot trust.")
             }
 
-            Text("This matrix is compiled in, not configurable. It is shown because a firewall you cannot see is one you cannot trust.")
-                .font(.caption2).foregroundStyle(.tertiary)
-
-            Divider()
-
-            Toggle(isOn: $settings.mcpExposeSensitiveDomains) {
-                Text("Let MCP callers reach medical, financial and relationship data")
-                    .font(.caption)
+            SwiftUI.Section {
+                Toggle("Let MCP callers reach medical, financial and relationship data", isOn: $settings.mcpExposeSensitiveDomains)
+                if settings.mcpExposeSensitiveDomains {
+                    Label("Any tool caller can now reach every domain. The query text reaching that server is written by a model, and a model asking about your diagnosis is not consent.", systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange).font(.callout)
+                }
+            } header: {
+                Text("MCP server")
+            } footer: {
+                Text(settings.mcpExposeSensitiveDomains
+                     ? "Turn this off unless you control every client that connects."
+                     : "Off. No wording in a tool call reaches those domains, and a question that classifies as sensitive is answered from project data rather than refused.")
             }
-            Text(settings.mcpExposeSensitiveDomains
-                 ? "ON. Any tool caller can reach every domain. The query text reaching that server is written by a model, and a model asking about your diagnosis is not consent. Turn this off unless you control every client."
-                 : "Off. No wording in a tool call reaches those domains, and a question that classifies as sensitive is answered from project data instead of refused.")
-                .font(.caption2)
-                .foregroundStyle(settings.mcpExposeSensitiveDomains ? Color.orange : Color.secondary)
+
+            SwiftUI.Section("Client config") { MCPConfigSnippet() }
         }
+        .formStyle(.grouped)
     }
 }
 
-private struct DomainRow: View {
-    let domain: Domain
-
-    var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text(domain.rawValue)
-                .font(.caption.monospaced())
-                .foregroundStyle(domain.isSensitive ? Color.orange : .primary)
-                .frame(width: 92, alignment: .leading)
-            Image(systemName: "arrow.right").font(.caption2).foregroundStyle(.tertiary)
-            Text(domain.readableDomains.map(\.rawValue).sorted().joined(separator: ", "))
-                .font(.caption.monospaced())
-                .foregroundStyle(.secondary)
-            Spacer(minLength: 0)
-        }
-    }
-}
-
-// MARK: - MCP server
-
-private struct MCPServerPanel: View {
+private struct MCPConfigSnippet: View {
     @Environment(AppSettings.self) private var settings
     @State private var copied = false
-
-    /// The release binary is what a client should launch. Debug works but lives in a scratch
-    /// path that gets wiped.
-    private var binaryPath: String {
-        "/Users/gunnarhostetler/Documents/GitHub/OpenCore/.build/release/opencore"
-    }
 
     private var snippet: String {
         """
         {
           "mcpServers": {
             "opencore": {
-              "command": "\(binaryPath)",
+              "command": "/Users/gunnarhostetler/Documents/GitHub/OpenCore/.build/release/opencore",
               "args": ["mcp"\(settings.mcpExposeSensitiveDomains ? ", \"--unsafe-expose-sensitive\"" : "")]
             }
           }
@@ -400,30 +383,20 @@ private struct MCPServerPanel: View {
     }
 
     var body: some View {
-        Panel(
-            title: "Serve over MCP",
-            symbol: "antenna.radiowaves.left.and.right",
-            subtitle: "Let Claude or any MCP client query your history and cite it back to the commit it came from."
-        ) {
-            Text("Build the release binary first: `swift build -c release`. Then paste this into your client's config.")
-                .font(.caption2).foregroundStyle(.tertiary)
-
+        VStack(alignment: .leading, spacing: 8) {
             Text(snippet)
                 .font(.caption.monospaced())
                 .textSelection(.enabled)
-                .padding(10)
+                .padding(8)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(.quaternary.opacity(0.4), in: .rect(cornerRadius: 6))
-
             HStack {
                 Button(copied ? "Copied" : "Copy") {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(snippet, forType: .string)
                     copied = true
                 }
-                .controlSize(.small)
-                Text("Six tools: ask, search, claims, contradictions, changed, trace.")
-                    .font(.caption2).foregroundStyle(.tertiary)
+                Text("Run `swift build -c release` first.").font(.caption).foregroundStyle(.tertiary)
             }
         }
     }
@@ -431,83 +404,87 @@ private struct MCPServerPanel: View {
 
 // MARK: - Sync
 
-private struct SyncPanel: View {
+private struct SyncTab: View {
     @Environment(AppSettings.self) private var settings
 
     var body: some View {
         @Bindable var settings = settings
-        Panel(title: "Sync", symbol: "arrow.triangle.2.circlepath") {
-            TunedValue(label: "Commits per repository", help: "How far back GitHub history is read on a full sync. Later syncs are incremental regardless.", defaultText: "100", isDefault: settings.githubCommitsPerRepo == 100) {
-                AnyView(Stepper(value: $settings.githubCommitsPerRepo, in: 10...1000, step: 10) {
-                    Text("\(settings.githubCommitsPerRepo)").font(.caption.monospaced()).frame(width: 42, alignment: .trailing)
-                }.labelsHidden())
+        Form {
+            SwiftUI.Section("GitHub") {
+                Tuned(label: "Commits per repository", help: "How far back a full sync reads. Later syncs are incremental regardless.", isDefault: settings.githubCommitsPerRepo == 100, defaultText: "100") {
+                    Stepper(value: $settings.githubCommitsPerRepo, in: 10...1000, step: 10) {
+                        Text("\(settings.githubCommitsPerRepo)").monospacedDigit().frame(width: 44, alignment: .trailing)
+                    }
+                }
+                Toggle("Include forks", isOn: $settings.githubIncludeForks)
             }
-            Toggle("Include forks", isOn: $settings.githubIncludeForks).font(.caption)
 
-            Divider()
-
-            TunedValue(label: "Calendar look-back", help: "Days of past events to read.", defaultText: "730", isDefault: settings.calendarLookBackDays == 730) {
-                AnyView(Stepper(value: $settings.calendarLookBackDays, in: 30...3650, step: 30) {
-                    Text("\(settings.calendarLookBackDays)").font(.caption.monospaced()).frame(width: 42, alignment: .trailing)
-                }.labelsHidden())
-            }
-            TunedValue(label: "Calendar look-ahead", help: "Days of future events to read.", defaultText: "180", isDefault: settings.calendarLookAheadDays == 180) {
-                AnyView(Stepper(value: $settings.calendarLookAheadDays, in: 0...730, step: 30) {
-                    Text("\(settings.calendarLookAheadDays)").font(.caption.monospaced()).frame(width: 42, alignment: .trailing)
-                }.labelsHidden())
+            SwiftUI.Section("Calendar") {
+                Tuned(label: "Look back", help: "Days of past events to read.", isDefault: settings.calendarLookBackDays == 730, defaultText: "730") {
+                    Stepper(value: $settings.calendarLookBackDays, in: 30...3650, step: 30) {
+                        Text("\(settings.calendarLookBackDays)").monospacedDigit().frame(width: 44, alignment: .trailing)
+                    }
+                }
+                Tuned(label: "Look ahead", help: "Days of future events to read.", isDefault: settings.calendarLookAheadDays == 180, defaultText: "180") {
+                    Stepper(value: $settings.calendarLookAheadDays, in: 0...730, step: 30) {
+                        Text("\(settings.calendarLookAheadDays)").monospacedDigit().frame(width: 44, alignment: .trailing)
+                    }
+                }
             }
         }
+        .formStyle(.grouped)
     }
 }
 
 // MARK: - Data
 
-private struct DataPanel: View {
+private struct DataTab: View {
     @Environment(AppModel.self) private var model
     @State private var exporting = false
-    @State private var result: String?
+    @State private var outcome: String?
 
     var body: some View {
-        Panel(
-            title: "Your data",
-            symbol: "square.and.arrow.up",
-            subtitle: "One SQLite file, shared with the opencore CLI. No credentials in it, and it is not encrypted, so treat it as you would the documents it was built from."
-        ) {
-            if let path = model.storePath {
-                HStack(spacing: 8) {
-                    Text(path).font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
-                    Button("Reveal") {
-                        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+        Form {
+            SwiftUI.Section {
+                if let path = model.storePath {
+                    LabeledContent("Location") {
+                        HStack {
+                            Text(path).font(.caption.monospaced()).textSelection(.enabled).lineLimit(1).truncationMode(.head)
+                            Button("Reveal") {
+                                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+                            }
+                        }
                     }
-                    .controlSize(.small)
                 }
+                LabeledContent("Contents", value: "\(model.objectCount) objects · \(model.chunkCount) passages · \(model.claimCount) claims")
+            } header: {
+                Text("Store")
+            } footer: {
+                Text("One SQLite file, shared with the opencore CLI. It holds no credentials, and it is not encrypted, so treat it as you would the documents it was built from.")
             }
 
-            Divider()
-
-            Text("Export everything. JSONL is the archival copy, one file per table, losslessly re-importable. Markdown is the readable copy and is lossy.")
-                .font(.caption2).foregroundStyle(.tertiary)
-
-            HStack(spacing: 8) {
-                ForEach(Exporter.Format.allCases, id: \.self) { format in
-                    Button(format.rawValue.uppercased()) { Task { await export(format) } }
-                        .controlSize(.small)
-                        .disabled(exporting)
+            SwiftUI.Section {
+                HStack {
+                    ForEach(Exporter.Format.allCases, id: \.self) { format in
+                        Button(format.rawValue.uppercased()) { Task { await export(format) } }.disabled(exporting)
+                    }
+                    if exporting { ProgressView().controlSize(.small) }
                 }
-                if exporting { ProgressView().controlSize(.small) }
-                if let result {
-                    Text(result).font(.caption).foregroundStyle(.secondary)
+                if let outcome {
+                    Text(outcome).font(.caption).foregroundStyle(.secondary)
                 }
+            } header: {
+                Text("Export")
+            } footer: {
+                Text("JSONL is the archival copy: one file per table, losslessly re-importable. Markdown is readable and lossy. Uninstall OpenCore and either still opens in any text editor.")
             }
-
-            Text("Nothing here holds your data hostage. Uninstall OpenCore and the export still opens in any text editor.")
-                .font(.caption2).foregroundStyle(.tertiary)
         }
+        .formStyle(.grouped)
     }
 
     private func export(_ format: Exporter.Format) async {
         exporting = true
         defer { exporting = false }
-        result = await model.exportStore(format: format)
+        outcome = await model.exportStore(format: format)
     }
 }

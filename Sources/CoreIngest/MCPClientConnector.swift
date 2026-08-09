@@ -52,15 +52,38 @@ public struct MCPServerConfig: Sendable, Codable, Hashable {
         for key in ["PATH", "HOME", "LANG", "TMPDIR", "USER"] {
             if let value = parent[key] { child[key] = value }
         }
-        for name in environmentNames {
-            if let value = parent[name], !value.isEmpty { child[name] = value }
+        for variable in environmentNames {
+            // Process environment first, so a one-off shell override still works, then the
+            // keychain, which is the only source the app has when launched from Finder.
+            if let value = parent[variable], !value.isEmpty {
+                child[variable] = value
+            } else if let stored = Keychain.read(account: Keychain.mcpAccount(server: name, variable: variable)), !stored.isEmpty {
+                child[variable] = stored
+            }
         }
         return child
     }
 
     public var missingEnvironment: [String] {
         let parent = ProcessInfo.processInfo.environment
-        return environmentNames.filter { (parent[$0] ?? "").isEmpty }
+        return environmentNames.filter { variable in
+            if let value = parent[variable], !value.isEmpty { return false }
+            let stored = Keychain.read(account: Keychain.mcpAccount(server: name, variable: variable))
+            return (stored ?? "").isEmpty
+        }
+    }
+
+    /// Where each declared variable's value is currently coming from, for display. Never
+    /// returns a value, only its origin.
+    public func environmentOrigins() -> [(variable: String, origin: String)] {
+        let parent = ProcessInfo.processInfo.environment
+        return environmentNames.map { variable in
+            if let value = parent[variable], !value.isEmpty { return (variable, "environment") }
+            if let stored = Keychain.read(account: Keychain.mcpAccount(server: name, variable: variable)), !stored.isEmpty {
+                return (variable, "keychain")
+            }
+            return (variable, "not set")
+        }
     }
 }
 
