@@ -140,6 +140,7 @@ final class AppModel {
     func syncCalendar() async { await sync(AppleEventKitConnector(scope: .calendar, lookBackDays: settings.calendarLookBackDays, lookAheadDays: settings.calendarLookAheadDays), label: "Calendar") }
     func syncReminders() async { await sync(AppleEventKitConnector(scope: .reminders), label: "Reminders") }
     func syncNotes() async { await sync(AppleNotesConnector(), label: "Notes") }
+    func syncHealth() async { await sync(HealthKitConnector(), label: "Health") }
 
     func syncFolder(_ url: URL, domain: Domain) async {
         let connector = FilesystemConnector(

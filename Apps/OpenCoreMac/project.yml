@@ -35,6 +35,7 @@ targets:
         # EventKit reads these from the *calling binary's* Info.plist. Without them the
         # request is denied with no prompt, which looks exactly like an empty calendar.
         # This is why Calendar and Reminders sync works from the app and not from the CLI.
+        NSHealthShareUsageDescription: OpenCore reads workouts and daily activity totals so they can be searched alongside the rest of your history. Everything from Health is tagged medical and is unreachable from project questions or over MCP.
         NSCalendarsFullAccessUsageDescription: "OpenCore reads your calendar so you can ask questions about your own history. Events are stored locally, tagged personal, and are never reachable from a project question or through the MCP server."
         NSRemindersFullAccessUsageDescription: "OpenCore reads your reminders so you can ask questions about your own history. They are stored locally, tagged personal, and are never reachable from a project question or through the MCP server."
         NSAppleEventsUsageDescription: "OpenCore reads Apple Notes through AppleScript, which is the only interface Notes provides. Notes stay on this device."

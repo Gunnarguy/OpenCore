@@ -250,6 +250,8 @@ public enum Predicate {
     public static let metWith = "met_with"
     public static let attended = "attended"
     public static let partOf = "part_of"
+    public static let contributedTo = "contributed_to"
+    public static let hasComponent = "has_component"
     public static let organiser = "organised_by"
 
     /// Predicates where one subject may hold only one current value. These are the ones

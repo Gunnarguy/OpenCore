@@ -109,6 +109,19 @@ public struct EntityResolver: Sendable {
                 aliases.insert(EntityAlias(entityID: entity.id, surface: container, confidence: 0.9))
 
             case .commit:
+                // A Conventional Commit scope names a component of the repository. The entity
+                // must exist before ClaimExtractor writes has_component against it.
+                if let scope = ClaimExtractor.conventionalCommitScope(object.title) {
+                    let component = CoreEntity(
+                        kind: .concept,
+                        canonicalName: scope,
+                        domain: object.domain,
+                        firstSeenAt: object.authoredAt ?? object.ingestedAt,
+                        lastSeenAt: object.authoredAt ?? object.ingestedAt
+                    )
+                    merge(component, into: &entities)
+                    aliases.insert(EntityAlias(entityID: component.id, surface: scope, confidence: 0.9))
+                }
                 if let name = object.metadata["author"], name != "unknown" {
                     let person = CoreEntity(
                         kind: .person,

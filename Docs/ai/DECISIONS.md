@@ -292,3 +292,42 @@ from "keep the fields we currently parse".
 
 Recorded rather than fixed. The cheap mitigation is for a connector to record a schema version
 in `source.config` so a sync can tell it is behind; that is on the roadmap, not done.
+
+---
+
+## 2026-08-08 — Grounding has a third failure mode: faithful to the wrong sources
+
+**Found by running the first real chat query.** Asked "what have I been building in OpenCore
+recently?", the model answered about rebranding an app and migrating it to a Swift Package,
+with correct citations. That work is WoWCA, a different repository.
+
+The grounding check reported **3 of 3 sentences supported, and it was right**. Every sentence
+was faithful to the passage it cited. The passages were simply about the wrong project.
+
+**So there are three ways a grounded answer can be wrong**, and the check catches one:
+
+1. *Unsupported* — a sentence about something absent from the context. **Caught.**
+2. *Inverted* — a sentence that reverses the meaning of something present. Not caught; lexical
+   overlap cannot see negation. Already documented.
+3. *Faithful to irrelevant sources* — every sentence checks out, and the retrieval answered a
+   different question. **Not caught, and not catchable at this layer at all.**
+
+The third is the dangerous one, because it produces a confident, well-cited, verifiable answer
+that is about the wrong thing. Verification operating downstream of retrieval can never detect
+it: by the time the check runs, the wrong context is the only context.
+
+**Consequences.**
+
+- Retrieval quality, not generation quality, is now the ceiling on chat.
+- The obvious fix is entity-scoped retrieval: when a query names a known entity, prefer objects
+  belonging to it. **Deliberately not implemented yet.** That is an unmeasured tuning change of
+  exactly the kind this project refuses to make on intuition, and there is still no harness to
+  say whether it helps or quietly hurts other queries.
+- The UI must not imply that a green grounding badge means the answer is right. It currently
+  reads "N of N sentences supported", which is accurate and narrow. It must stay that narrow.
+
+**Also found:** `rebuild` drops `chunk_vector`, so the dense leg silently stops contributing
+until `embed` is run again. Retrieval reports this in `unavailableSignals` and `doctor` shows
+"embeddings none", but neither is loud enough. Before re-embedding, the same question returned
+six lexical-only hits and ranked OpenCore's own README third behind two commits from an
+unrelated repository.

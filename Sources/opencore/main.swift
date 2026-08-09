@@ -108,6 +108,7 @@ func usage() {
       opencore memory checkout YYYY-MM-DD    what it believed on a past date
       opencore receipts [--limit N]
       opencore trace CODE                    the evidence behind one answer
+      opencore chat "QUESTION"               grounded answer, written by the on-device model
       opencore timeline [--since 30d]        what happened, from every source
       opencore correct CLAIM --to VALUE      tell it that it is wrong
               --reason "..." [--because "..."]
@@ -605,6 +606,57 @@ func trace(_ code: String) async throws {
     printReceipt(receipt)
 }
 
+// MARK: - Chat
+
+/// `opencore chat` — the same grounded conversation the app runs, one shot.
+///
+/// Exists so the engine can be exercised without clicking: retrieval, generation, and the
+/// grounding check all run here exactly as they do in the app.
+func chat(_ question: String) async throws {
+    let readiness = Conversation.readiness()
+    guard readiness.isReady else {
+        print(readiness.message)
+        exit(1)
+    }
+
+    let store = try await openStore()
+    let conversation = Conversation(store: store, embedder: embedder(quiet: true))
+
+    var final: Turn?
+    for await turn in await conversation.send(question) {
+        final = turn
+    }
+    guard let turn = final else { return }
+
+    if let error = turn.error {
+        print("error: \(error)")
+        exit(1)
+    }
+
+    print("\n\(turn.text)\n")
+
+    if !turn.sources.isEmpty {
+        print("sources")
+        for source in turn.sources {
+            print("  [\(source.index)] \(source.title)  ·  \(source.authority.label)")
+        }
+    }
+
+    let ungrounded = turn.ungrounded
+    print("")
+    if ungrounded.isEmpty {
+        print("grounding    \(turn.verdicts.count)/\(turn.verdicts.count) sentences supported by the sources")
+    } else {
+        print("grounding    \(ungrounded.count) of \(turn.verdicts.count) sentences NOT supported:")
+        for verdict in ungrounded {
+            print("  \(String(format: "%.2f", verdict.score))  \(verdict.sentence.prefix(100))")
+            print("        unsupported: \(verdict.unsupported.prefix(6).joined(separator: ", "))")
+        }
+    }
+    if let model = turn.modelName { print("model        \(model)") }
+    if let receipt = turn.receipt { print("receipt      \(receipt.shortCode)") }
+}
+
 // MARK: - Timeline
 
 /// `opencore timeline` — every event, from every source, in one ordering.
@@ -825,6 +877,9 @@ do {
     case "trace":
         guard let code = positional(1) else { print("usage: opencore trace CODE"); exit(1) }
         try await trace(code)
+    case "chat":
+        guard let question = positional(1) else { print("usage: opencore chat \"QUESTION\""); exit(1) }
+        try await chat(question)
     case "timeline":
         try await timeline()
     case "correct":

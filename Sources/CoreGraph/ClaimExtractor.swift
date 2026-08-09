@@ -46,6 +46,7 @@ public struct ClaimExtractor: Sendable {
                 try await extractLanguageClaims(object, into: &claims, &evidence, &links)
             case .commit:
                 try await extractCommitEvent(object, into: &events)
+                try await extractCommitClaims(object, into: &claims, &evidence, &links)
             case .calendarEvent:
                 try await extractCalendarClaims(object, into: &claims, &events, &evidence, &links)
             case .note, .document, .file:
@@ -201,6 +202,103 @@ public struct ClaimExtractor: Sendable {
             claims.append(claim)
             links.append((claim.id, item.id, .supports, share))
         }
+    }
+
+    // MARK: - Commits as claims
+
+    /// 651 commits produced zero claims. They produced timeline events and nothing else, so
+    /// the single largest source in the store contributed nothing the system could believe.
+    ///
+    /// Two claims come out of a commit without guessing, because both read structured fields
+    /// rather than interpreting prose:
+    ///
+    /// - `contributed_to(person, repository)` from the author field.
+    /// - `has_component(repository, scope)` from a Conventional Commits scope. `feat(Retrieval):`
+    ///   is an author explicitly naming a part of their own system, which is a stronger signal
+    ///   than anything that could be inferred from the message body.
+    ///
+    /// Claim ids are derived from subject, predicate and object, so 340 commits by one author
+    /// collapse to one claim carrying 340 pieces of evidence. That is the correct shape: the
+    /// belief is single, the support for it accumulates.
+    private func extractCommitClaims(
+        _ object: CoreObject,
+        into claims: inout [CoreClaim],
+        _ evidence: inout [Evidence],
+        _ links: inout [(ClaimID, EvidenceID, Stance, Double)]
+    ) async throws {
+        guard let repo = object.metadata["repo"] else { return }
+        let repoName = repo.split(separator: "/").last.map(String.init) ?? repo
+        let repository = CoreEntity(kind: .project, canonicalName: repoName, domain: object.domain).id
+
+        let item = Evidence(
+            objectID: object.id,
+            snippet: String(object.title.prefix(200)),
+            authority: object.authority
+        )
+        var used = false
+
+        if let author = object.metadata["author"], author != "unknown", author.count > 1 {
+            let person = CoreEntity(kind: .person, canonicalName: author, domain: object.domain).id
+            let claim = CoreClaim(
+                subject: person,
+                predicate: Predicate.contributedTo,
+                objectEntity: repository,
+                confidence: 0.99,
+                authority: object.authority,
+                derivation: .observed,
+                validity: Validity(validFrom: object.authoredAt, observedAt: now),
+                domain: object.domain
+            )
+            claims.append(claim)
+            links.append((claim.id, item.id, .supports, 1.0))
+            used = true
+        }
+
+        if let scope = Self.conventionalCommitScope(object.title) {
+            let component = CoreEntity(kind: .concept, canonicalName: scope, domain: object.domain).id
+            let claim = CoreClaim(
+                subject: repository,
+                predicate: Predicate.hasComponent,
+                objectEntity: component,
+                // Below the author claim: a scope is a convention an author may abandon or
+                // rename, where an author field is a fact about the commit itself.
+                confidence: 0.9,
+                authority: object.authority,
+                derivation: .observed,
+                validity: Validity(validFrom: object.authoredAt, observedAt: now),
+                domain: object.domain
+            )
+            claims.append(claim)
+            links.append((claim.id, item.id, .supports, 0.9))
+            used = true
+        }
+
+        // Same rule as the calendar path: evidence only once something references it.
+        if used { evidence.append(item) }
+    }
+
+    /// The scope from a Conventional Commit subject: `feat(Retrieval): ...` yields `Retrieval`.
+    ///
+    /// Deliberately strict. It requires a recognised type, a parenthesised scope and a colon,
+    /// because a loose parenthesis match would turn `fix (finally) the thing` into a component
+    /// called "finally".
+    static func conventionalCommitScope(_ subject: String) -> String? {
+        let types = ["feat", "fix", "docs", "style", "refactor", "perf", "test", "build", "ci", "chore", "revert"]
+        guard let openParen = subject.firstIndex(of: "("),
+              let closeParen = subject[openParen...].firstIndex(of: ")"),
+              subject.index(after: closeParen) < subject.endIndex,
+              subject[subject.index(after: closeParen)] == ":"
+        else { return nil }
+
+        let type = subject[subject.startIndex..<openParen].trimmingCharacters(in: .whitespaces).lowercased()
+        guard types.contains(type.hasSuffix("!") ? String(type.dropLast()) : type) else { return nil }
+
+        let scope = subject[subject.index(after: openParen)..<closeParen].trimmingCharacters(in: .whitespaces)
+        // A scope is a component name, not a sentence.
+        guard scope.count > 1, scope.count <= 40, !scope.contains(" ") || scope.split(separator: " ").count <= 2 else {
+            return nil
+        }
+        return scope
     }
 
     // MARK: - Calendar

@@ -311,6 +311,9 @@ private struct ConnectorGrid: View {
                 ConnectorButton(title: "Notes", subtitle: "via AppleScript", symbol: "note.text", disabled: isWorking) {
                     Task { await model.syncNotes() }
                 }
+                ConnectorButton(title: "Health", subtitle: "workouts · medical", symbol: "heart.text.square", disabled: isWorking) {
+                    Task { await model.syncHealth() }
+                }
                 ConnectorButton(title: "Add folder", subtitle: "as \(folderDomain.rawValue)", symbol: "folder", disabled: isWorking) {
                     showingFolderPicker = true
                 }

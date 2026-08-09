@@ -17,6 +17,7 @@ struct OpenCoreApp: App {
 }
 
 enum Section: String, CaseIterable, Identifiable, Hashable {
+    case chat = "Chat"
     case ask = "Ask"
     case passages = "Passages"
     case claims = "Claims"
@@ -35,6 +36,7 @@ enum Section: String, CaseIterable, Identifiable, Hashable {
 
     var symbol: String {
         switch self {
+        case .chat: "bubble.left.and.bubble.right"
         case .ask: "text.magnifyingglass"
         case .passages: "doc.text.magnifyingglass"
         case .claims: "list.bullet.rectangle"
@@ -54,7 +56,7 @@ enum Section: String, CaseIterable, Identifiable, Hashable {
 
 struct RootView: View {
     @Environment(AppModel.self) private var model
-    @State private var section: Section = .ask
+    @State private var section: Section = .chat
 
     var body: some View {
         NavigationSplitView {
@@ -67,6 +69,7 @@ struct RootView: View {
             .safeAreaInset(edge: .bottom) { StatusBar() }
         } detail: {
             switch section {
+            case .chat: ChatView()
             case .ask: AskView()
             case .passages: PassagesView()
             case .claims: ClaimsView()
