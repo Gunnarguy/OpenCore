@@ -36,7 +36,9 @@ public actor MCPServer {
     ) {
         self.store = store
         self.search = PassageSearch(store: store, embedder: embedder)
-        self.reasoner = Reasoner(store: store, search: HybridSearch(store: store))
+        // Same passage-level engine the app and CLI use, so an MCP caller and a human
+        // asking the same question get the same retrieval rather than two different ones.
+        self.reasoner = Reasoner(store: store, search: PassageSearch(store: store, embedder: embedder))
         self.sensitiveDomainsUnlockable = sensitiveDomainsUnlockable
     }
 

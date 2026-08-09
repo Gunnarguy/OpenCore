@@ -46,6 +46,13 @@ public struct ClaimExtractor: Sendable {
                 try await extractLanguageClaims(object, into: &claims, &evidence, &links)
             case .commit:
                 try await extractCommitEvent(object, into: &events)
+            case .calendarEvent:
+                try await extractCalendarClaims(object, into: &claims, &events, &evidence, &links)
+            case .note, .document, .file:
+                // Notes, reminders and local documents yield a timeline but no claims. Their
+                // content is prose, and inferring facts from prose without a model is exactly
+                // the guessing this extractor refuses to do. They stay retrievable.
+                try await extractTimelineEvent(object, into: &events)
             default:
                 break
             }
@@ -194,6 +201,131 @@ public struct ClaimExtractor: Sendable {
             claims.append(claim)
             links.append((claim.id, item.id, .supports, share))
         }
+    }
+
+    // MARK: - Calendar
+
+    /// Calendar is the richest non-GitHub source, and the only one that yields real claims
+    /// without a model: an attendee list is structured data, not prose.
+    ///
+    /// What it produces: a person entity per named attendee, a `met_with` claim from the
+    /// calendar owner to each of them, an `attended` claim from each attendee to the event's
+    /// calendar, and an event on the timeline.
+    ///
+    /// What it deliberately does not produce: anything about *why* you met, how often, or what
+    /// it means. Frequency across events is a pattern, and a pattern is an inference this
+    /// extractor has no business making at `observed` authority.
+    private func extractCalendarClaims(
+        _ object: CoreObject,
+        into claims: inout [CoreClaim],
+        _ events: inout [CoreEvent],
+        _ evidence: inout [Evidence],
+        _ links: inout [(ClaimID, EvidenceID, Stance, Double)]
+    ) async throws {
+        guard let occurredAt = object.authoredAt else { return }
+
+        let calendarName = object.metadata["calendar"] ?? "Calendar"
+        // The calendar itself is the subject anchor: "Work" and "Family" are meaningfully
+        // different contexts and worth being separate entities.
+        let calendar = CoreEntity(kind: .concept, canonicalName: calendarName, domain: object.domain).id
+
+        events.append(CoreEvent(
+            subject: calendar,
+            verb: "attended",
+            detail: object.title,
+            occurredAt: occurredAt,
+            domain: object.domain,
+            authority: object.authority
+        ))
+
+        // ASCII 31 separated, matching what the connector wrote. A comma would split names
+        // containing one.
+        let attendees = (object.metadata["attendees"] ?? "")
+            .split(separator: "\u{1F}")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { $0.count > 1 }
+
+        // Evidence only once there is a claim to attach it to. Creating it unconditionally
+        // left 558 orphaned rows on the first run of this code: a solo calendar event
+        // produces a timeline entry and no claims, so its evidence pointed at nothing.
+        guard !attendees.isEmpty else { return }
+
+        let item = Evidence(objectID: object.id, snippet: String(object.text.prefix(280)), authority: object.authority)
+        evidence.append(item)
+
+        for name in attendees {
+            let person = CoreEntity(kind: .person, canonicalName: name, domain: .personal).id
+
+            let attended = CoreClaim(
+                subject: person,
+                predicate: Predicate.attended,
+                objectEntity: calendar,
+                confidence: 0.95,
+                authority: object.authority,
+                derivation: .observed,
+                validity: Validity(validFrom: occurredAt, observedAt: now),
+                domain: object.domain
+            )
+            claims.append(attended)
+            links.append((attended.id, item.id, .supports, 1.0))
+
+            let met = CoreClaim(
+                subject: calendar,
+                predicate: Predicate.metWith,
+                objectEntity: person,
+                confidence: 0.9,
+                authority: object.authority,
+                derivation: .observed,
+                validity: Validity(validFrom: occurredAt, observedAt: now),
+                domain: object.domain
+            )
+            claims.append(met)
+            links.append((met.id, item.id, .supports, 1.0))
+
+            events.append(CoreEvent(
+                subject: person,
+                verb: "met",
+                detail: object.title,
+                occurredAt: occurredAt,
+                domain: object.domain,
+                authority: object.authority
+            ))
+        }
+    }
+
+    // MARK: - Notes, reminders, local documents
+
+    /// A timeline entry and nothing more.
+    ///
+    /// These are prose. Without a model there is no honest way to turn "buy milk" or a design
+    /// note into a claim, and inventing one at `observed` authority would be worse than
+    /// leaving the source claim-free: it would put a guess in the same table as a fact read
+    /// out of structured data.
+    private func extractTimelineEvent(_ object: CoreObject, into events: inout [CoreEvent]) async throws {
+        guard let occurredAt = object.authoredAt else { return }
+
+        // Group under the folder, list, or root that contains it, so a timeline reads as
+        // "Medical, Projects, Work" rather than as a thousand unrelated titles.
+        let container = object.metadata["folder"]
+            ?? object.metadata["list"]
+            ?? object.metadata["root"].map { ($0 as NSString).lastPathComponent }
+            ?? object.kind.rawValue
+        let subject = CoreEntity(kind: .concept, canonicalName: container, domain: object.domain).id
+
+        let verb = switch object.kind {
+        case .note: "noted"
+        case .file: "edited"
+        default: "wrote"
+        }
+
+        events.append(CoreEvent(
+            subject: subject,
+            verb: verb,
+            detail: object.title,
+            occurredAt: occurredAt,
+            domain: object.domain,
+            authority: object.authority
+        ))
     }
 
     // MARK: - Commits

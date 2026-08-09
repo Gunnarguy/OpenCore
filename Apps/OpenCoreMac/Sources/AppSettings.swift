@@ -1,5 +1,6 @@
 import CoreModel
 import CoreSearch
+import CoreStore
 import Foundation
 import Observation
 
@@ -32,8 +33,13 @@ final class AppSettings {
     // disk. Changing them requires re-chunking every object and re-embedding every passage,
     // so the UI has to say so rather than quietly leaving the store inconsistent with them.
 
-    var chunkTargetSize: Int { didSet { save(chunkTargetSize, "chunking.targetSize") } }
-    var chunkOverlap: Int { didSet { save(chunkOverlap, "chunking.overlap") } }
+    var chunkTargetSize: Int { didSet { save(chunkTargetSize, "chunking.targetSize"); markChunkingDirty() } }
+    var chunkOverlap: Int { didSet { save(chunkOverlap, "chunking.overlap"); markChunkingDirty() } }
+
+    /// Stored passages were built with different parameters than the ones now set. Cleared by
+    /// a re-derive. Previously declared and never written, which made the warning in Settings
+    /// depend on comparing against defaults rather than on what the store actually contains.
+    private func markChunkingDirty() { chunkingDirty = true }
 
     var chunker: Chunker { Chunker(targetSize: chunkTargetSize, overlap: chunkOverlap) }
 
@@ -54,7 +60,17 @@ final class AppSettings {
     /// relationship data. Off, and it takes a deliberate act to change, because the query text
     /// reaching that server is written by a model and a model asking about your diagnosis is
     /// not consent.
-    var mcpExposeSensitiveDomains: Bool { didSet { save(mcpExposeSensitiveDomains, "mcp.exposeSensitive") } }
+    var mcpExposeSensitiveDomains: Bool {
+        didSet {
+            save(mcpExposeSensitiveDomains, "mcp.exposeSensitive")
+            // Also to the shared config file, because the MCP server is a separate
+            // `opencore mcp` process that never sees UserDefaults. Without this the toggle
+            // changed nothing at all.
+            var shared = SharedConfig.load()
+            shared.exposeSensitiveDomainsOverMCP = mcpExposeSensitiveDomains
+            try? shared.save()
+        }
+    }
 
     // MARK: - Defaults
 

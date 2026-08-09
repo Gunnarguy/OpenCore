@@ -121,11 +121,21 @@ public struct AppleEventKitConnector: Connector {
                     authoredAt: event.startDate,
                     domain: .personal,
                     authority: .authoredArtifact,
-                    metadata: [
-                        "calendar": event.calendar?.title ?? "unknown",
-                        "all_day": String(event.isAllDay),
-                        "attendee_count": String(event.attendees?.count ?? 0),
-                    ]
+                    metadata: {
+                        var data: [String: String] = [
+                            "calendar": event.calendar?.title ?? "unknown",
+                            "all_day": String(event.isAllDay),
+                            "attendee_count": String(event.attendees?.count ?? 0),
+                        ]
+                        // Named attendees, so claim extraction can build person entities and
+                        // met_with edges. Without this the richest signal in a calendar, who
+                        // you actually spend time with, is only unstructured text.
+                        let named = (event.attendees ?? []).compactMap(\.name).filter { !$0.isEmpty }
+                        if !named.isEmpty { data["attendees"] = named.joined(separator: "\u{1F}") }
+                        if let location = event.location, !location.isEmpty { data["location"] = location }
+                        if let organiser = event.organizer?.name { data["organiser"] = organiser }
+                        return data
+                    }()
                 ))
             }
             windowStart = windowEnd

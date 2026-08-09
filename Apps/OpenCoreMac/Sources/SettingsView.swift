@@ -296,8 +296,8 @@ private struct RetrievalTab: View {
                         Text("\(settings.chunkOverlap)").monospacedDigit().frame(width: 44, alignment: .trailing)
                     }
                 }
-                if !settings.chunkingIsDefault {
-                    Label("Stored passages were built with the old values. Re-derive on the Maintenance tab, then rebuild embeddings, or the store stays inconsistent with these settings.", systemImage: "exclamationmark.triangle.fill")
+                if settings.chunkingDirty {
+                    Label("Stored passages were built with different values. Re-derive on the Maintenance tab, then rebuild embeddings, or the store stays inconsistent with these settings.", systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange).font(.callout)
                 }
             } header: {

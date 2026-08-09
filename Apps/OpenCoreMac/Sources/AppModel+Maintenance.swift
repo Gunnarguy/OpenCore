@@ -161,19 +161,12 @@ extension AppModel {
             // inline as well, and one copy drifting from the other is worse than either
             // being in the wrong module.
             state = .working("dropping derived layers")
-            for table in ["claim", "evidence", "contradiction", "belief", "event", "edge", "chunk_vector", "chunk", "embedding_run"] {
-                try await store.database.execute("DELETE FROM \(table)")
-            }
+            try await store.dropDerivedLayers()
+            // Passages have just been rebuilt with the current parameters.
+            settings.chunkingDirty = false
 
             state = .working("loading objects")
-            var offset = 0
-            var all: [CoreObject] = []
-            while true {
-                let rows = try await store.database.query("SELECT id FROM object LIMIT 500 OFFSET ?", [.integer(Int64(offset))])
-                if rows.isEmpty { break }
-                all.append(contentsOf: try await store.objects(ids: rows.map { ObjectID($0.requireString("id")) }))
-                offset += 500
-            }
+            let all = try await store.allObjects()
 
             state = .working("re-deriving from \(all.count) objects")
             let outcome = try await IngestPipeline(store: store).run(objects: all, storeObjects: false) { [weak self] message in

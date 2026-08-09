@@ -61,6 +61,53 @@ public struct EntityResolver: Sendable {
                     aliases.insert(EntityAlias(entityID: technology.id, surface: language, confidence: 1.0))
                 }
 
+            case .calendarEvent:
+                // The calendar is a context ("Work", "Family"), and every named attendee is a
+                // person. Both must exist before ClaimExtractor writes met_with and attended,
+                // because claim.subject is a foreign key onto entity.
+                let calendarName = object.metadata["calendar"] ?? "Calendar"
+                let calendar = CoreEntity(
+                    kind: .concept,
+                    canonicalName: calendarName,
+                    domain: object.domain,
+                    firstSeenAt: object.authoredAt ?? object.ingestedAt,
+                    lastSeenAt: object.authoredAt ?? object.ingestedAt
+                )
+                merge(calendar, into: &entities)
+                aliases.insert(EntityAlias(entityID: calendar.id, surface: calendarName, confidence: 1.0))
+
+                for name in (object.metadata["attendees"] ?? "").split(separator: "\u{1F}") {
+                    let trimmed = name.trimmingCharacters(in: .whitespaces)
+                    guard trimmed.count > 1 else { continue }
+                    let person = CoreEntity(
+                        kind: .person,
+                        canonicalName: trimmed,
+                        // People from a calendar are personal regardless of which calendar
+                        // they came from. A colleague met at a work event is still a person.
+                        domain: .personal,
+                        firstSeenAt: object.authoredAt ?? object.ingestedAt,
+                        lastSeenAt: object.authoredAt ?? object.ingestedAt
+                    )
+                    merge(person, into: &entities)
+                    aliases.insert(EntityAlias(entityID: person.id, surface: trimmed, confidence: 0.95))
+                }
+
+            case .note, .document, .file:
+                // The container, so a timeline groups by folder or list rather than scattering.
+                let container = object.metadata["folder"]
+                    ?? object.metadata["list"]
+                    ?? object.metadata["root"].map { ($0 as NSString).lastPathComponent }
+                    ?? object.kind.rawValue
+                let entity = CoreEntity(
+                    kind: .concept,
+                    canonicalName: container,
+                    domain: object.domain,
+                    firstSeenAt: object.authoredAt ?? object.ingestedAt,
+                    lastSeenAt: object.ingestedAt
+                )
+                merge(entity, into: &entities)
+                aliases.insert(EntityAlias(entityID: entity.id, surface: container, confidence: 0.9))
+
             case .commit:
                 if let name = object.metadata["author"], name != "unknown" {
                     let person = CoreEntity(

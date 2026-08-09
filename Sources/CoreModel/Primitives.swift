@@ -247,10 +247,18 @@ public enum Predicate {
     public static let prefers = "prefers"
     public static let releasedVersion = "released_version"
     public static let primaryLanguage = "primary_language"
+    public static let metWith = "met_with"
+    public static let attended = "attended"
+    public static let partOf = "part_of"
+    public static let organiser = "organised_by"
 
     /// Predicates where one subject may hold only one current value. These are the ones
     /// that can contradict; `uses` cannot, because a project genuinely uses many things.
-    public static let functional: Set<String> = [status, primaryLanguage, worksAt, releasedVersion]
+    ///
+    /// `metWith`, `attended` and `builtWith` are deliberately absent: you meet many people and
+    /// attend many events, and treating a second one as a contradiction would manufacture
+    /// conflict out of an ordinary calendar.
+    public static let functional: Set<String> = [status, primaryLanguage, worksAt, releasedVersion, partOf]
 }
 
 // MARK: - Event

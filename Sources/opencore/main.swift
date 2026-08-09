@@ -408,7 +408,9 @@ func runPassages(_ query: String) async throws {
 
 func ask(_ query: String) async throws {
     let store = try await openStore()
-    let reasoner = Reasoner(store: store, search: HybridSearch(store: store))
+    // Passage-level, both legs, RRF and MMR. This used HybridSearch, the v0.1
+    // object-level scorer, which meant `ask` never touched the dense index.
+    let reasoner = Reasoner(store: store, embedder: embedder(quiet: true))
     let answer = try await reasoner.answer(query)
 
     print("Q: \(query)\n")
@@ -609,18 +611,8 @@ func rebuild() async throws {
     // Proof that the trust stack holds. Vectors go too: they are derived from chunk text,
     // and a chunk whose boundaries moved has a vector that describes text that no longer
     // exists. Re-embed with `opencore embed`.
-    for table in ["claim", "evidence", "contradiction", "belief", "event", "edge", "chunk_vector", "chunk", "embedding_run"] {
-        try await store.database.execute("DELETE FROM \(table)")
-    }
-
-    var offset = 0
-    var all: [CoreObject] = []
-    while true {
-        let rows = try await store.database.query("SELECT id FROM object LIMIT 500 OFFSET ?", [.integer(Int64(offset))])
-        if rows.isEmpty { break }
-        all.append(contentsOf: try await store.objects(ids: rows.map { ObjectID($0.requireString("id")) }))
-        offset += 500
-    }
+    try await store.dropDerivedLayers()
+    let all = try await store.allObjects()
 
     let outcome = try await IngestPipeline(store: store).run(objects: all, storeObjects: false, log: progress)
     report(outcome)
@@ -664,7 +656,7 @@ func serveMCP() async throws {
         embedder: embedder(quiet: true),
         // Opt-in, and named to be uncomfortable to type. An MCP client's query text is
         // written by a model, and a model asking about your diagnosis is not consent.
-        sensitiveDomainsUnlockable: flag("unsafe-expose-sensitive")
+        sensitiveDomainsUnlockable: flag("unsafe-expose-sensitive") || SharedConfig.load().exposeSensitiveDomainsOverMCP
     )
     await server.run()
 }

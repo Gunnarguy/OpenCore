@@ -268,3 +268,27 @@ whoever produced the file.
 
 **Consequences.** The CLI and the app do not share tuning. The CLI takes flags. If they ever
 need to agree, the settings belong in a config file both read, still not in the store.
+
+---
+
+## 2026-08-08 — "Objects are the floor" has a limit: rebuild cannot recover what was never captured
+
+**Found by running it.** Teaching `ClaimExtractor` to read calendar attendees produced zero
+`met_with` claims across 558 calendar events. The extractor was correct; the objects on disk
+had no attendee metadata, because they were ingested before the connector was taught to record
+it.
+
+**The distinction that matters.** `rebuild` re-derives everything above `object` and is the
+right tool when *extraction* changes. It is the wrong tool when the *connector* changes, and
+nothing in the system currently says which one a given change was.
+
+- Connector change → **re-sync**. New fields, new metadata, a different API call.
+- Extractor, resolver or chunker change → **rebuild**. Same objects, different conclusions.
+
+**Consequences.** The floor guarantee is real but narrower than it sounds: objects are the
+floor *for what was captured*, not for what the source contained. A connector that discards a
+field discards it permanently, which makes "keep the raw payload" a genuinely different design
+from "keep the fields we currently parse".
+
+Recorded rather than fixed. The cheap mitigation is for a connector to record a schema version
+in `source.config` so a sync can tell it is behind; that is on the roadmap, not done.

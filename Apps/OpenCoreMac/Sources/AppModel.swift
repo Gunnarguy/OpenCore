@@ -204,7 +204,8 @@ final class AppModel {
         guard let store, !query.trimmingCharacters(in: .whitespaces).isEmpty else { return }
         state = .working("answering")
         do {
-            let reasoner = Reasoner(store: store, search: HybridSearch(store: store))
+            // Passage-level retrieval with the settings the user actually chose.
+            let reasoner = Reasoner(store: store, embedder: try? NLEmbeddingProvider(), tuning: settings.tuning)
             answer = try await reasoner.answer(query)
             traceRows = []
             state = .idle
