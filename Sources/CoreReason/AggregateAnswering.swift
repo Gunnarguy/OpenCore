@@ -225,6 +225,51 @@ public struct AggregateAnswer: Sendable, Hashable {
     }
 }
 
+extension AggregateAnswer {
+    /// The receipt for an answer that was counted rather than retrieved.
+    ///
+    /// Deliberately a different shape from the retrieval receipt, because claiming the
+    /// retrieval shape here would be a lie in the exact place the counting fix exists to
+    /// correct. `objectsRetrieved` and `evidenceAdmitted` are 0 and `model` is `nil` because no
+    /// passage was read and no model was called: the number came from a `GROUP BY`. A reader
+    /// who sees "6 sources, on-device model" on a count is looking at the old defect.
+    ///
+    /// Shared by every path that can produce a count, so the honesty of this shape cannot drift
+    /// between chat and `ask`. Two copies is how one of them quietly starts reporting sources
+    /// it never read.
+    public func receipt(
+        query: String,
+        domainsAdmitted: [Domain],
+        domainsBlocked: [Domain],
+        milliseconds: Int
+    ) -> Receipt {
+        var counters = ["objectsCounted": breakdown.total, "groups": breakdown.counts.count]
+        // Only present when there was something to be unaccounted for. A 0 here would read as
+        // a measurement rather than as an absence of one.
+        if breakdown.unclassified > 0 { counters["unclassified"] = breakdown.unclassified }
+        return Receipt(
+            query: query,
+            queryClass: .aggregate,
+            domainsAdmitted: domainsAdmitted,
+            domainsBlocked: domainsBlocked,
+            stages: [ReceiptStage(
+                name: "count",
+                counters: counters,
+                milliseconds: milliseconds,
+                note: "computed in SQL over every admitted row; matched on \(matchedOn)"
+            )],
+            objectsSearched: breakdown.total,
+            objectsRetrieved: 0,
+            evidenceAdmitted: 0,
+            claimsConsulted: 0,
+            contradictionsSurfaced: 0,
+            model: nil,
+            objectsTransmitted: 0,
+            confidence: nil
+        )
+    }
+}
+
 extension ObjectKind {
     /// For counted prose. A count reads badly against a raw enum case.
     var plural: String {

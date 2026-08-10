@@ -661,44 +661,16 @@ public actor Conversation {
         return stages
     }
 
-    /// The receipt for an answer that was counted rather than retrieved.
-    ///
-    /// Deliberately a different shape from the retrieval receipt, because claiming the
-    /// retrieval shape here would be a lie in the exact place this whole change exists to fix.
-    /// `objectsRetrieved` and `evidenceAdmitted` are 0 and `model` is `nil` because no passage
-    /// was read and no model was called: the number came from a `GROUP BY`. A reader who sees
-    /// "6 sources, on-device model" on a count is looking at the old defect.
+    /// The receipt for a counted answer. The shape itself lives on `AggregateAnswer`, shared
+    /// with `Reasoner`, so chat and `ask` cannot drift into reporting it differently.
     static func countedReceipt(
         question: String,
         domain: Domain,
         counted: AggregateAnswer,
         milliseconds: Int
     ) -> Receipt {
-        var counters = ["objectsCounted": counted.breakdown.total, "groups": counted.breakdown.counts.count]
-        // Only present when there was something to be unaccounted for. A 0 here would read as
-        // a measurement rather than as an absence of one.
-        if counted.breakdown.unclassified > 0 {
-            counters["unclassified"] = counted.breakdown.unclassified
-        }
-        return Receipt(
-            query: question,
-            queryClass: .aggregate,
-            domainsAdmitted: [domain],
-            domainsBlocked: [],
-            stages: [ReceiptStage(
-                name: "count",
-                counters: counters,
-                milliseconds: milliseconds,
-                note: "computed in SQL over every admitted row; matched on \(counted.matchedOn)"
-            )],
-            objectsSearched: counted.breakdown.total,
-            objectsRetrieved: 0,
-            evidenceAdmitted: 0,
-            claimsConsulted: 0,
-            contradictionsSurfaced: 0,
-            model: nil,
-            objectsTransmitted: 0,
-            confidence: nil
+        counted.receipt(
+            query: question, domainsAdmitted: [domain], domainsBlocked: [], milliseconds: milliseconds
         )
     }
 

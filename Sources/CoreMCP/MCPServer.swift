@@ -287,7 +287,25 @@ public actor MCPServer {
         let answer = try await reasoner.answer(query, externalCaller: !sensitiveDomainsUnlockable)
         var lines: [String] = []
 
-        if let insufficient = answer.insufficientEvidence {
+        if let counted = answer.counted {
+            // Said explicitly, because the calling model is about to decide how far to trust
+            // this. A count carries no cited passages BY CONSTRUCTION, and a model that reads
+            // "0 evidence admitted" without this line will reasonably conclude the answer is
+            // unsupported and hedge, or worse, go looking for passages to "confirm" it and
+            // report whatever the top six happen to say. That is the original defect.
+            lines.append(counted.sentence)
+            lines.append("")
+            lines.append("This is a computed count, not a summary of retrieved passages: it was "
+                + "produced by counting every \(counted.breakdown.kind.rawValue) row the domain "
+                + "policy admits. There are no passages to cite and none were read. It is exact "
+                + "over the admitted rows, so do not qualify it with 'approximately' or check it "
+                + "against a search.")
+            if counted.breakdown.unclassified > 0 {
+                lines.append("\(counted.breakdown.unclassified) row(s) recorded no "
+                    + "\(counted.breakdown.key) and are unaccounted for rather than counted as "
+                    + "not matching. Do not treat them as a zero.")
+            }
+        } else if let insufficient = answer.insufficientEvidence {
             lines.append("Not enough evidence to answer.")
             lines.append(insufficient)
         } else {
@@ -417,7 +435,18 @@ public actor MCPServer {
         guard let receipt = try await store.receipt(code: code) else { return "No receipt matching '\(code)'." }
 
         let rows = try await store.trace(receipt: receipt.id)
-        guard !rows.isEmpty else { return "Receipt \(receipt.shortCode) admitted no evidence." }
+        guard !rows.isEmpty else {
+            // A counted answer has no evidence rows BY CONSTRUCTION, and saying only "admitted
+            // no evidence" reads as a failed lookup. The distinction is the whole point of
+            // trace: one of these is an answer with nothing behind it, the other is an answer
+            // whose support is the query itself.
+            if receipt.queryClass == .aggregate {
+                return "Receipt \(receipt.shortCode) is a computed count over "
+                    + "\(receipt.objectsSearched) admitted rows, so it cites no evidence and none "
+                    + "was read. Its support is the count itself, not a set of passages."
+            }
+            return "Receipt \(receipt.shortCode) admitted no evidence."
+        }
 
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd"

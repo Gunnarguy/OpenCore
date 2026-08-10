@@ -1,8 +1,9 @@
 # Current State
 
 Updated: 2026-08-10
-Branch/worktree: `main`, primary checkout (not a linked worktree)
-Last verified commit: `86c06ab`, plus substantial uncommitted work under "In flight"
+Branch/worktree: `measure-and-fix-plus-saved-chats`, primary checkout (not a linked worktree).
+Branched from `main` at `86c06ab`; fast-forward `main` onto it when ready.
+Last verified commit: the tip of that branch. Working tree clean.
 
 ## Objective
 
@@ -63,10 +64,10 @@ The evidence, all read-only from the live workspace:
 OpenCore. That needs the same two Critical prerequisites, is on-thesis (connectors produce
 objects), and makes `opencore ask "which projects used Pinecone"` answerable.
 
-## In flight (uncommitted)
+## Landed on this branch, previously in flight
 
-Three things, all building clean together: MCP over HTTP + OAuth, `toolArguments` as
-`JSONValue`, and the telemetry layer.
+All committed now. Three things that had been uncommitted for a session: MCP over HTTP + OAuth,
+`toolArguments` as `JSONValue`, and the telemetry layer.
 
 **Telemetry** (`Sources/CoreTelemetry/`, new Layer-0 target, no dependencies):
 
@@ -169,11 +170,16 @@ For Notion over MCP:
 Last run 2026-08-10, against the uncommitted tree:
 
 - `swift build` -> clean
-- `swift test` -> **65 tests pass** (8 + 12 + 3 + 15 + 27). Was 51: +6 for counting,
-  +3 for the dense-leg guard, +5 for saved conversations. New target `CoreSearchTests`.
+- `swift test` -> **71 tests pass** (8 + 12 + 3 + 18 + 3 + 27). Was 51: +9 for counting
+  (chat and `Reasoner`), +3 for the dense-leg guard, +5 for saved conversations, +3 for MCP
+  protocol negotiation. New targets `CoreSearchTests` and `CoreMCPTests`.
 - `opencore chats` / `chat --resume ID` -> a thread went 2 turns to **4** on resume rather
   than forking, and `opencore trace` resolved a receipt printed by `chat`, which it could not
   do before today.
+- `core_ask` over MCP -> `12 of 22 repositories`, with the receipt reporting 22 searched, 0
+  retrieved, 0 evidence. Asking it to count `personal` notes returns **no count**: the
+  firewall declined and it fell through to retrieval, so an MCP caller cannot count what it
+  cannot retrieve.
 - `xcodebuild -scheme OpenCore` -> BUILD SUCCEEDED
 - `opencore passages --telemetry-summary` -> **70ms total**, and no `embed.query`,
   `leg.dense` or `SELECT chunk_vector` span present. Was 350ms.
@@ -265,11 +271,17 @@ Carried over from 2026-08-09, not re-run today:
   `initialize` with the client's requested version when that version is one it can serve
   (`2025-11-25`, `2025-06-18`, `2025-03-26`), instead of hardcoding its own. Being a version
   behind is survivable; refusing to speak a client's version silently was not.
-- **`core_ask` over MCP and `opencore ask` do not have the counting fix.** `[measured]` Both go
-  through `Reasoner`, and only `Conversation` gained the `.aggregate` path. Asking "how many of
-  my apps are built with swift" over MCP returns 92 claims rather than "12 of 22". Less wrong
-  than the original defect, which stated a confident number, but it still cannot answer the
-  question, and the gap is now reachable by any MCP client.
+- ~~**`core_ask` over MCP and `opencore ask` do not have the counting fix.**~~ **Done,
+  2026-08-10.** `Reasoner` now has the `.aggregate` path, so chat, `opencore ask` and
+  `core_ask` all answer `12 of 22 repositories`. `Answer.counted` is an explicit field rather
+  than something inferred from empty `points`, because a counted answer and a found-nothing
+  answer are otherwise indistinguishable to a caller.
+- **Two answers to the same query in the same millisecond collide.** `[measured]` `Receipt.id`
+  is derived from query text plus a millisecond timestamp, so the second save fails with
+  `UNIQUE constraint failed: receipt.id` and the answer is lost. Found by a regression test
+  that asked one question twice; the test isolates its stores to work around it. Reachable in
+  practice by a double-clicked Ask or an MCP client retrying. This is the existing
+  "store `Receipt` id explicitly" row, now with a reproduction.
 - **Not clicked through:** the app compiles and chat has been exercised headlessly, but the
   riskiest path is still unverified end to end: MCP store -> credentials -> Add -> Discover ->
   tick tools -> Sync.

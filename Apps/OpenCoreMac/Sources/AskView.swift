@@ -15,7 +15,21 @@ struct AskView: View {
             if let answer = model.answer {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 20) {
-                        if let insufficient = answer.insufficientEvidence {
+                        if let counted = answer.counted {
+                            // No point cards follow, by construction. The caption says why, so
+                            // an empty answer body reads as "counted, nothing to cite" rather
+                            // than as "found nothing".
+                            Text(counted.sentence)
+                                .font(.title3)
+                                .textSelection(.enabled)
+                            Label(
+                                "Computed over every admitted \(counted.breakdown.kind.rawValue) row. "
+                                    + "A count cites no passages because none were read.",
+                                systemImage: "sum"
+                            )
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        } else if let insufficient = answer.insufficientEvidence {
                             InsufficientEvidenceCard(message: insufficient)
                         } else {
                             Text(answer.summary)

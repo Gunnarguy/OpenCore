@@ -462,7 +462,12 @@ func ask(_ query: String) async throws {
 
     print("Q: \(query)\n")
 
-    if let insufficient = answer.insufficientEvidence {
+    if let counted = answer.counted {
+        // No claim list follows, and that is the answer being honest rather than thin: a count
+        // is computed over every admitted row and cites no passage by construction.
+        print(counted.sentence + "\n")
+        print("  computed over every admitted \(counted.breakdown.kind.rawValue) row, not from retrieved passages")
+    } else if let insufficient = answer.insufficientEvidence {
         print("Not enough evidence.")
         print(insufficient)
     } else {
@@ -632,7 +637,11 @@ func trace(_ code: String) async throws {
     print("\(receipt.shortCode)  \(receipt.query)\n")
     let rows = try await store.trace(receipt: receipt.id)
     guard !rows.isEmpty else {
-        print("this receipt admitted no evidence")
+        // Counted answers cite nothing by construction. Saying so distinguishes them from an
+        // answer that genuinely had nothing behind it.
+        print(receipt.queryClass == .aggregate
+            ? "computed count over \(receipt.objectsSearched) admitted rows; cites no evidence because none was read"
+            : "this receipt admitted no evidence")
         printReceipt(receipt)
         return
     }

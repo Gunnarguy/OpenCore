@@ -29,6 +29,16 @@ public struct Answer: Sendable {
     public var contradictions: [Contradiction]
     public var receipt: Receipt
     public var insufficientEvidence: String?
+
+    /// Set when the question was a count, computed over every admitted row rather than read off
+    /// retrieved passages.
+    ///
+    /// **Explicit rather than inferred from empty `points`.** A counted answer and an answer
+    /// that found nothing both have no points and no passages, and a caller that tells them
+    /// apart by emptiness will eventually render "12 of 22 repositories" as "no evidence
+    /// found". This is the same reason the counted receipt is a distinct shape instead of a
+    /// retrieval receipt with zeroes in it.
+    public var counted: AggregateAnswer?
 }
 
 /// Plans a query, gathers evidence, and assembles an answer.
@@ -90,6 +100,38 @@ public struct Reasoner: Sendable {
         // in the tree rather than only as a differing `domain` attribute nobody compares.
         if externalCaller && rawDomain.isSensitive {
             Telemetry.event("domain.downgraded", .reason, attributes: ["from": rawDomain.rawValue, "to": "project"])
+        }
+
+        // A counting question is computed over every admitted row, never read off the passages
+        // that happened to be retrieved. Placed after the firewall so the count runs under
+        // exactly the domains retrieval would have been allowed to read, which matters more
+        // here than in chat: `externalCaller` has already re-based a sensitive query to
+        // `.project`, and a count that ignored `policy` would hand an MCP caller a figure
+        // derived from rows the same caller is forbidden to retrieve.
+        if classification.queryClass == .aggregate,
+           let counted = try await AggregateAnswering(store: store)
+               .answer(query, admitting: policy.admitted) {
+            _ = await recorder.record("count") {
+                (counted, ["objects_counted": counted.breakdown.total, "groups": counted.breakdown.counts.count])
+            }
+            let receipt = counted.receipt(
+                query: query,
+                domainsAdmitted: policy.admitted.sorted { $0.rawValue < $1.rawValue },
+                domainsBlocked: policy.blocked.sorted { $0.rawValue < $1.rawValue },
+                milliseconds: await recorder.allStages().reduce(0) { $0 + $1.milliseconds }
+            )
+            try await store.save(receipt)
+            answer.attribute("counted", counted.matchedOn)
+            answer.set("objectsCounted", counted.breakdown.total)
+            return Answer(
+                summary: counted.sentence,
+                points: [],
+                passages: [],
+                contradictions: [],
+                receipt: receipt,
+                insufficientEvidence: nil,
+                counted: counted
+            )
         }
 
         let outcome = try await recorder.record(

@@ -176,3 +176,133 @@ struct AggregateAnsweringTests {
         #expect(receipt.objectsSearched == 23)
     }
 }
+
+/// The counting fix was originally wired into `Conversation` only, which is the chat path.
+/// `Reasoner` backs **both** `opencore ask` and `core_ask` over MCP, so for a day the same
+/// question answered "12 of 22" in the app and returned a claim list to any MCP client.
+///
+/// These assert the two properties that make the `Reasoner` path trustworthy rather than merely
+/// present: a counted answer is *distinguishable* from an empty one, and a count obeys the same
+/// firewall as retrieval even when the caller is a model rather than the user.
+@Suite("Counting through the Reasoner")
+struct ReasonerAggregateTests {
+    private static func temporaryStore() async throws -> Store {
+        let path = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("opencore-test-\(UUID().uuidString)")
+            .appendingPathComponent("test.sqlite3")
+        return try await Store.open(at: path)
+    }
+
+    private static func seed(_ store: Store) async throws {
+        let source = Source(
+            kind: .github, handle: "tester", displayName: "test",
+            defaultAuthority: .authoredArtifact, defaultDomain: .project
+        )
+        try await store.upsert(source)
+        var objects: [CoreObject] = []
+        for index in 0..<12 {
+            objects.append(CoreObject(
+                sourceID: source.id, kind: .repository, externalID: "me/swift\(index)",
+                title: "swift\(index)", text: "a repository", domain: .project,
+                authority: .authoredArtifact, metadata: ["language": "Swift"]
+            ))
+        }
+        // Personal material, to prove a count cannot reach what retrieval cannot.
+        for index in 0..<7 {
+            objects.append(CoreObject(
+                sourceID: source.id, kind: .note, externalID: "note\(index)", title: "note",
+                text: "private", domain: .personal, authority: .authoredArtifact,
+                metadata: ["list": "Inbox"]
+            ))
+        }
+        try await store.ingest(objects)
+    }
+
+    @Test("a counted answer is marked as counted rather than looking like an empty one")
+    func countedAnswersAreDistinguishable() async throws {
+        let store = try await Self.temporaryStore()
+        try await Self.seed(store)
+
+        let answer = try await Reasoner(store: store)
+            .answer("how many of my apps are built with swift")
+
+        // Both a count and a found-nothing answer have no points and no passages. A caller that
+        // tells them apart by emptiness will eventually render a correct count as "no evidence".
+        let counted = try #require(answer.counted)
+        #expect(counted.count == 12)
+        #expect(answer.points.isEmpty)
+        #expect(answer.insufficientEvidence == nil)
+        #expect(answer.summary.contains("12 of 12"))
+    }
+
+    @Test("the counted receipt is saved, so trace resolves an answer that cites nothing")
+    func countedReceiptsArePersisted() async throws {
+        let store = try await Self.temporaryStore()
+        try await Self.seed(store)
+
+        let answer = try await Reasoner(store: store).answer("how many apps do I have")
+
+        // A receipt is only worth having if it can be looked up later. `Reasoner` saves it on
+        // the retrieval path, and the counted path must not be the one exception.
+        let found = try await store.receipt(code: answer.receipt.shortCode)
+        #expect(found != nil)
+        #expect(found?.queryClass == .aggregate)
+        #expect(found?.objectsRetrieved == 0)
+        #expect(found?.model == nil)
+    }
+
+    /// Five medical appointments, which only a query naming a medical term may reach.
+    private static func seedMedical(_ store: Store) async throws {
+        let source = Source(
+            kind: .calendar, handle: "cal", displayName: "cal",
+            defaultAuthority: .authoredArtifact, defaultDomain: .personal
+        )
+        try await store.upsert(source)
+        try await store.ingest((0..<5).map { index in
+            CoreObject(
+                sourceID: source.id, kind: .calendarEvent, externalID: "appt\(index)",
+                // The calendar is named "Doctor" so the word in the question resolves to a
+                // facet value. Without that it lands in the residue check and the resolver
+                // declines, which is correct behaviour but would make this test pass for the
+                // wrong reason: blocked-by-firewall and declined-as-unplaceable both read as
+                // `counted == nil`, and only one of them is what is being asserted here.
+                title: "appointment", text: "an appointment", domain: .medical,
+                authority: .authoredArtifact, metadata: ["calendar": "Doctor"]
+            )
+        })
+    }
+
+    @Test("an external caller cannot count what it is not allowed to retrieve")
+    func countsRespectTheExternalCallerFirewall() async throws {
+        // Two stores, one question. Not fastidiousness: asking the same query twice against one
+        // store fails with `UNIQUE constraint failed: receipt.id`, because `Receipt.id` is
+        // derived from the query text plus a millisecond timestamp and both calls land inside
+        // the same millisecond. That is a real product defect this test found rather than a
+        // test artifact, and it is filed; isolating the stores keeps this test measuring the
+        // firewall instead of failing for an unrelated reason.
+        let externalStore = try await Self.temporaryStore()
+        try await Self.seedMedical(externalStore)
+        let localStore = try await Self.temporaryStore()
+        try await Self.seedMedical(localStore)
+
+        // Medical rather than personal on purpose. `.personal` is not in `Domain.sensitive`, so
+        // `externalCaller` does not re-base it and the two callers would classify identically;
+        // a test written against notes passes for a reason that has nothing to do with the
+        // firewall. Only medical, financial and relationship exercise the downgrade.
+        //
+        // Answering "5" to a model here is the disclosure the firewall exists to refuse, and it
+        // would happen while retrieving zero passages and so tripping none of the checks that
+        // guard the passage path. A count is a disclosure.
+        let external = try await Reasoner(store: externalStore)
+            .answer("how many doctor appointments do I have", externalCaller: true)
+        #expect(external.counted == nil)
+
+        // The same question typed by the person whose records these are is answerable, because
+        // naming a sensitive domain is consent when a human does it. If this ever returns nil
+        // too, the firewall has become a blanket refusal and the distinction it exists to draw
+        // has been lost.
+        let local = try await Reasoner(store: localStore)
+            .answer("how many doctor appointments do I have", externalCaller: false)
+        #expect(local.counted?.count == 5)
+    }
+}
