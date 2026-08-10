@@ -65,6 +65,31 @@ took 25s on device.
 Use `--db /private/tmp/opencore-demo/oc.sqlite3` on any command to work against a scratch store
 instead of the real one at `~/Library/Application Support/OpenCore/opencore.sqlite3`.
 
+## Saved chats — verified 2026-08-10
+
+Every chat turn is written to the store as it completes, so a thread can be reopened later.
+
+```bash
+/private/tmp/opencore-build/out/Products/Debug/opencore chats
+```
+
+Lists saved threads, most recently used first, with turn counts and the id `--resume` takes.
+
+```bash
+/private/tmp/opencore-build/out/Products/Debug/opencore chat "FOLLOW-UP QUESTION" --resume THREAD_ID
+```
+
+Resuming restores the visible history **and** replays the exchanges into the model's
+`Transcript`, so the model has the conversation rather than only the reader having it.
+
+Verified: a thread went 2 turns to 4 on resume rather than forking a new one, and
+`opencore trace <code>` now resolves a receipt printed by `chat`, which it previously could not.
+
+**Retrieval still runs on the raw follow-up text.** "What language did you just say it uses"
+retrieves nothing useful and correctly answers "the sources retrieved do not answer that". The
+model has the context and is refusing to answer from memory, which is the design working;
+query rewriting for follow-ups is a tracked gap, not a bug in resume.
+
 ## Exercising the MCP server — verified 2026-08-08
 
 ```bash

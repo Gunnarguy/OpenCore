@@ -1,4 +1,5 @@
 import CoreIngest
+import CoreJSONRPC
 import CoreModel
 import SwiftUI
 
@@ -140,11 +141,14 @@ struct MCPSourcesView: View {
     private func addConfig() -> MCPServerConfig {
         let allowed = mcp.discoveredTools.map(\.name).filter { mcp.isAllowed($0) }
 
-        var arguments: [String: [String: String]] = [:]
+        // The form's fields are text, so everything it collects is a JSON string. A tool
+        // needing an object or a number is configurable only from the CLI's
+        // `--tool-arg-json` until this panel grows a typed editor.
+        var arguments: [String: [String: JSONValue]] = [:]
         for tool in allowed {
-            let filled = (mcp.toolArguments[tool] ?? [:]).compactMapValues { raw -> String? in
+            let filled = (mcp.toolArguments[tool] ?? [:]).compactMapValues { raw -> JSONValue? in
                 let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-                return trimmed.isEmpty ? nil : trimmed
+                return trimmed.isEmpty ? nil : .string(trimmed)
             }
             if !filled.isEmpty { arguments[tool] = filled }
         }
@@ -426,6 +430,11 @@ private struct MCPSourcesConfiguredRow: View {
     let sync: () -> Void
     let remove: () -> Void
 
+    @State private var signIn = MCPSignIn()
+    @State private var signedIn = false
+    @State private var signingIn = false
+    @State private var signInError: String?
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
@@ -434,19 +443,67 @@ private struct MCPSourcesConfiguredRow: View {
                     Text(commandLine).font(.caption.monospaced()).foregroundStyle(.secondary)
                 }
                 Spacer()
-                Button("Sync", action: sync).disabled(disabled)
+                if hostedEndpoint != nil { signInButton }
+                Button("Sync", action: sync).disabled(disabled || (hostedEndpoint != nil && !signedIn))
                 Button("Remove", action: remove).disabled(disabled)
             }
 
             detail
+
+            if let signInError {
+                Label(signInError, systemImage: "exclamationmark.triangle")
+                    .font(.caption).foregroundStyle(.orange)
+            }
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.quaternary.opacity(0.3), in: .rect(cornerRadius: 10))
+        .task { refreshSignedIn() }
+    }
+
+    /// A hosted server signs in; a local one reads a credential from the environment. Only one
+    /// of those two is ever offered, so the row cannot suggest an action that does nothing.
+    private var hostedEndpoint: URL? {
+        guard let raw = row.config?.url else { return nil }
+        return URL(string: raw)
+    }
+
+    @ViewBuilder
+    private var signInButton: some View {
+        if signingIn {
+            ProgressView().controlSize(.small)
+        } else if signedIn {
+            Button("Sign out") {
+                MCPSignIn.signOut(server: row.name)
+                refreshSignedIn()
+            }
+        } else {
+            Button("Sign in", action: startSignIn).buttonStyle(.borderedProminent)
+        }
+    }
+
+    private func startSignIn() {
+        guard let endpoint = hostedEndpoint else { return }
+        signInError = nil
+        signingIn = true
+        Task {
+            do {
+                try await signIn.signIn(server: row.name, endpoint: endpoint)
+            } catch {
+                signInError = (error as? LocalizedError)?.errorDescription ?? "\(error)"
+            }
+            signingIn = false
+            refreshSignedIn()
+        }
+    }
+
+    private func refreshSignedIn() {
+        signedIn = MCPSignIn.isSignedIn(server: row.name)
     }
 
     private var commandLine: String {
         guard let config = row.config else { return "configuration unreadable" }
+        if let url = config.url { return url }
         return ([config.command] + config.arguments).joined(separator: " ")
     }
 

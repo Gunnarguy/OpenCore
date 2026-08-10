@@ -15,18 +15,29 @@ final class ChatModel {
     var expandedSource: [UUID: Int] = [:]
     var showingReceipt: Turn?
 
+    /// Saved threads, most recently used first.
+    var threads: [StoredConversation] = []
+
+    /// Which thread new turns belong to. Part of the retained key below, so selecting another
+    /// thread drops the held `Conversation` and its model session with it. Reusing the session
+    /// across threads would carry one conversation's context into another, which is worse than
+    /// having no history at all because it is invisible.
+    private(set) var currentID = UUID().uuidString
+
     /// Held across turns so a follow-up question reaches the model's own `Transcript` instead
-    /// of a summary of previous exchanges pasted into the prompt. Rebuilt when the store or
-    /// the retrieval tuning changes, because both are baked in at construction.
+    /// of a summary of previous exchanges pasted into the prompt. Rebuilt when the store, the
+    /// retrieval tuning or the thread changes, because all three are baked in at construction.
     private var retained: Conversation?
-    private var retainedKey: (store: ObjectIdentifier, tuning: RetrievalTuning)?
+    private var retainedKey: (store: ObjectIdentifier, tuning: RetrievalTuning, id: String)?
 
     func conversation(store: Store, tuning: RetrievalTuning) -> Conversation {
         // `Store` is a value type wrapping the `Database` actor, so the actor's identity is
         // what actually distinguishes one store from another.
-        let key = (store: ObjectIdentifier(store.database), tuning: tuning)
+        let key = (store: ObjectIdentifier(store.database), tuning: tuning, id: currentID)
         if let retained, let retainedKey, retainedKey == key { return retained }
-        let created = Conversation(store: store, embedder: try? NLEmbeddingProvider(), tuning: tuning)
+        let created = Conversation(
+            store: store, embedder: try? NLEmbeddingProvider(), tuning: tuning, id: currentID
+        )
         retained = created
         retainedKey = key
         return created
@@ -34,6 +45,37 @@ final class ChatModel {
 
     func refreshReadiness() {
         readiness = Conversation.readiness()
+    }
+
+    // MARK: - Saved threads
+
+    func loadThreads(store: Store) async {
+        threads = (try? await store.conversations()) ?? []
+    }
+
+    /// Begin a new thread. Nothing is written until the first question is asked, so opening the
+    /// tab and closing it does not litter the list with empty rows.
+    func startNewThread() {
+        currentID = UUID().uuidString
+        retained = nil
+        retainedKey = nil
+        turns = []
+        expandedSource = [:]
+    }
+
+    /// Reopen a saved thread, restoring both the visible history and the model's context.
+    func open(_ thread: StoredConversation, store: Store, tuning: RetrievalTuning) async {
+        currentID = thread.id
+        retained = nil
+        retainedKey = nil
+        expandedSource = [:]
+        turns = (try? await conversation(store: store, tuning: tuning).restore()) ?? []
+    }
+
+    func delete(_ thread: StoredConversation, store: Store) async {
+        try? await store.deleteConversation(id: thread.id)
+        if thread.id == currentID { startNewThread() }
+        await loadThreads(store: store)
     }
 }
 
@@ -57,8 +99,20 @@ struct ChatView: View {
             composer
         }
         .navigationTitle("Chat")
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) { historyMenu }
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    chat.startNewThread()
+                } label: {
+                    Label("New chat", systemImage: "square.and.pencil")
+                }
+                .help("Start a new thread. The current one is already saved.")
+            }
+        }
         .task {
             chat.refreshReadiness()
+            if let store = model.store { await chat.loadThreads(store: store) }
             // Load the model's assets while the reader is still typing rather than after they
             // hit return.
             if chat.readiness.isReady, let store = model.store {
@@ -68,6 +122,45 @@ struct ChatView: View {
         .sheet(item: $chat.showingReceipt) { turn in
             if let receipt = turn.receipt { ChatReceiptSheet(receipt: receipt, turn: turn) }
         }
+    }
+
+    // MARK: - Saved threads
+
+    /// Past threads, most recently used first.
+    ///
+    /// A menu rather than a permanent sidebar: this screen already competes for width with the
+    /// app's navigation column, and a second always-on list would push the passages, which are
+    /// the point of the screen, into a gutter.
+    private var historyMenu: some View {
+        Menu {
+            if chat.threads.isEmpty {
+                Text("No saved chats yet")
+            } else {
+                ForEach(chat.threads) { thread in
+                    Button {
+                        guard let store = model.store else { return }
+                        Task { await chat.open(thread, store: store, tuning: settings.tuning) }
+                    } label: {
+                        // The turn count is the honest measure of a thread's weight. A date
+                        // alone does not distinguish one abandoned question from a long session.
+                        Text("\(thread.title)  ·  \(thread.turnCount) turns")
+                        if thread.id == chat.currentID { Image(systemName: "checkmark") }
+                    }
+                }
+                Divider()
+                Menu("Delete") {
+                    ForEach(chat.threads) { thread in
+                        Button(thread.title, role: .destructive) {
+                            guard let store = model.store else { return }
+                            Task { await chat.delete(thread, store: store) }
+                        }
+                    }
+                }
+            }
+        } label: {
+            Label("History", systemImage: "clock.arrow.circlepath")
+        }
+        .help("Reopen a saved chat. Reopening restores the conversation the model can see, not just the text on screen.")
     }
 
     // MARK: - Banner
@@ -154,6 +247,9 @@ struct ChatView: View {
                 }
             }
             chat.sending = false
+            // After, not before: the thread's title and turn count are only correct once the
+            // turn has been written, and a new thread does not exist in the list until then.
+            await chat.loadThreads(store: store)
         }
     }
 }
@@ -183,6 +279,12 @@ private struct TurnView: View {
                     answerText
                 }
                 if !turn.sources.isEmpty { SourceStrip(turn: turn, chat: chat) }
+                // A good answer that will not survive closing the window. Said out loud,
+                // because the reader is about to assume the thread is on disk.
+                if let failure = turn.persistenceError {
+                    Label("This turn was not saved. \(failure)", systemImage: "externaldrive.trianglebadge.exclamationmark")
+                        .font(.caption).foregroundStyle(.orange)
+                }
                 if !turn.streaming && turn.error == nil { footer }
             }
         }

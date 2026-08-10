@@ -5,6 +5,7 @@ import CoreModel
 import CoreReason
 import CoreSearch
 import CoreStore
+import CoreTelemetry
 import Foundation
 
 // Argument parsing is hand-rolled to keep the package dependency-free. That is a real
@@ -47,6 +48,7 @@ func positional(_ index: Int) -> String? {
 
 let Self_booleanFlags: Set<String> = [
     "open", "include-forks", "help", "unsafe-expose-sensitive", "no-context", "verbose",
+    "telemetry", "telemetry-summary",
 ]
 
 func parseDuration(_ text: String) -> TimeInterval? {
@@ -75,6 +77,39 @@ func bar(_ value: Double, width: Int = 20) -> String {
 /// never accidentally contaminate its JSON-RPC stream.
 func progress(_ message: String) {
     FileHandle.standardError.write(Data(("  " + message + "\n").utf8))
+}
+
+// MARK: - Telemetry
+
+/// `--telemetry` turns on measurement for this run; `OPENCORE_TELEMETRY` does the same for a
+/// whole shell session. Off otherwise, so the default path pays one atomic load per span.
+if flag("telemetry") || flag("telemetry-summary") { Telemetry.enable() }
+
+/// Write the measured tree.
+///
+/// **stderr, always.** Never `print`. `opencore mcp` speaks JSON-RPC on stdout and a single
+/// line of report text there corrupts the stream in a way that presents to the client as a
+/// hang rather than an error.
+func writeTelemetryReport() async {
+    guard Telemetry.isEnabled else { return }
+    let spans = await Telemetry.collected()
+    let dropped = await Telemetry.recorder.droppedCount()
+
+    var report = "\n"
+    if !flag("telemetry-summary") {
+        report += TelemetryReport.tree(spans, droppedCount: dropped) + "\n\n"
+    }
+    report += TelemetryReport.summary(spans) + "\n"
+
+    if let path = option("telemetry-json") {
+        do {
+            try TelemetryReport.jsonl(spans).write(toFile: path, atomically: true, encoding: .utf8)
+            report += "\n\(spans.count) span(s) written to \(path)\n"
+        } catch {
+            report += "\ncould not write \(path): \(error)\n"
+        }
+    }
+    FileHandle.standardError.write(Data(report.utf8))
 }
 
 func usage() {
@@ -121,6 +156,12 @@ func usage() {
       opencore rebuild [--no-embed]              re-derive everything from objects
       opencore export [--format jsonl|markdown] [--to DIR]
                                                  everything back out, in a format you own
+
+    TELEMETRY  (append to any command; measurement goes to stderr, never stdout)
+      --telemetry                  nested tree of every stage, with timings and counters
+      --telemetry-summary          time by layer and the ten slowest spans, no tree
+      --telemetry-json PATH        one span per line, for diffing two runs
+      OPENCORE_TELEMETRY=1         same as --telemetry, for a whole shell session
 
     Objects are the floor. Everything above them is rebuildable.
     """)
@@ -614,7 +655,25 @@ func trace(_ code: String) async throws {
 ///
 /// Exists so the engine can be exercised without clicking: retrieval, generation, and the
 /// grounding check all run here exactly as they do in the app.
-func chat(_ question: String) async throws {
+/// `opencore chats` — saved threads, most recently used first.
+func listChats() async throws {
+    let store = try await openStore()
+    let threads = try await store.conversations()
+    guard !threads.isEmpty else {
+        print("no saved chats yet. `opencore chat \"question\"` starts one.")
+        return
+    }
+    let formatter = DateFormatter()
+    formatter.dateFormat = "yyyy-MM-dd HH:mm"
+    for thread in threads {
+        // The id is printed in full because it is what `--resume` takes. A truncated id that
+        // has to be completed by hand is a worse affordance than a long line.
+        print("\(formatter.string(from: thread.updatedAt))  \(thread.turnCount) turns  \(thread.id)")
+        print("  \(thread.title)\n")
+    }
+}
+
+func chat(_ question: String, resuming: String? = nil) async throws {
     let readiness = Conversation.readiness()
     guard readiness.isReady else {
         print(readiness.message)
@@ -622,7 +681,24 @@ func chat(_ question: String) async throws {
     }
 
     let store = try await openStore()
-    let conversation = Conversation(store: store, embedder: embedder(quiet: true))
+    let conversation = resuming.map {
+        Conversation(store: store, embedder: embedder(quiet: true), id: $0)
+    } ?? Conversation(store: store, embedder: embedder(quiet: true))
+
+    if let resuming {
+        let prior = try await conversation.restore()
+        guard !prior.isEmpty else {
+            print("no saved chat with id '\(resuming)'. `opencore chats` lists them.")
+            exit(1)
+        }
+        // Printed so it is visible what the model has been handed, rather than the reader
+        // having to trust that resuming did anything.
+        print("resuming \(prior.count) prior turns\n")
+        for turn in prior {
+            print("\(turn.role == .you ? "you " : "core")  \(turn.text.prefix(160))")
+        }
+        print("")
+    }
 
     var final: Turn?
     for await turn in conversation.send(question) {
@@ -647,25 +723,33 @@ func chat(_ question: String) async throws {
     // Two signals, reported separately because one is a guarantee and the other is a guess.
     // Reporting a single "grounding" percentage is what let an answer about the wrong
     // repository read as fully supported.
+    //
+    // Skipped entirely when there is nothing to ground. A counted answer cites no passage by
+    // construction, and printing "citations 0/0" under a correct count reads as a failed check
+    // rather than an inapplicable one. The receipt still says how the answer was produced.
     let total = turn.verdicts.count
-    let resolved = turn.verdicts.filter(\.citationResolves).count
-    let weak = turn.verdicts.filter { $0.citationResolves && $0.score < Grounding.overlapThreshold }
-    print("")
-    print("citations    \(resolved)/\(total) resolve to a source that was actually supplied")
-    if weak.isEmpty {
-        print("overlap      \(total)/\(total) sentences share vocabulary with the source they cite")
-    } else {
-        print("overlap      \(weak.count) of \(total) below \(String(format: "%.2f", Grounding.overlapThreshold)):")
-        for verdict in weak {
-            let cited = verdict.citedSource.map { "[\($0)]" } ?? "[uncited]"
-            print("  \(String(format: "%.2f", verdict.score)) \(cited)  \(verdict.sentence.prefix(100))")
-            if !verdict.unsupported.isEmpty {
-                print("        not in that source: \(verdict.unsupported.prefix(6).joined(separator: ", "))")
+    if total > 0 {
+        let resolved = turn.verdicts.filter(\.citationResolves).count
+        let weak = turn.verdicts.filter { $0.citationResolves && $0.score < Grounding.overlapThreshold }
+        print("")
+        print("citations    \(resolved)/\(total) resolve to a source that was actually supplied")
+        if weak.isEmpty {
+            print("overlap      \(total)/\(total) sentences share vocabulary with the source they cite")
+        } else {
+            print("overlap      \(weak.count) of \(total) below \(String(format: "%.2f", Grounding.overlapThreshold)):")
+            for verdict in weak {
+                let cited = verdict.citedSource.map { "[\($0)]" } ?? "[uncited]"
+                print("  \(String(format: "%.2f", verdict.score)) \(cited)  \(verdict.sentence.prefix(100))")
+                if !verdict.unsupported.isEmpty {
+                    print("        not in that source: \(verdict.unsupported.prefix(6).joined(separator: ", "))")
+                }
             }
         }
     }
     if let model = turn.modelName { print("model        \(model)") }
     if let receipt = turn.receipt { print("receipt      \(receipt.shortCode)") }
+    // Said out loud. The reader is about to close the terminal assuming this thread is on disk.
+    if let failure = turn.persistenceError { print("WARNING      \(failure)") }
 }
 
 // MARK: - Timeline
@@ -870,6 +954,12 @@ func serveMCP() async throws {
 // MARK: - Dispatch
 
 do {
+    // The whole command is one root span, so everything below it nests into a single tree
+    // rather than arriving as a flat list of unrelated timings.
+    try await Telemetry.span(
+        [arguments.first, positional(1)].compactMap { $0 }.joined(separator: " "),
+        .cli
+    ) { _ in
     switch arguments.first {
     case "doctor":
         try await doctor()
@@ -888,6 +978,7 @@ do {
     case "mcp-source":
         switch positional(1) {
         case "discover": try await MCPSourceCommands.discover()
+        case "oauth": try await MCPSourceCommands.oauth()
         case "add":
             guard let name = positional(2) else { print("usage: opencore mcp-source add NAME --command CMD --tool TOOL"); exit(1) }
             try await MCPSourceCommands.add(name)
@@ -928,8 +1019,13 @@ do {
         guard let code = positional(1) else { print("usage: opencore trace CODE"); exit(1) }
         try await trace(code)
     case "chat":
-        guard let question = positional(1) else { print("usage: opencore chat \"QUESTION\""); exit(1) }
-        try await chat(question)
+        guard let question = positional(1) else {
+            print("usage: opencore chat \"QUESTION\" [--resume ID]")
+            exit(1)
+        }
+        try await chat(question, resuming: option("resume"))
+    case "chats":
+        try await listChats()
     case "timeline":
         try await timeline()
     case "correct":
@@ -951,7 +1047,12 @@ do {
         usage()
         exit(1)
     }
+    }
+    await writeTelemetryReport()
 } catch {
+    // The report comes before the error line. A run that failed partway is exactly when the
+    // tree is worth reading, and the failing span is in it.
+    await writeTelemetryReport()
     FileHandle.standardError.write(Data("error: \(error)\n".utf8))
     exit(1)
 }

@@ -1,3 +1,4 @@
+import CoreTelemetry
 import Foundation
 import SQLite3
 
@@ -150,17 +151,31 @@ public final class Connection {
 
     @discardableResult
     public func execute(_ sql: String, _ bindings: [SQLValue] = []) throws -> Int {
-        let statement = try prepare(sql, bindings)
-        defer { sqlite3_finalize(statement) }
+        try Telemetry.spanSync(SQLShape.of(sql), .store) { scope in
+            let statement = try prepare(sql, bindings)
+            defer { sqlite3_finalize(statement) }
 
-        let result = sqlite3_step(statement)
-        guard result == SQLITE_DONE || result == SQLITE_ROW else {
-            throw StoreError.step(String(cString: sqlite3_errmsg(handle)), sql: sql)
+            let result = sqlite3_step(statement)
+            guard result == SQLITE_DONE || result == SQLITE_ROW else {
+                throw StoreError.step(String(cString: sqlite3_errmsg(handle)), sql: sql)
+            }
+            let changed = Int(sqlite3_changes(handle))
+            scope.set("changed", changed)
+            scope.set("bindings", bindings.count)
+            return changed
         }
-        return Int(sqlite3_changes(handle))
     }
 
     public func query(_ sql: String, _ bindings: [SQLValue] = []) throws -> [Row] {
+        try Telemetry.spanSync(SQLShape.of(sql), .store) { scope in
+            let rows = try queryUninstrumented(sql, bindings)
+            scope.set("rows", rows.count)
+            scope.set("bindings", bindings.count)
+            return rows
+        }
+    }
+
+    private func queryUninstrumented(_ sql: String, _ bindings: [SQLValue] = []) throws -> [Row] {
         let statement = try prepare(sql, bindings)
         defer { sqlite3_finalize(statement) }
 
@@ -259,6 +274,7 @@ public actor Database {
         (1, "schema"),
         (2, "migration_002"),
         (3, "migration_003"),
+        (4, "migration_004"),
     ]
 
     public static var schemaVersion: Int { migrations.map(\.version).max() ?? 0 }
@@ -333,6 +349,9 @@ public actor Database {
     }
 
     /// Convenience for one-off statements outside a transaction.
+    ///
+    /// Not instrumented here: it forwards to `Connection`, which is, and measuring both would
+    /// double every store row in the telemetry tree.
     @discardableResult
     public func execute(_ sql: String, _ bindings: [SQLValue] = []) throws -> Int {
         try connection.execute(sql, bindings)

@@ -6,7 +6,7 @@ import Foundation
 /// zero-dependency guarantee. The stdio transport is newline-delimited JSON-RPC and the
 /// surface OpenCore needs is five methods, so the SDK would cost a dependency and a
 /// version-pinning surface to save a few hundred lines.
-public enum JSONValue: Sendable, Codable, Equatable {
+public enum JSONValue: Sendable, Codable, Hashable {
     case null
     case bool(Bool)
     case number(Double)
@@ -53,6 +53,30 @@ public enum JSONValue: Sendable, Codable, Equatable {
     public static func string(_ value: String?) -> JSONValue { value.map { .string($0) } ?? .null }
     public static func int(_ value: Int) -> JSONValue { .number(Double(value)) }
     public static func double(_ value: Double?) -> JSONValue { value.map { .number($0) } ?? .null }
+
+    /// Parse one JSON value from text, including bare fragments like `3` or `"a"`.
+    ///
+    /// Wraps the text in an array before decoding because top-level fragment support in
+    /// `JSONDecoder` has varied across platform versions, and this parser has to behave the
+    /// same everywhere it runs. The `count == 1` guard is what stops `1,2` from silently
+    /// parsing as its first element.
+    public static func parse(_ text: String) throws -> JSONValue {
+        let values = try JSONDecoder().decode([JSONValue].self, from: Data("[\(text)]".utf8))
+        guard values.count == 1, let only = values.first else {
+            throw ParseError.notASingleValue(text)
+        }
+        return only
+    }
+
+    public enum ParseError: Error, CustomStringConvertible {
+        case notASingleValue(String)
+
+        public var description: String {
+            switch self {
+            case .notASingleValue(let text): "expected exactly one JSON value, got '\(text)'"
+            }
+        }
+    }
 }
 
 public struct RPCRequest: Decodable, Sendable {

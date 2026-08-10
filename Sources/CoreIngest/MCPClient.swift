@@ -63,12 +63,21 @@ public struct MCPTool: Sendable, Hashable {
 public actor MCPClient {
     public static let preferredProtocolVersion = "2025-11-25"
 
-    private let transport: StdioTransport
+    private let transport: any MCPTransport
     private(set) public var negotiatedVersion: String?
     private(set) public var serverName: String?
 
     public init(command: String, arguments: [String], environment: [String: String]) throws {
         transport = try StdioTransport(command: command, arguments: arguments, environment: environment)
+    }
+
+    /// A hosted server over streamable HTTP.
+    ///
+    /// `accessToken` is nil on the very first connection: being refused with a `401` is the
+    /// documented way to discover where to authenticate, and `HTTPTransportError.unauthorized`
+    /// carries the metadata URL out of that refusal.
+    public init(endpoint: URL, accessToken: String?) {
+        transport = HTTPTransport(endpoint: endpoint, accessToken: accessToken)
     }
 
     public func connect(timeout: TimeInterval = 30) async throws {
@@ -86,7 +95,7 @@ public actor MCPClient {
             serverName = result["serverInfo"]?["name"]?.stringValue
             // Required by the older spec; a server that never receives it may refuse to serve.
             try await transport.notify("notifications/initialized")
-        } catch StdioTransport.TransportError.remote(let code, _) where code == -32601 {
+        } catch let error where rpcErrorCode(error) == -32601 {
             // No `initialize`: a 2026-07-28 stateless server.
             let result = try await transport.request("server/discover", timeout: timeout)
             negotiatedVersion = result["protocolVersions"]?.stringValue

@@ -41,6 +41,12 @@ targets:
         NSAppleEventsUsageDescription: "OpenCore reads Apple Notes through AppleScript, which is the only interface Notes provides. Notes stay on this device."
         # Notes has no public API; this is the bundle whose events we send.
         NSAppleEventsUsageDescriptionAppleScript: "Reading your notes."
+        # OAuth callback for hosted MCP servers. ASWebAuthenticationSession intercepts the
+        # scheme itself, but registering it means a callback that arrives after the sheet has
+        # closed reaches OpenCore rather than failing with "no application can open this URL".
+        CFBundleURLTypes:
+          - CFBundleURLName: com.gunnarhostetler.opencore.oauth
+            CFBundleURLSchemes: [opencore]
     entitlements:
       path: Generated/OpenCore.entitlements
       properties:

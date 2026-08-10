@@ -189,6 +189,129 @@ extension Store {
                 return (kind, row.requireInt("n"))
             }
     }
+
+    /// Objects of one kind, grouped and counted by one metadata key.
+    ///
+    /// This exists because **a counting question cannot be answered from a passage window.**
+    /// The answer path hands the model six passages, so asked "how many of my apps are built
+    /// in Swift" it counts the Swift ones among those six and reports that number with a
+    /// straight face and a valid receipt. Measured 2026-08-10: it answered 2 against a true
+    /// 12. A count has to be computed over the whole table, which means here.
+    ///
+    /// Objects carrying no value under `key` are **not** bucketed as "unknown". Absent
+    /// metadata is unmeasured, and a bucket would put a number on something never observed.
+    /// `total` is returned alongside so a caller can state the shortfall rather than implying
+    /// the groups are exhaustive.
+    public func objectCountsByMetadata(
+        kind: ObjectKind, key: String, domains: Set<Domain>
+    ) async throws -> MetadataBreakdown {
+        guard !domains.isEmpty else { return MetadataBreakdown(kind: kind, key: key, counts: [], total: 0) }
+        // Bound as a value, never interpolated: `key` reaches here from a query string.
+        let path = "$.\(key)"
+        let (clause, domainValues) = Self.domainFilter(domains)
+        let counts = try await database.query(
+            """
+            SELECT json_extract(metadata, ?) AS value, COUNT(*) AS n FROM object
+            WHERE kind = ? AND json_extract(metadata, ?) IS NOT NULL AND \(clause)
+            GROUP BY value ORDER BY n DESC, value ASC
+            """,
+            [.text(path), .text(kind.rawValue), .text(path)] + domainValues
+        ).map { MetadataCount(value: $0.requireString("value"), count: $0.requireInt("n")) }
+
+        return MetadataBreakdown(
+            kind: kind, key: key, counts: counts,
+            total: try await objectCount(kind: kind, domains: domains)
+        )
+    }
+
+    /// Metadata keys carried by objects of one kind, most common first.
+    ///
+    /// Exists so a counting question can be resolved against **what the store actually holds**
+    /// rather than against a hardcoded list of fields. A list in code goes stale the first time
+    /// a connector learns to record something new, and the symptom is a question that used to
+    /// be answerable quietly becoming unanswerable.
+    ///
+    /// `minimumObjects` drops keys carried by only a handful of objects, which are far more
+    /// often a connector quirk than a countable facet.
+    public func metadataKeys(
+        kind: ObjectKind, domains: Set<Domain>, minimumObjects: Int = 4
+    ) async throws -> [String] {
+        guard !domains.isEmpty else { return [] }
+        let (clause, domainValues) = Self.domainFilter(domains)
+        return try await database.query(
+            """
+            SELECT k.key AS key, COUNT(*) AS n FROM object, json_each(object.metadata) k
+            WHERE object.kind = ? AND \(clause)
+            GROUP BY k.key HAVING n >= ? ORDER BY n DESC, key ASC
+            """,
+            [.text(kind.rawValue)] + domainValues + [.integer(Int64(minimumObjects))]
+        ).map { $0.requireString("key") }
+    }
+
+    public func objectCount(kind: ObjectKind, domains: Set<Domain>) async throws -> Int {
+        guard !domains.isEmpty else { return 0 }
+        let (clause, domainValues) = Self.domainFilter(domains)
+        return try await database.scalarInt(
+            "SELECT COUNT(*) FROM object WHERE kind = ? AND \(clause)",
+            [.text(kind.rawValue)] + domainValues
+        )
+    }
+
+    /// The domain allowlist as a bound `IN` clause.
+    ///
+    /// `domains` is **required** on every counting method above rather than defaulting to all
+    /// of them, because the safe default is the one a caller cannot forget to pass. A count is
+    /// a disclosure: "you have 14 medical appointments" answers a question the firewall exists
+    /// to refuse, and it does so without retrieving a single passage the firewall would have
+    /// blocked. Only the domain values are interpolated, and only as `?` placeholders.
+    static func domainFilter(_ domains: Set<Domain>) -> (clause: String, values: [SQLValue]) {
+        let ordered = domains.map(\.rawValue).sorted()
+        let placeholders = Array(repeating: "?", count: ordered.count).joined(separator: ", ")
+        return ("domain IN (\(placeholders))", ordered.map { .text($0) })
+    }
+}
+
+/// One group in a metadata breakdown.
+public struct MetadataCount: Sendable, Hashable, Codable {
+    public var value: String
+    public var count: Int
+
+    public init(value: String, count: Int) {
+        self.value = value
+        self.count = count
+    }
+}
+
+/// A counted grouping over one metadata key, with the part it could not classify kept visible.
+public struct MetadataBreakdown: Sendable, Hashable, Codable {
+    public var kind: ObjectKind
+    public var key: String
+    /// Most frequent first. Objects with no value for `key` are absent, not bucketed.
+    public var counts: [MetadataCount]
+    /// Every object of this kind, including the ones no group accounts for.
+    public var total: Int
+
+    public init(kind: ObjectKind, key: String, counts: [MetadataCount], total: Int) {
+        self.kind = kind
+        self.key = key
+        self.counts = counts
+        self.total = total
+    }
+
+    /// Objects of this kind carrying no value for `key`. Reported rather than hidden: "12 of
+    /// 22" and "12 of 12" are different answers and only one of them is true.
+    public var unclassified: Int { total - counts.reduce(0) { $0 + $1.count } }
+
+    /// A yes/no field. Its name is the question ("archived", "completed"), and the buckets are
+    /// the answer, which is the opposite of a field like `language` where the values are what
+    /// a question names.
+    public var isBoolean: Bool {
+        !counts.isEmpty && counts.allSatisfy { $0.value == "true" || $0.value == "false" }
+    }
+
+    public func count(matching value: String) -> Int {
+        counts.first { $0.value.caseInsensitiveCompare(value) == .orderedSame }?.count ?? 0
+    }
 }
 
 extension CoreObject {

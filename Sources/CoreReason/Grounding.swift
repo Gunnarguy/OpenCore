@@ -44,7 +44,7 @@ public struct Grounding: Sendable {
         "what", "where", "while", "them", "they", "its", "it's", "but", "not", "can", "may",
     ]
 
-    public struct Verdict: Sendable, Hashable {
+    public struct Verdict: Sendable, Hashable, Codable {
         public let sentence: String
         /// The source number the model attributed this sentence to. `nil` when the answer was
         /// produced without typed citations, which on this path means generation failed part

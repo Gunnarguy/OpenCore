@@ -15,6 +15,13 @@ public struct QueryClassifier: Sendable {
     }
 
     private static let markers: [(QueryClass, [String])] = [
+        // First on purpose. A counting question routinely carries another class's marker
+        // ("how many projects use X *across* my repos" is also `.analytical`), and losing the
+        // count to that match is what produces the failure this class exists to stop: the
+        // model counting the six passages in front of it and reporting the total as fact.
+        // Being first costs nothing against `.causal`, whose markers are disjoint from these:
+        // "how come" contains no aggregate marker and still classifies as causal.
+        (.aggregate, ["how many", "how much", "number of", "count of", "how often", "total number"]),
         (.causal, ["why", "what caused", "what led", "reason for", "because", "how come", "what made"]),
         (.differential, ["what changed", "what's new", "whats new", "since last", "diff", "this week", "recently changed"]),
         (.temporal, ["when", "what was i", "back in", "in march", "last year", "six months ago", "at the time", "history of"]),

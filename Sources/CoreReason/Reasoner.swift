@@ -2,6 +2,7 @@ import CoreGraph
 import CoreModel
 import CoreSearch
 import CoreStore
+import CoreTelemetry
 import Foundation
 
 /// A cited statement in an answer.
@@ -68,6 +69,7 @@ public struct Reasoner: Sendable {
     ///   nothing at all when a model generates it, so an external caller can neither unlock a
     ///   sensitive domain nor be classified into one.
     public func answer(_ query: String, limit: Int = 12, externalCaller: Bool = false) async throws -> Answer {
+        try await Telemetry.span("answer", .reason, attributes: ["externalCaller": String(externalCaller)]) { answer in
         let recorder = ReceiptRecorder()
 
         let classification = classifier.classify(query)
@@ -80,6 +82,15 @@ public struct Reasoner: Sendable {
             queryDomain: domain,
             explicitlyRequested: externalCaller ? [] : requested
         )
+        answer.attribute("queryClass", classification.queryClass.rawValue)
+        answer.attribute("matchedOn", classification.matchedOn)
+        answer.attribute("domain", domain.rawValue)
+        // Downgrading a sensitive query because the caller came in over MCP is a security
+        // decision, and one that changes the answer. It is recorded as an event so it appears
+        // in the tree rather than only as a differing `domain` attribute nobody compares.
+        if externalCaller && rawDomain.isSensitive {
+            Telemetry.event("domain.downgraded", .reason, attributes: ["from": rawDomain.rawValue, "to": "project"])
+        }
 
         let outcome = try await recorder.record(
             "retrieve",
@@ -152,6 +163,22 @@ public struct Reasoner: Sendable {
             }
         }
 
+        answer.set("hits", outcome.hits.count)
+        answer.set("aboveFloor", relevant.count)
+        answer.set("points", points.count)
+        answer.set("claims", claimIDs.count)
+        answer.set("contradictions", contradictions.count)
+        answer.attribute("receipt", receipt.shortCode)
+        // The gap between hits and aboveFloor is the relevance floor's work. A run where
+        // everything retrieved was then discarded looks identical to one that retrieved
+        // nothing, unless both numbers are present.
+        if relevant.isEmpty && !outcome.hits.isEmpty {
+            Telemetry.event("relevanceFloor.rejectedAll", .reason, attributes: [
+                "floor": String(Self.relevanceFloor),
+                "hits": String(outcome.hits.count),
+            ])
+        }
+
         return Answer(
             summary: summarise(points: points, passages: relevant, outcome: outcome),
             points: points,
@@ -160,6 +187,7 @@ public struct Reasoner: Sendable {
             receipt: receipt,
             insufficientEvidence: insufficient
         )
+        }
     }
 
     // MARK: - Assembly

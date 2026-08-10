@@ -531,3 +531,231 @@ and spell-parser commits still outrank it, and the model still answered from one
 aggregate moved 5.8x; that query is still wrong. Benchmark case `q18` is the regression test
 and is still failing exactly as intended. Commit flooding is now the top open retrieval defect,
 and it is a different problem from the one just fixed.
+
+---
+
+## 2026-08-09 — The MCP client met a third-party server, and the allowlist rule earned its keep
+
+`opencore mcp-source discover` against Notion's official server, run from the copy already in
+the npx cache so nothing was downloaded: connected over stdio, negotiated protocol
+`2025-11-25`, enumerated **24 tools**. `[test]`
+
+Two things this settles.
+
+**The force-multiplier claim was true.** A whole new source type, Notion, cost **zero lines of
+code**. `MCPServerConfig` already had `command`, `arguments`, `environmentNames`,
+`allowedTools`, `toolArguments`, `domain` and `authority`, and resolves secrets from the
+keychain. The integration is a row in the `source` table. That was the entire argument for
+building the MCP client before writing connectors by hand, and it holds.
+
+**Never derive an allowlist, concretely.** The rule has been stated since `5aa3448` and this is
+the first time it has been tested against a real server. Notion annotates
+`API-query-data-source` and `API-post-search` as **DESTRUCTIVE**. Both are reads. The
+annotation tracks the HTTP method, since the Notion API queries over `POST`, and says nothing
+about semantics.
+
+So a client that trusted the server's own read-only hints would have excluded the two tools
+this integration most needs, while `API-retrieve-a-page` and friends were flagged "read-only
+(name unclear)" and would have been admitted on a name pattern. Both directions wrong. The
+allowlist is four tools, hand-picked: `API-query-data-source`, `API-retrieve-a-data-source`,
+`API-retrieve-a-page`, `API-retrieve-page-markdown`.
+
+**Blocked on a credential, deliberately not worked around.** `NOTION_TOKEN` is an internal
+integration token that only its owner can create, and the database has to be shared with the
+integration before anything is readable. `--env` passes variable *names*, never values, so the
+token reaches the child process from the environment or the keychain and never touches the
+database, a log line, or this repository.
+
+**One design decision recorded before it is implemented,** because it is the tempting mistake:
+Notion's `Evidence` column (`measured` / `test` / `source` / `design` / `unverified`) must
+**not** map onto `Authority`. `Authority` is an ordinal tier describing who said a thing, and
+every roadmap row is a `directStatement` regardless of how well evidenced its content is.
+Folding a confidence-like field into the authority tier is exactly the `confidence * authority`
+error the type exists to prevent. `Evidence` belongs in object metadata.
+
+---
+
+## 2026-08-09 — "Can't I just click sign in?" Yes, and that is dynamic client registration
+
+Asked why OpenCore needed a hand-made token when every other MCP client just has a sign-in
+button. The answer is that they do something OpenCore could not, and the missing piece has a
+name. `[test]`
+
+**`registration_endpoint` is the whole trick.** With OAuth 2.1 **dynamic client registration**,
+a client registers itself with the authorization server at runtime. There is no client id to
+obtain in advance, no developer-portal step, no token to copy, and no "share the database with
+your integration" afterwards. Verified live against Notion: OpenCore called
+`https://mcp.notion.com/register` and received a working client id, having arranged nothing
+beforehand.
+
+The manual-token route did work first, and is worth recording as the contrast. `discover`
+against `@notionhq/notion-mcp-server` connected, negotiated `2025-11-25` and listed 24 tools,
+but it needed an internal integration created by hand and a database shared with it. Every
+hosted server would have needed the same ceremony.
+
+**What was built.** `MCPTransport`, so the protocol logic stops knowing what pipe it is on;
+`HTTPTransport` for streamable HTTP, handling both the `application/json` and
+`text/event-stream` reply shapes because the spec lets a server pick per request; and
+`MCPOAuth` for discovery, registration, PKCE, exchange, refresh and keychain storage.
+
+**Decisions inside it worth keeping:**
+
+- `token_endpoint_auth_method: none`. This is a native public client and cannot keep a secret on
+  someone's Mac. Claiming otherwise would be theatre; PKCE is what actually protects the
+  exchange.
+- `prefersEphemeralWebBrowserSession = true`. Reusing the browser's cookie jar is how a person
+  silently connects the wrong account, which for a store of personal history is the worst
+  available quiet failure.
+- `state` is checked before the code is read. Without it an attacker can hand the app a code
+  from a session the user never began.
+- The `resource` parameter (RFC 8707) binds the token to one MCP server, so it cannot be
+  replayed against another resource trusting the same issuer.
+- Refusing `plain` PKCE outright rather than complying. A server offering only `plain` is
+  downgrading the exchange.
+- The registered client is stored in the keychain alongside the token, because a refresh
+  request carries `client_id` and losing it turns an expiring token into a forced re-auth.
+
+**Where the split falls.** `ASWebAuthenticationSession` needs a presentation anchor, so the
+sheet can only come from the app. Everything else lives in `CoreIngest` where both surfaces
+reach it: the app signs in, the token goes to the keychain, `opencore sync` reads it. That is
+the same split the environment-variable credentials already use, so it is a pattern extension
+rather than a new one.
+
+**One invariant deliberately bent, and why it is not broken.** `mcp-source add` used to require
+at least one `--tool`. A hosted server's tool list cannot be read until someone has signed in,
+so a row now exists before its allowlist does. The safety property is untouched: `fetch` still
+throws `noAllowedTools`, so an empty allowlist cannot sync. What moved is *when* the allowlist
+is chosen, not whether it is required.
+
+**Still unverified:** the consent screen. Everything up to it is proven against the live server,
+and the click itself is a human action that cannot and should not be automated.
+
+---
+
+## 2026-08-10 — Counting questions bypass retrieval entirely
+
+**Decision.** A question classified `.aggregate` is answered by a `GROUP BY` over every
+admitted row in `CoreStore`, and the model is never called. The sentence is assembled in code.
+
+**Context.** Asked "how many of my apps are built with Swift", chat answered **2** against a
+true **12**. `[measured]` Nothing malfunctioned. The answer path retrieves
+`AnswerLimits.maximumSourceNumber` (6) passages and hands them to the model; the model counted
+the Swift ones among those six and reported the total. Receipt valid, citations real, grounding
+check clean. A confidently wrong number behind a valid receipt is the worst failure this
+project can produce, because nothing in the output looks wrong.
+
+**Alternatives.**
+
+- *Widen the passage window.* Not available: that constant also bounds the `source` field of
+  the guided-generation schema (`.range(1...6)` in `GroundedAnswer.swift`), so raising it is a
+  schema change, and the next question counts something bigger than whatever number is picked.
+- *Let the model call a counting tool.* Puts the model between the question and the number,
+  which is the thing that was wrong. It also breaks "the model never reads the store".
+- *Tell the model it cannot count.* Honest but useless, and the store holds the answer.
+
+**Rationale.** A ranked window is the wrong instrument for a question whose answer is a
+property of the whole population. No amount of better ranking fixes it, because the defect is
+not that the wrong six passages were retrieved.
+
+**Consequences.**
+
+- `MetadataBreakdown` reports `unclassified` separately and never folds "no value recorded"
+  into "does not match". Unmeasured stays unmeasured, in the one place a plausible number would
+  be indistinguishable from a measured one.
+- **Counts are firewalled exactly as passages are.** `domains` is a required parameter on every
+  counting method rather than defaulting to all of them. A count is a disclosure: answering
+  "14" to a question about medical appointments discloses what the firewall exists to withhold,
+  while retrieving zero passages and so tripping none of the checks that guard the passage
+  path.
+- A qualifier the resolver cannot place **declines** and falls through to retrieval rather than
+  reporting the bare population total. Answering "how many apps did I write on a train" with
+  "22" would substitute a different question for the one asked, which is the original defect in
+  a new costume.
+- The counted receipt is a different shape: `objectsRetrieved` 0, `evidenceAdmitted` 0, `model`
+  `nil`. Borrowing the retrieval shape would be a lie in precisely the place this change exists
+  to fix.
+
+**Known limits.** Facets resolve against metadata the connectors happen to record, so
+"how many apps use SwiftUI" is unanswerable until something records a dependency list.
+Pluralisation is a trailing `s`. Both decline rather than guess.
+
+---
+
+## 2026-08-10 — The dense leg is skipped, not computed and discarded
+
+**Decision.** `PassageSearch.search` guards the query embedding *and* the vector scan on
+`tuning.denseWeight > 0`. `PassageSearch.rankings` deliberately does not.
+
+**Context.** `denseWeight` has been 0 since 2026-08-09, and `absorb` discards the leg on its
+first line at that weight. `search` computed it anyway: 320ms of a 350ms warm query, so
+**91% of retrieval time produced nothing**. `[measured]` Cold, the query embedding alone was
+594ms.
+
+**Rationale.** The split between the two entry points is the whole decision. `rankings` is what
+`opencore eval` measures the dense leg through, and that measurement is the reason the weight
+is 0. Guarding both would have deleted the evidence for the decision that motivated the fix,
+and the next reader of the eval table would have concluded the embeddings had broken.
+
+**Consequences.** `PassageOutcome.denseCandidates` is 0 and `unavailableSignals` carries
+`semantic-disabled` saying the leg was not run. Verified: warm query 350ms to **70ms**, and
+`opencore eval` is byte-identical across the change (fused nDCG@6 0.365, dense still measured
+at 0.025), which is the check that the skipped leg was contributing nothing.
+
+---
+
+## 2026-08-10 — Conversations are primary data, not a derived layer
+
+**Decision.** Migration 4 adds `conversation` and `conversation_turn`, and both are deliberately
+**absent** from `Store.derivedTables`. `opencore rebuild` must not touch them.
+
+**Context.** Chat was entirely ephemeral. Turns lived in a SwiftUI `@State` array, the model's
+own `Transcript` carried the continuity, and closing the tab destroyed both.
+
+**Rationale.** Every other table below `object` is reconstructible, which is why `rebuild` may
+delete it. A conversation is the inverse: the user's questions are authored input and no object
+graph can reproduce them, and the answers came from a model whose output is not reproducible, so
+re-running the question later gives a different answer to the same words. Listing these tables
+as derived would make `rebuild` silently delete a user's entire chat history, which is the
+project's first non-negotiable violated in the most damaging possible direction.
+
+**Consequences.**
+
+- Sources and verdicts are stored as JSON on the turn rather than as foreign keys to `object`.
+  Denormalisation on purpose: they are what the answer was *shown against*, and re-ingesting an
+  object later must not retroactively rewrite the history of an answer given before the edit. A
+  receipt that changes after the fact is not a receipt.
+- `receipt_id` is a real foreign key with `ON DELETE SET NULL`, so deleting a conversation
+  forgets the conversation without destroying an audit trail that `receipt_evidence` and
+  `opencore trace` still reach.
+- **Deleting a conversation is a genuine delete**, and that does not contradict "never delete to
+  record a change of mind". That rule is about retracting a *claim*, which stays as a row
+  because something downstream may have relied on it. Nothing derives from a chat turn.
+- This also fixed a defect found the same day: chat receipts were built, printed by short code,
+  and dropped, so `opencore trace` could not resolve a single chat answer. Saving the turn saves
+  the receipt with it.
+
+---
+
+## 2026-08-10 — Resuming a thread restores the model's context, not just the text
+
+**Decision.** `Conversation.restore()` replays stored exchanges into a real
+`FoundationModels.Transcript` and installs it in a fresh session, instructions entry first.
+
+**Alternatives.** Show the history and start the model fresh, which is what most chat UIs that
+"save conversations" actually do.
+
+**Rationale.** A thread that displays its history while the model has none looks resumed and
+answers with amnesia: "what about the second one" gets a request for clarification directly
+underneath a visible list of three. That is a worse experience than no history at all, because
+the failure is invisible until it happens.
+
+**Consequences.** The instructions entry is rebuilt identically to a live session's, or the
+restored model keeps the conversation and loses the rules that make its answers citable, which
+is the worse of the two things to drop. Old turns' *passages* are deliberately not replayed:
+they were retrieved against a store that may have changed, so retrieval runs fresh for every new
+question exactly as it does within one sitting.
+
+**Known limit, measured.** Retrieval still runs on the raw follow-up text, so "what language did
+you just say it uses" retrieves nothing useful and the answer is "the sources retrieved do not
+answer that". The model has the context and is refusing to answer from memory, which is the
+thesis working. Query rewriting for follow-ups is the missing piece and is tracked separately.

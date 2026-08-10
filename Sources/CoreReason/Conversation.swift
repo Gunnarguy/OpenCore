@@ -8,7 +8,7 @@ import FoundationModels
 #endif
 
 /// A cited passage handed to the model, numbered so the answer can point at it.
-public struct GroundingSource: Sendable, Identifiable, Hashable {
+public struct GroundingSource: Sendable, Identifiable, Hashable, Codable {
     public var id: Int { index }
     public let index: Int
     public let title: String
@@ -30,6 +30,11 @@ public struct Turn: Sendable, Identifiable {
     public var receipt: Receipt?
     public var modelName: String?
     public var error: String?
+    /// Set when the turn could not be written to the store. Distinct from `error`, which means
+    /// the answer itself failed: this one has a perfectly good answer that will not survive
+    /// closing the window. Reported rather than swallowed, because the reader is about to
+    /// assume it was saved.
+    public var persistenceError: String?
     /// True while tokens are still arriving, so the UI can show a caret without guessing.
     public var streaming: Bool
 
@@ -76,6 +81,15 @@ public actor Conversation {
     private let search: PassageSearch
     private let grounding = Grounding()
 
+    /// Thread identity. Stable across turns, so every exchange lands in one saved conversation
+    /// and a reopened thread keeps appending to itself rather than forking a new one.
+    public let id: String
+
+    /// Next position in the thread. Held here rather than read back from the database on every
+    /// turn, and seeded from the stored count by `restore()`, so a resumed thread continues its
+    /// numbering instead of overwriting from zero.
+    private var ordinal = 0
+
     /// Held across turns for conversational continuity. Typed as `AnyObject` because
     /// `LanguageModelSession` is macOS 26+ and this package deploys to macOS 15, so it cannot
     /// appear in a stored property's type.
@@ -88,9 +102,129 @@ public actor Conversation {
     /// generation schema.
     public static let sourceCount = AnswerLimits.maximumSourceNumber
 
-    public init(store: Store, embedder: (any EmbeddingProvider)? = nil, tuning: RetrievalTuning = .default) {
+    public init(
+        store: Store,
+        embedder: (any EmbeddingProvider)? = nil,
+        tuning: RetrievalTuning = .default,
+        id: String = UUID().uuidString
+    ) {
         self.store = store
         self.search = PassageSearch(store: store, embedder: embedder, tuning: tuning)
+        self.id = id
+    }
+
+    // MARK: - Saved threads
+
+    /// Reopen a saved thread: returns its turns for display **and** rebuilds the model's context
+    /// from them.
+    ///
+    /// Both halves matter, and only doing the first is the tempting mistake. Showing the history
+    /// while handing the model an empty session produces a thread that looks resumed and answers
+    /// as though it has amnesia: "what about the second one" would be met with a request for
+    /// clarification directly underneath a visible list of three. The stored exchanges are
+    /// replayed into a real `Transcript`, so a follow-up question works the way it does within
+    /// one sitting.
+    ///
+    /// What is deliberately **not** restored is the passage text of old turns. Those sources are
+    /// shown from storage but are not put back into the model's context, because they were
+    /// retrieved against a store that may have changed since. Retrieval runs fresh for every new
+    /// question, which is the same rule as any other turn.
+    @discardableResult
+    public func restore() async throws -> [Turn] {
+        let stored = try await store.turns(conversationID: id)
+        ordinal = stored.count
+
+        let decoder = JSONDecoder()
+        let turns: [Turn] = stored.map { row in
+            var turn = Turn(
+                role: row.role == Turn.Role.you.rawValue ? .you : .core,
+                text: row.text,
+                sources: (try? decoder.decode([GroundingSource].self, from: Data(row.sourcesJSON.utf8))) ?? [],
+                verdicts: (try? decoder.decode([Grounding.Verdict].self, from: Data(row.verdictsJSON.utf8))) ?? [],
+                modelName: row.model,
+                error: row.error
+            )
+            turn.streaming = false
+            return turn
+        }
+
+        #if canImport(FoundationModels)
+        if #available(macOS 26, *) { rebuildSession(from: turns) }
+        #endif
+        return turns
+    }
+
+    #if canImport(FoundationModels)
+    /// Replay stored exchanges into a fresh session's transcript.
+    ///
+    /// The instructions entry is written first and identically to a live session's, or the
+    /// restored model would keep the conversation but lose the rules that make its answers
+    /// citable, which is a worse failure than losing the conversation.
+    @available(macOS 26, *)
+    private func rebuildSession(from turns: [Turn]) {
+        func segments(_ text: String) -> [Transcript.Segment] {
+            [.text(Transcript.TextSegment(content: text))]
+        }
+
+        var entries: [Transcript.Entry] = [
+            .instructions(Transcript.Instructions(segments: segments(Self.instructions), toolDefinitions: []))
+        ]
+        for turn in turns where !turn.text.isEmpty {
+            switch turn.role {
+            case .you: entries.append(.prompt(Transcript.Prompt(segments: segments(turn.text))))
+            case .core: entries.append(.response(Transcript.Response(assetIDs: [], segments: segments(turn.text))))
+            }
+        }
+        sessionBox = LanguageModelSession(transcript: Transcript(entries: entries))
+    }
+    #endif
+
+    /// Persist one turn, and the thread it belongs to.
+    ///
+    /// Returns a message on failure rather than throwing, because a chat answer that is already
+    /// on screen must not be destroyed by a storage problem. It is reported instead of swallowed:
+    /// the caller puts it on the turn, so "this was not saved" reaches the reader who is about to
+    /// rely on it being saved.
+    private func persist(_ turn: Turn, title: String) async -> String? {
+        do {
+            try await store.openConversation(id: id, title: title)
+            // The receipt goes in its own table so `opencore trace` reaches a saved chat turn.
+            // Before this, chat receipts were built, printed by short code, and dropped.
+            if let receipt = turn.receipt { try await store.save(receipt) }
+            let encoder = JSONEncoder()
+            try await store.append(StoredTurn(
+                id: turn.id.uuidString,
+                conversationID: id,
+                ordinal: ordinal,
+                role: turn.role.rawValue,
+                text: turn.text,
+                sourcesJSON: String(decoding: (try? encoder.encode(turn.sources)) ?? Data("[]".utf8), as: UTF8.self),
+                verdictsJSON: String(decoding: (try? encoder.encode(turn.verdicts)) ?? Data("[]".utf8), as: UTF8.self),
+                receiptID: turn.receipt?.id,
+                model: turn.modelName,
+                error: turn.error
+            ))
+            ordinal += 1
+            return nil
+        } catch {
+            return "not saved: \(error)"
+        }
+    }
+
+    /// A thread's label, taken from its first question.
+    ///
+    /// Not model-generated. A title is a label, and spending a model call on one would make
+    /// opening the sidebar depend on Apple Intelligence being available.
+    static func title(from question: String) -> String {
+        let trimmed = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count > 60 else { return trimmed.isEmpty ? "Untitled" : trimmed }
+        let cut = trimmed.prefix(60)
+        // Break on a word boundary when there is one close to the limit, so a title does not
+        // end mid-word for the sake of four characters.
+        if let space = cut.lastIndex(of: " "), cut.distance(from: cut.startIndex, to: space) > 40 {
+            return String(cut[..<space]) + "…"
+        }
+        return String(cut) + "…"
     }
 
     // MARK: - Availability
@@ -167,9 +301,33 @@ public actor Conversation {
         }
     }
 
+    /// Persist the finished turn, emit it, and close the stream.
+    ///
+    /// **Every** exit from `answer` goes through here. The alternative, saving at each return
+    /// site, is the shape where one path is added later and quietly does not save, and the
+    /// symptom is a thread that is missing exactly the answers that took an unusual route.
+    private func complete(
+        _ turn: Turn, title: String, into continuation: AsyncStream<Turn>.Continuation
+    ) async {
+        var turn = turn
+        turn.streaming = false
+        turn.persistenceError = await persist(turn, title: title)
+        continuation.yield(turn)
+        continuation.finish()
+    }
+
     private func answer(_ question: String, into continuation: AsyncStream<Turn>.Continuation) async {
         var turn = Turn(role: .core, streaming: true)
         let started = DispatchTime.now().uptimeNanoseconds
+        let title = Self.title(from: question)
+
+        // The question is saved before any work begins. Saving it afterwards would lose it
+        // whenever the answer is the thing that failed, which is when a record of what was
+        // asked is most useful.
+        let asked = Turn(role: .you, text: question)
+        if let failure = await persist(asked, title: title) {
+            turn.persistenceError = failure
+        }
 
         // ---- Retrieve, before the model is involved at all ----
         let outcome: PassageOutcome
@@ -182,17 +340,33 @@ public actor Conversation {
                 knownEntitySurfaces: try await store.aliasSurfaces()
             )
             domain = queryDomain
+            let policy = AdmissionPolicy(queryDomain: queryDomain, explicitlyRequested: requested)
+
+            // A counting question is computed over every admitted row, never by counting the
+            // passages that happened to be retrieved. Placed after the firewall on purpose:
+            // the count runs under exactly the domains retrieval would have been allowed to
+            // read. See `AggregateAnswering` for the measurement that put this here.
+            if queryClass == .aggregate,
+               let counted = try await AggregateAnswering(store: store)
+                   .answer(question, admitting: policy.admitted) {
+                turn.text = counted.sentence
+                turn.receipt = Self.countedReceipt(
+                    question: question, domain: queryDomain, counted: counted,
+                    milliseconds: Int((DispatchTime.now().uptimeNanoseconds - started) / 1_000_000)
+                )
+                await complete(turn, title: title, into: continuation)
+                return
+            }
+
             outcome = try await search.search(
                 query: question,
                 queryClass: queryClass,
-                policy: AdmissionPolicy(queryDomain: queryDomain, explicitlyRequested: requested),
+                policy: policy,
                 limit: Self.sourceCount
             )
         } catch {
             turn.error = "retrieval failed: \(error)"
-            turn.streaming = false
-            continuation.yield(turn)
-            continuation.finish()
+            await complete(turn, title: title, into: continuation)
             return
         }
 
@@ -216,13 +390,11 @@ public actor Conversation {
             // thing to get wrong.
             turn.text = "Nothing in your history matches that. \(outcome.chunksSearched) passages searched"
                 + (outcome.blockedByDomain > 0 ? ", \(outcome.blockedByDomain) withheld by domain policy." : ".")
-            turn.streaming = false
             turn.receipt = Self.receipt(
                 question: question, queryClass: queryClass, domain: domain,
                 outcome: outcome, sources: [], stages: stages, model: nil
             )
-            continuation.yield(turn)
-            continuation.finish()
+            await complete(turn, title: title, into: continuation)
             return
         }
 
@@ -269,7 +441,6 @@ public actor Conversation {
         #endif
 
         // ---- Record ----
-        turn.streaming = false
         stages.append(ReceiptStage(
             name: "total",
             milliseconds: Int((DispatchTime.now().uptimeNanoseconds - started) / 1_000_000)
@@ -278,8 +449,7 @@ public actor Conversation {
             question: question, queryClass: queryClass, domain: domain,
             outcome: outcome, sources: turn.sources, stages: stages, model: modelName
         )
-        continuation.yield(turn)
-        continuation.finish()
+        await complete(turn, title: title, into: continuation)
     }
 
     // MARK: - The model call
@@ -489,6 +659,47 @@ public actor Conversation {
             stages.append(ReceiptStage(name: name, milliseconds: milliseconds))
         }
         return stages
+    }
+
+    /// The receipt for an answer that was counted rather than retrieved.
+    ///
+    /// Deliberately a different shape from the retrieval receipt, because claiming the
+    /// retrieval shape here would be a lie in the exact place this whole change exists to fix.
+    /// `objectsRetrieved` and `evidenceAdmitted` are 0 and `model` is `nil` because no passage
+    /// was read and no model was called: the number came from a `GROUP BY`. A reader who sees
+    /// "6 sources, on-device model" on a count is looking at the old defect.
+    static func countedReceipt(
+        question: String,
+        domain: Domain,
+        counted: AggregateAnswer,
+        milliseconds: Int
+    ) -> Receipt {
+        var counters = ["objectsCounted": counted.breakdown.total, "groups": counted.breakdown.counts.count]
+        // Only present when there was something to be unaccounted for. A 0 here would read as
+        // a measurement rather than as an absence of one.
+        if counted.breakdown.unclassified > 0 {
+            counters["unclassified"] = counted.breakdown.unclassified
+        }
+        return Receipt(
+            query: question,
+            queryClass: .aggregate,
+            domainsAdmitted: [domain],
+            domainsBlocked: [],
+            stages: [ReceiptStage(
+                name: "count",
+                counters: counters,
+                milliseconds: milliseconds,
+                note: "computed in SQL over every admitted row; matched on \(counted.matchedOn)"
+            )],
+            objectsSearched: counted.breakdown.total,
+            objectsRetrieved: 0,
+            evidenceAdmitted: 0,
+            claimsConsulted: 0,
+            contradictionsSurfaced: 0,
+            model: nil,
+            objectsTransmitted: 0,
+            confidence: nil
+        )
     }
 
     static func receipt(

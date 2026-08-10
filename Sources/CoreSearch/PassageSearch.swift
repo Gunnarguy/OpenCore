@@ -1,5 +1,6 @@
 import CoreModel
 import CoreStore
+import CoreTelemetry
 import Foundation
 
 public struct PassageHit: Sendable {
@@ -170,31 +171,72 @@ public struct PassageSearch: Sendable {
         candidatesPerLeg: Int? = nil,
         expandContext: Bool = true
     ) async throws -> PassageOutcome {
+        try await Telemetry.span(
+            "search.passages",
+            .search,
+            attributes: ["queryClass": queryClass.rawValue, "limit": String(limit)]
+        ) { search in
         var unavailable: [String: String] = [:]
         var timings: [String: Int] = [:]
 
         let chunksSearched = try await store.chunkCount()
+        search.set("chunks.searched", chunksSearched)
 
         // ---- Leg 1: lexical ----
         let lexicalStart = DispatchTime.now().uptimeNanoseconds
         let match = HybridSearch.ftsQuery(from: query)
         let perLeg = candidatesPerLeg ?? tuning.candidatesPerLeg
-        let lexical = try await store.lexicalChunks(match: match, limit: perLeg)
+        let lexical = try await Telemetry.span("leg.lexical", .search, attributes: ["match": String(match.prefix(120))]) { leg in
+            leg.attribute("weight", String(tuning.lexicalWeight))
+            let hits = try await store.lexicalChunks(match: match, limit: perLeg)
+            leg.set("candidates", hits.count)
+            // Hitting the cap means the leg was truncated, so a better candidate may exist
+            // just past it. That is invisible from the result set alone.
+            leg.attribute("sawLimit", String(hits.count >= perLeg))
+            return hits
+        }
         timings["lexical"] = elapsed(since: lexicalStart)
 
         // ---- Leg 2: dense ----
         var dense: [ChunkCandidate] = []
         let denseStart = DispatchTime.now().uptimeNanoseconds
-        if let embedder {
+        // A leg switched off by tuning must be as visible as one that failed. Silently
+        // running half a retriever is the failure `rebuild` dropping every vector already
+        // demonstrated, and a deliberate disable does not get to be quieter than an accident.
+        //
+        // It is also skipped rather than computed and then discarded. `absorb` drops this
+        // leg's entire output on its first line when the weight is 0, so the query embedding
+        // and the vector scan were pure waste: measured 2026-08-09 at 320ms of a 350ms warm
+        // query, 91% of the time, producing nothing. `denseCandidates` reporting 0 afterwards
+        // is honest, because the leg did not run.
+        //
+        // `rankings(...)` deliberately does *not* get this guard. The eval harness measures
+        // the dense leg through it, and that measurement is the whole reason this weight is 0.
+        if tuning.denseWeight == 0 {
+            unavailable["semantic-disabled"] = "dense leg weighted to 0, so it was not run; measured 2026-08-09 as net-harmful on this corpus (fused nDCG 0.073 at weight 1.0 against 0.422 at 0)"
+        } else if let embedder {
             let embedded = try await store.embeddedChunkCount(model: embedder.modelIdentifier)
             if embedded == 0 {
                 unavailable["semantic"] = "provider '\(embedder.modelIdentifier)' is configured but no chunk has a vector yet; run `opencore embed`"
             } else {
-                let vector = try await embedder.embed(query)
+                // Separated from `leg.dense` because it is a different cost with a different
+                // cause: this is the embedding model, that is the vector scan. Folded
+                // together they read as one slow leg and neither is actionable.
+                let vector = try await Telemetry.span("embed.query", .search, attributes: ["model": embedder.modelIdentifier]) { scope in
+                    let vector = try await embedder.embed(query)
+                    scope.set("dimensions", vector.count)
+                    return vector
+                }
                 if vector.isEmpty {
                     unavailable["semantic"] = "query produced no embedding"
                 } else {
-                    dense = try await store.denseChunks(query: vector, model: embedder.modelIdentifier, limit: perLeg)
+                    dense = try await Telemetry.span("leg.dense", .search, attributes: ["model": embedder.modelIdentifier]) { leg in
+                        leg.attribute("weight", String(tuning.denseWeight))
+                        leg.set("chunks.embedded", embedded)
+                        let hits = try await store.denseChunks(query: vector, model: embedder.modelIdentifier, limit: perLeg)
+                        leg.set("candidates", hits.count)
+                        return hits
+                    }
                     if embedded < chunksSearched {
                         // Partial coverage is a correctness problem masquerading as a
                         // performance one: the dense leg silently cannot see the
@@ -206,12 +248,6 @@ public struct PassageSearch: Sendable {
             }
         } else {
             unavailable["semantic"] = "no embedding provider configured; lexical carries this query alone"
-        }
-        // A leg switched off by tuning must be as visible as one that failed. Silently
-        // running half a retriever is the failure `rebuild` dropping every vector already
-        // demonstrated, and a deliberate disable does not get to be quieter than an accident.
-        if tuning.denseWeight == 0 {
-            unavailable["semantic-disabled"] = "dense leg weighted to 0; measured 2026-08-09 as net-harmful on this corpus (fused nDCG 0.073 at weight 1.0 against 0.422 at 0)"
         }
         timings["dense"] = elapsed(since: denseStart)
 
@@ -246,9 +282,24 @@ public struct PassageSearch: Sendable {
         absorb(dense, leg: "dense", weight: tuning.denseWeight)
         timings["fuse"] = elapsed(since: fuseStart)
 
+        Telemetry.event("fuse", .search, attributes: [
+            "k": String(tuning.rrfK),
+            "fused": String(fused.count),
+            // Overlap is the one number that says whether the two legs are actually finding
+            // different things. Equal to neither leg means genuine diversity; equal to the
+            // smaller leg means one is a subset and the fusion is doing nothing.
+            "overlap": String(lexical.count + dense.count - fused.count),
+        ])
+
         // ---- Domain admission, before any further ranking ----
         let admitted = fused.values.filter { policy.admits($0.object.domain) }
         let blocked = fused.count - admitted.count
+        // The firewall is the security-relevant stage, so what it blocked is recorded even
+        // when it blocked nothing. An absent counter and a zero would otherwise be the same.
+        Telemetry.event("admission", .search, attributes: [
+            "admitted": String(admitted.count),
+            "blocked": String(blocked),
+        ])
 
         // ---- Non-relevance signals fold in after fusion ----
         let now = Date()
@@ -275,16 +326,34 @@ public struct PassageSearch: Sendable {
 
         // ---- MMR ----
         let mmrStart = DispatchTime.now().uptimeNanoseconds
-        let diversified = diversify(scored, limit: limit)
+        let diversified = Telemetry.spanSync("mmr", .search, attributes: ["lambda": String(tuning.mmrLambda)]) { scope in
+            scope.set("in", scored.count)
+            let result = diversify(scored, limit: limit)
+            scope.set("out", result.count)
+            return result
+        }
         let dropped = min(scored.count, limit * 2) - diversified.count
         timings["mmr"] = elapsed(since: mmrStart)
 
         // ---- Expand back into context ----
         var final = diversified
         if expandContext {
-            for index in final.indices {
-                final[index].context = (try? await store.neighbours(of: final[index].chunk, window: 1)) ?? []
+            try await Telemetry.span("expand.context", .search) { scope in
+                for index in final.indices {
+                    final[index].context = (try? await store.neighbours(of: final[index].chunk, window: 1)) ?? []
+                    scope.count("neighbours", final[index].context.count)
+                }
             }
+        }
+
+        search.set("hits", final.count)
+        search.set("blockedByDomain", blocked)
+        search.set("droppedByDiversity", max(0, dropped))
+        // Every reason a signal was missing, named. A retriever quietly running on one leg
+        // is the failure mode this whole dictionary exists for, so it reaches telemetry too
+        // rather than only the receipt the caller may never print.
+        for (signal, reason) in unavailable {
+            Telemetry.event("signal.unavailable", .search, attributes: ["signal": signal, "reason": String(reason.prefix(160))])
         }
 
         return PassageOutcome(
@@ -298,6 +367,7 @@ public struct PassageSearch: Sendable {
             unavailableSignals: unavailable,
             stageTimings: timings
         )
+        }
     }
 
     // MARK: - Per-leg rankings, for evaluation

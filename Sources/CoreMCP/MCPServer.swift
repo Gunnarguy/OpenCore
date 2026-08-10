@@ -4,6 +4,7 @@ import CoreModel
 import CoreReason
 import CoreSearch
 import CoreStore
+import CoreTelemetry
 import Foundation
 
 /// OpenCore as MCP infrastructure.
@@ -91,22 +92,29 @@ public actor MCPServer {
         }
     }
 
+    /// Spans recorded here are held in memory and rendered only by `log`, which writes to
+    /// stderr. Telemetry has no stdout sink at all, so instrumenting the server's own request
+    /// path cannot corrupt the JSON-RPC stream.
     private func handle(_ request: RPCRequest) async throws -> JSONValue {
-        switch request.method {
-        case "initialize":
-            return initializeResult()
-        case "ping":
-            return .object([:])
-        case "tools/list":
-            return .object(["tools": .array(Self.toolDefinitions)])
-        case "tools/call":
-            return try await callTool(request.params)
-        case "resources/list":
-            return .object(["resources": .array([])])
-        case "prompts/list":
-            return .object(["prompts": .array([])])
-        default:
-            throw RPCError.methodNotFound(request.method)
+        try await Telemetry.span("mcp \(request.method)", .mcp) { scope in
+            scope.attribute("notification", String(request.isNotification))
+            switch request.method {
+            case "initialize":
+                return initializeResult()
+            case "ping":
+                return .object([:])
+            case "tools/list":
+                scope.set("tools", Self.toolDefinitions.count)
+                return .object(["tools": .array(Self.toolDefinitions)])
+            case "tools/call":
+                return try await callTool(request.params)
+            case "resources/list":
+                return .object(["resources": .array([])])
+            case "prompts/list":
+                return .object(["prompts": .array([])])
+            default:
+                throw RPCError.methodNotFound(request.method)
+            }
         }
     }
 

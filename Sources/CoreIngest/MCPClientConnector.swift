@@ -1,5 +1,6 @@
 import CoreJSONRPC
 import CoreModel
+import CoreTelemetry
 import Foundation
 
 /// Configuration for one MCP server used as a source.
@@ -10,6 +11,13 @@ import Foundation
 /// touches the database, a log line, or the repository.
 public struct MCPServerConfig: Sendable, Codable, Hashable {
     public var name: String
+    /// A hosted server's MCP endpoint. When set, the transport is streamable HTTP and
+    /// `command`/`arguments` are unused.
+    ///
+    /// Stored as a string rather than a `URL` so a malformed value read back from the database
+    /// surfaces as a connection error naming the server, instead of silently decoding the
+    /// whole `source` row to nil and making the source vanish from the list.
+    public var url: String?
     public var command: String
     public var arguments: [String]
     /// Environment variable names to forward from the current process.
@@ -18,21 +26,33 @@ public struct MCPServerConfig: Sendable, Codable, Hashable {
     /// this is not derived automatically.
     public var allowedTools: [String]
     /// Fixed arguments per tool, for tools that require them.
-    public var toolArguments: [String: [String: String]]
+    ///
+    /// Values are arbitrary JSON, not strings. MCP tool schemas routinely take objects and
+    /// arrays — Notion's `notion-query-data-sources` takes a whole `{data: {query, params}}`
+    /// object — and a string-only map cannot express them, so those tools could not be
+    /// configured at all.
+    ///
+    /// The top level stays a named map because the MCP `tools/call` `arguments` field is
+    /// always an object; only the values needed widening. Configs written by the earlier
+    /// string-valued version decode unchanged, since a bare JSON string decodes to
+    /// `.string`, so there is no migration.
+    public var toolArguments: [String: [String: JSONValue]]
     public var domain: Domain
     public var authority: Authority
 
     public init(
         name: String,
+        url: String? = nil,
         command: String,
         arguments: [String] = [],
         environmentNames: [String] = [],
         allowedTools: [String] = [],
-        toolArguments: [String: [String: String]] = [:],
+        toolArguments: [String: [String: JSONValue]] = [:],
         domain: Domain = .personal,
         authority: Authority = .thirdPartyRecord
     ) {
         self.name = name
+        self.url = url
         self.command = command
         self.arguments = arguments
         self.environmentNames = environmentNames
@@ -41,6 +61,24 @@ public struct MCPServerConfig: Sendable, Codable, Hashable {
         self.domain = domain
         self.authority = authority
     }
+
+    /// The client for whichever transport this server uses.
+    ///
+    /// One place decides, so a caller cannot accidentally launch a subprocess for a hosted
+    /// server or hand a bearer token to a local one. The OAuth token is read at call time
+    /// rather than held, because a refresh between two syncs must not be missed.
+    public func makeClient() throws -> MCPClient {
+        if let url {
+            guard let endpoint = URL(string: url), endpoint.scheme?.hasPrefix("http") == true else {
+                throw MCPClientConnector.ClientError.badEndpoint(name: name, url: url)
+            }
+            return MCPClient(endpoint: endpoint, accessToken: MCPOAuth.stored(server: name)?.accessToken)
+        }
+        return try MCPClient(command: command, arguments: arguments, environment: resolvedEnvironment())
+    }
+
+    /// True when this server signs in rather than reading a credential from the environment.
+    public var usesOAuth: Bool { url != nil }
 
     /// Build the child environment: PATH and HOME so the server can run at all, plus only the
     /// named variables that are actually set. A name with no value is skipped silently rather
@@ -138,6 +176,8 @@ public struct MCPClientConnector: Connector {
         case noAllowedTools(String)
         case missingEnvironment([String])
         case toolNotOffered(String, offered: [String])
+        case badEndpoint(name: String, url: String)
+        case notSignedIn(String)
 
         public var description: String {
             switch self {
@@ -151,17 +191,17 @@ public struct MCPClientConnector: Connector {
                 "these environment variables are declared but not set: \(names.joined(separator: ", "))"
             case .toolNotOffered(let tool, let offered):
                 "allowlisted tool '\(tool)' is not offered by this server. It offers: \(offered.joined(separator: ", "))"
+            case .badEndpoint(let name, let url):
+                "MCP source '\(name)' has an endpoint that is not an http(s) URL: '\(url)'"
+            case .notSignedIn(let name):
+                "not signed in to '\(name)'. Open Settings, MCP sources, and choose Sign in."
             }
         }
     }
 
     /// Connect and list tools without calling any. Backs `mcp-source discover`.
     public static func discover(config: MCPServerConfig) async throws -> (tools: [MCPTool], version: String?, serverName: String?) {
-        let client = try MCPClient(
-            command: config.command,
-            arguments: config.arguments,
-            environment: config.resolvedEnvironment()
-        )
+        let client = try config.makeClient()
         defer { Task { await client.disconnect() } }
 
         try await client.connect()
@@ -170,17 +210,14 @@ public struct MCPClientConnector: Connector {
     }
 
     public func fetch(since: Date?, cursor: String?, log: @Sendable (String) -> Void) async throws -> ConnectorBatch {
+        try await Telemetry.span("fetch mcp:\(config.name)", .ingest) { fetch in
         guard !config.allowedTools.isEmpty else {
             throw ClientError.noAllowedTools(config.name)
         }
         let missing = config.missingEnvironment
         guard missing.isEmpty else { throw ClientError.missingEnvironment(missing) }
 
-        let client = try MCPClient(
-            command: config.command,
-            arguments: config.arguments,
-            environment: config.resolvedEnvironment()
-        )
+        let client = try config.makeClient()
         defer { Task { await client.disconnect() } }
 
         try await client.connect()
@@ -189,6 +226,9 @@ public struct MCPClientConnector: Connector {
 
         let offered = try await client.listTools()
         let offeredNames = Set(offered.map(\.name))
+        fetch.set("tools.offered", offered.count)
+        fetch.set("tools.allowed", config.allowedTools.count)
+        fetch.attribute("protocol", version)
         log("\(offered.count) tools offered, \(config.allowedTools.count) allowlisted")
 
         var objects: [CoreObject] = []
@@ -197,32 +237,44 @@ public struct MCPClientConnector: Connector {
             guard offeredNames.contains(tool) else {
                 // Loud, not silent. A renamed tool means this source has been quietly
                 // returning less than the user thinks since the day it changed.
+                Telemetry.event("tool.notOffered", .ingest, attributes: ["tool": tool, "server": config.name])
                 log("SKIPPED '\(tool)': not offered by this server (renamed or removed?)")
                 continue
             }
 
-            var arguments: [String: JSONValue] = [:]
-            for (key, value) in config.toolArguments[tool] ?? [:] {
-                arguments[key] = .string(value)
-            }
+            let arguments = config.toolArguments[tool] ?? [:]
 
             do {
-                let outcome = try await client.callTool(tool, arguments: .object(arguments), timeout: callTimeout)
+                try await Telemetry.span("tool \(tool)", .ingest, attributes: ["server": config.name]) { scope in
+                    scope.set("arguments", arguments.count)
+                    let outcome = try await client.callTool(tool, arguments: .object(arguments), timeout: callTimeout)
 
-                if outcome.isError {
-                    log("'\(tool)' returned an error: \(outcome.text.prefix(160))")
-                    continue
-                }
-                guard !outcome.text.isEmpty else {
-                    log("'\(tool)' returned no text\(outcome.skippedBlocks > 0 ? " (\(outcome.skippedBlocks) non-text blocks skipped)" : "")")
-                    continue
-                }
-                if outcome.skippedBlocks > 0 {
-                    log("'\(tool)': \(outcome.skippedBlocks) non-text block(s) skipped")
-                }
+                    if outcome.isError {
+                        scope.attribute("outcome", "error")
+                        log("'\(tool)' returned an error: \(outcome.text.prefix(160))")
+                        return
+                    }
+                    guard !outcome.text.isEmpty else {
+                        scope.attribute("outcome", "empty")
+                        scope.set("skippedBlocks", outcome.skippedBlocks)
+                        log("'\(tool)' returned no text\(outcome.skippedBlocks > 0 ? " (\(outcome.skippedBlocks) non-text blocks skipped)" : "")")
+                        return
+                    }
+                    if outcome.skippedBlocks > 0 {
+                        scope.set("skippedBlocks", outcome.skippedBlocks)
+                        log("'\(tool)': \(outcome.skippedBlocks) non-text block(s) skipped")
+                    }
 
-                objects.append(makeObject(tool: tool, text: outcome.text, offered: offered.first { $0.name == tool }))
-                log("'\(tool)': \(outcome.text.count) characters")
+                    // One object per call is the known-wrong granularity for a list-shaped
+                    // response: `objects` incrementing by exactly one per tool regardless of
+                    // how many records came back is the signature of that bug, and this
+                    // counter is what makes it visible without reading the store.
+                    scope.set("objects", 1)
+                    scope.set("characters", outcome.text.count)
+                    scope.attribute("outcome", "ok")
+                    objects.append(makeObject(tool: tool, text: outcome.text, offered: offered.first { $0.name == tool }))
+                    log("'\(tool)': \(outcome.text.count) characters")
+                }
             } catch {
                 // One bad tool must not abort the sync. Everything else this server offers is
                 // still worth having.
@@ -233,7 +285,9 @@ public struct MCPClientConnector: Connector {
         let stderr = await client.stderrOutput()
         if !stderr.isEmpty { log("server stderr: \(stderr.prefix(300))") }
 
+        fetch.set("objects", objects.count)
         return ConnectorBatch(objects: objects, cursor: ISO8601DateFormatter().string(from: Date()))
+        }
     }
 
     /// One object per tool call.

@@ -1,3 +1,4 @@
+import CoreJSONRPC
 import CoreModel
 import Foundation
 import Testing
@@ -124,6 +125,62 @@ func advisoryAdmitsUncertainty() throws {
 
     let reading = MCPTool(name: "list_channels", description: "", readOnlyHint: true, destructiveHint: nil, requiredArguments: [])
     #expect(reading.readOnlyAdvisory.contains("read-only"))
+}
+
+// MARK: - Tool arguments carry arbitrary JSON
+
+// Regression: `toolArguments` was `[String: [String: String]]`, so an argument could only ever
+// be a string. Every MCP tool taking an object or an array was therefore unconfigurable, not
+// merely awkward. The case that exposed it was Notion's `notion-query-data-sources`, whose
+// parameters are `{data: {data_source_urls: [...], query: "..."}}`: without this, the Notion
+// source could fetch a database's schema but never its rows.
+@Test("a tool argument may be an object or an array, not only a string")
+func toolArgumentsCarryArbitraryJSON() throws {
+    let nested = JSONValue.object([
+        "data": .object([
+            "data_source_urls": .array([.string("collection://abc")]),
+            "query": .string("SELECT * FROM x"),
+            "page_size": .int(25),
+        ])
+    ])
+    let config = MCPServerConfig(
+        name: "notion",
+        url: "https://mcp.notion.com/mcp",
+        command: "",
+        allowedTools: ["notion-query-data-sources"],
+        toolArguments: ["notion-query-data-sources": ["data": nested]]
+    )
+
+    // The guarantee is about what survives the database, not what the initialiser accepts:
+    // `config` is persisted as JSON on the source row and read back on every sync.
+    let restored = try JSONDecoder().decode(
+        MCPServerConfig.self,
+        from: try JSONEncoder().encode(config)
+    )
+    let argument = restored.toolArguments["notion-query-data-sources"]?["data"]
+    #expect(argument == nested)
+
+    // Shape, not just equality: a value that degraded to a string would still be non-nil.
+    #expect(argument?["data"]?["page_size"]?.intValue == 25)
+    #expect(argument?["data"]?["data_source_urls"] == .array([.string("collection://abc")]))
+}
+
+// The second, independent guard. Widening the value type must not orphan the sources already
+// on disk: those rows were written when the value was a bare JSON string, and a config that
+// fails to decode makes the whole source vanish from the list rather than erroring visibly.
+@Test("a config written by the string-only version still decodes")
+func stringValuedToolArgumentsStillDecode() throws {
+    let legacy = """
+    {"name":"notion","command":"","arguments":[],"environmentNames":[],
+     "allowedTools":["notion-fetch"],
+     "toolArguments":{"notion-fetch":{"id":"some-page-id"}},
+     "domain":"project","authority":3}
+    """
+
+    let config = try JSONDecoder().decode(MCPServerConfig.self, from: Data(legacy.utf8))
+
+    #expect(config.toolArguments["notion-fetch"]?["id"] == .string("some-page-id"))
+    #expect(config.allowedTools == ["notion-fetch"])
 }
 
 @Test("tool identity is stable across syncs so re-running updates rather than accumulates")

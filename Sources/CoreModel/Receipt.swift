@@ -7,6 +7,7 @@ public enum QueryClass: String, Sendable, Codable, CaseIterable {
     case analytical   // "What patterns run through my projects?"
     case differential // "What changed this week?"
     case epistemic    // "What do you believe about my work, and why?"
+    case aggregate    // "How many of my apps are built in Swift?"
 
     /// Which retrieval signals matter for this shape of question. Fixed weights across all
     /// query types is the thing that makes hybrid search feel arbitrary; these are still
@@ -19,6 +20,11 @@ public enum QueryClass: String, Sendable, Codable, CaseIterable {
         case .analytical:   RetrievalWeights(lexical: 0.10, semantic: 0.40, graph: 0.35, temporal: 0.05, authority: 0.10)
         case .differential: RetrievalWeights(lexical: 0.15, semantic: 0.15, graph: 0.10, temporal: 0.50, authority: 0.10)
         case .epistemic:    RetrievalWeights(lexical: 0.15, semantic: 0.25, graph: 0.25, temporal: 0.10, authority: 0.25)
+        // Weights are close to meaningless for this class, because a counting question that
+        // is answered properly never reaches ranked retrieval: it is computed in SQL over the
+        // whole table. These are the fallback profile for when the question is recognised as
+        // a count but no countable field can be resolved, and lexical is what works here.
+        case .aggregate:    RetrievalWeights(lexical: 0.55, semantic: 0.10, graph: 0.10, temporal: 0.00, authority: 0.25)
         }
     }
 }
