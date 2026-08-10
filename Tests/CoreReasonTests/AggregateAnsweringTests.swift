@@ -274,16 +274,14 @@ struct ReasonerAggregateTests {
 
     @Test("an external caller cannot count what it is not allowed to retrieve")
     func countsRespectTheExternalCallerFirewall() async throws {
-        // Two stores, one question. Not fastidiousness: asking the same query twice against one
-        // store fails with `UNIQUE constraint failed: receipt.id`, because `Receipt.id` is
-        // derived from the query text plus a millisecond timestamp and both calls land inside
-        // the same millisecond. That is a real product defect this test found rather than a
-        // test artifact, and it is filed; isolating the stores keeps this test measuring the
-        // firewall instead of failing for an unrelated reason.
-        let externalStore = try await Self.temporaryStore()
-        try await Self.seedMedical(externalStore)
-        let localStore = try await Self.temporaryStore()
-        try await Self.seedMedical(localStore)
+        // One store, one question, asked twice. This needed two isolated stores until
+        // 2026-08-10, because `Receipt.id` was derived from the query plus a millisecond and
+        // the second save collided. That is fixed, and asking twice here is now also a small
+        // standing check that it stays fixed on a real code path rather than only in
+        // `ReceiptIdentityTests`.
+        let store = try await Self.temporaryStore()
+        try await Self.seedMedical(store)
+        let reasoner = Reasoner(store: store)
 
         // Medical rather than personal on purpose. `.personal` is not in `Domain.sensitive`, so
         // `externalCaller` does not re-base it and the two callers would classify identically;
@@ -293,7 +291,7 @@ struct ReasonerAggregateTests {
         // Answering "5" to a model here is the disclosure the firewall exists to refuse, and it
         // would happen while retrieving zero passages and so tripping none of the checks that
         // guard the passage path. A count is a disclosure.
-        let external = try await Reasoner(store: externalStore)
+        let external = try await reasoner
             .answer("how many doctor appointments do I have", externalCaller: true)
         #expect(external.counted == nil)
 
@@ -301,7 +299,7 @@ struct ReasonerAggregateTests {
         // naming a sensitive domain is consent when a human does it. If this ever returns nil
         // too, the firewall has become a blanket refusal and the distinction it exists to draw
         // has been lost.
-        let local = try await Reasoner(store: localStore)
+        let local = try await reasoner
             .answer("how many doctor appointments do I have", externalCaller: false)
         #expect(local.counted?.count == 5)
     }

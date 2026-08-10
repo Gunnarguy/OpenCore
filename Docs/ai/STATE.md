@@ -170,9 +170,10 @@ For Notion over MCP:
 Last run 2026-08-10, against the uncommitted tree:
 
 - `swift build` -> clean
-- `swift test` -> **71 tests pass** (8 + 12 + 3 + 18 + 3 + 27). Was 51: +9 for counting
+- `swift test` -> **79 tests pass** (8 + 15 + 3 + 18 + 3 + 32). Was 51: +9 for counting
   (chat and `Reasoner`), +3 for the dense-leg guard, +5 for saved conversations, +3 for MCP
-  protocol negotiation. New targets `CoreSearchTests` and `CoreMCPTests`.
+  protocol negotiation, +3 for receipt identity, +5 for registry ranking. New targets
+  `CoreSearchTests` and `CoreMCPTests`.
 - `opencore chats` / `chat --resume ID` -> a thread went 2 turns to **4** on resume rather
   than forking, and `opencore trace` resolved a receipt printed by `chat`, which it could not
   do before today.
@@ -276,12 +277,18 @@ Carried over from 2026-08-09, not re-run today:
   `core_ask` all answer `12 of 22 repositories`. `Answer.counted` is an explicit field rather
   than something inferred from empty `points`, because a counted answer and a found-nothing
   answer are otherwise indistinguishable to a caller.
-- **Two answers to the same query in the same millisecond collide.** `[measured]` `Receipt.id`
-  is derived from query text plus a millisecond timestamp, so the second save fails with
-  `UNIQUE constraint failed: receipt.id` and the answer is lost. Found by a regression test
-  that asked one question twice; the test isolates its stores to work around it. Reachable in
-  practice by a double-clicked Ask or an MCP client retrying. This is the existing
-  "store `Receipt` id explicitly" row, now with a reproduction.
+- ~~**Two answers to the same query in the same millisecond collide.**~~ **Fixed
+  2026-08-10.** `Receipt.id` is now minted unique per answer rather than derived from query
+  plus timestamp, and `Receipt.init(row:)` **reads** the stored id instead of recomputing it.
+  Content-addressing is right for an object, where re-ingesting the same bytes should update
+  one row; a receipt records that an answer *happened*, so the same question twice is two
+  events. 3 tests in `Tests/CoreStoreTests/ReceiptIdentityTests.swift`.
+- **Remote-only MCP servers cannot be added from the MCP Store screen.** `[measured]` About
+  60% of the registry publishes an endpoint rather than a package, and
+  `AppModel.addRegistryServer` still requires `server.command`. The engine gained streamable
+  HTTP and OAuth this session, so hosted servers *are* reachable, but only via
+  `mcp-source add --url` on the CLI. The store's ranking deprioritises them and the row says
+  why, which is honest but is a workaround for a gap rather than the fix.
 - **Not clicked through:** the app compiles and chat has been exercised headlessly, but the
   riskiest path is still unverified end to end: MCP store -> credentials -> Add -> Discover ->
   tick tools -> Sync.
@@ -300,7 +307,11 @@ No open decisions. Items 1 and 2 of the previous list are done. Build in this or
    follow-up text, so "what language did you just say it uses" retrieves nothing. Expand a
    follow-up into a standalone query using the thread, then retrieve.
 
-3. **Consolidate the app's 14 tabs.** `[measured]` 14 tabs doing about 8 distinct jobs.
+3. **Let the MCP Store add hosted servers.** See Blockers. The ranking currently sinks
+   remote-only entries because this screen cannot add them, which is honest but is working
+   around a gap. `mcp-source add --url` already does it from the CLI.
+
+4. **Consolidate the app's 14 tabs.** `[measured]` 14 tabs doing about 8 distinct jobs.
    Embedding controls appear in three places (`SourcesView.EmbeddingPanel`,
    `MaintenanceEmbeddingPanel`, and a button in `PassagesView`); store counts appear in three
    (StatusBar, Settings > Data, `MaintenanceCountsPanel`); connector lists in two. `Ask` is
@@ -310,11 +321,11 @@ No open decisions. Items 1 and 2 of the previous list are done. Build in this or
    new-source path in the other tab, so fixing that item and this one is the same work.
    `Claims`/`Beliefs` look redundant and are not: asserted versus resolved is the model.
 
-4. **Separate windows per project.** `WindowGroup(for:)`. Zero write risk. The natural
+5. **Separate windows per project.** `WindowGroup(for:)`. Zero write risk. The natural
    identity is a `📦 Projects DB` row, which already carries `GitHub Repo` and so joins to
    what OpenCore already ingests.
 
-5. **Pull the 33 project rows and both roadmaps into OpenCore**, which is what item 1 unlocks
+6. **Pull the 33 project rows and both roadmaps into OpenCore**, which is what item 1 unlocks
    and the reason the whole Notion thread started.
 
 Not on this list on purpose: the create-a-database button. See Decisions.

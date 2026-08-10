@@ -933,7 +933,12 @@ extension Receipt {
             model: row.string("model"),
             objectsTransmitted: row.requireInt("objects_transmitted"),
             confidence: row.double("confidence"),
-            createdAt: row.requireDate("created_at")
+            createdAt: row.requireDate("created_at"),
+            // Read, never recomputed. The previous version re-derived the id from the query and
+            // a millisecond timestamp and relied on the stored `Double` reproducing exactly,
+            // which meant a receipt could silently become untraceable. Now the column is the
+            // identity, which is the only way `opencore trace <code>` can be trusted.
+            id: ReceiptID(row.requireString("id"))
         )
     }
 }

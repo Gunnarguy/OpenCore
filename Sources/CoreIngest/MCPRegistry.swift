@@ -13,8 +13,65 @@ public struct RegistryServer: Sendable, Identifiable, Hashable {
     /// subprocess, which is the only transport OpenCore's client speaks.
     public let remotes: [String]
     public let isLatest: Bool
+    /// The registry's own lifecycle flag. `deprecated` servers stay listed and stay installable;
+    /// they are simply not what anyone should be shown first.
+    public let isDeprecated: Bool
 
     public var id: String { name + "@" + version }
+
+    /// What the registry actually checked before letting this name be published.
+    ///
+    /// There is no `verified: true` field to read. The **namespace is the proof**: the registry
+    /// will not publish a name until the publisher demonstrates control of the corresponding
+    /// GitHub account or DNS domain. So the prefix is the trust signal, and it is a real one
+    /// rather than a reputation score invented here.
+    ///
+    /// This says who proved what. It says nothing about whether a server is any good, and the
+    /// UI must not imply otherwise.
+    public enum PublisherTrust: Sendable, Hashable {
+        /// `com.stripe/…`, `ai.perplexity/…`. The publisher proved control of that DNS domain,
+        /// which ties the server to an organisation that can be held to it.
+        case domain
+        /// `io.github.owner/…`. The publisher proved control of that GitHub account. A real
+        /// check, and a much cheaper one: anyone can create an account.
+        case github
+
+        public var label: String {
+            switch self {
+            case .domain: "domain verified"
+            case .github: "github"
+            }
+        }
+
+        public var symbol: String {
+            switch self {
+            case .domain: "checkmark.seal.fill"
+            case .github: "person.crop.circle"
+            }
+        }
+    }
+
+    public var trust: PublisherTrust {
+        name.hasPrefix("io.github.") ? .github : .domain
+    }
+
+    /// Sort key, highest first. Ordering the catalogue rather than filtering it, because a
+    /// registry of 9,000 servers listed in raw alphabetical order is unusable in a different
+    /// way than a short list is: everything is present and nothing is findable.
+    ///
+    /// Launchability outranks trust deliberately. A beautifully verified server this app cannot
+    /// add is worth less to the reader than an ordinary one it can, and today the Add path
+    /// requires a stdio package.
+    public var priority: Int {
+        var score = 0
+        if !isDeprecated { score += 8 }
+        if launchability.canLaunch { score += 4 }
+        if trust == .domain { score += 2 }
+        // A server needing no credentials can be tried immediately. Weakest signal of the four,
+        // so it only breaks ties.
+        if requiredEnvironment.isEmpty { score += 1 }
+        return score
+    }
 
     public struct Package: Sendable, Hashable {
         public let registryType: String
@@ -157,6 +214,18 @@ public struct MCPRegistry: Sendable {
         let decoded = try JSONDecoder().decode(Wire.Response.self, from: data)
         var servers = decoded.servers.map(RegistryServer.init(wire:))
         if latestOnly { servers = servers.filter(\.isLatest) }
+        // Ranked here rather than in the view, so the CLI and the app agree on what "best
+        // first" means and there is one place to change it.
+        //
+        // **This orders the page, not the registry.** The API sorts by name and offers no
+        // ranking parameter, so a caller paging through gets each page ranked internally and
+        // must not read the first row as "the best server in the catalogue". Any UI showing
+        // this has to say so; silently implying a global ranking would be a claim the data
+        // does not support.
+        servers.sort {
+            if $0.priority != $1.priority { return $0.priority > $1.priority }
+            return $0.title.lowercased() < $1.title.lowercased()
+        }
         return Page(servers: servers, nextCursor: decoded.metadata.nextCursor)
     }
 }
@@ -173,6 +242,9 @@ extension RegistryServer {
         repositoryURL = server.repository?.url
         remotes = (server.remotes ?? []).map(\.type)
         isLatest = entry.meta?.official?.isLatest ?? true
+        // Absent status means active. A server the registry has said nothing about is not
+        // deprecated, and defaulting the other way would bury entries for missing metadata.
+        isDeprecated = entry.meta?.official?.status == "deprecated"
 
         if let first = server.packages?.first {
             package = Package(
@@ -228,6 +300,9 @@ extension MCPRegistry {
         }
 
         struct Official: Decodable {
+            /// "active" or "deprecated" in everything observed 2026-08-10. Decoded as a string
+            /// rather than an enum so an unrecognised future value degrades to "not deprecated"
+            /// instead of failing the whole page.
             let status: String?
             let isLatest: Bool?
         }

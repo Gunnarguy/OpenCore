@@ -17,6 +17,21 @@ final class MCPStoreModel {
     var error: String?
     var selected: RegistryServer?
 
+    /// Hide what this screen cannot add. On by default: roughly 60% of the registry is
+    /// published as remote endpoints only, and the Add path here needs a launchable package, so
+    /// the default view was mostly things that dead-end.
+    ///
+    /// A toggle rather than a permanent filter, and one that reports what it removed, because
+    /// silently dropping half a catalogue is how a registry starts looking broken.
+    var usableOnly = true
+
+    /// Servers to show, and how many the filter is holding back.
+    var visible: [RegistryServer] {
+        usableOnly ? servers.filter { $0.launchability.canLaunch && !$0.isDeprecated } : servers
+    }
+
+    var hiddenCount: Int { servers.count - visible.count }
+
     /// Values the user typed for a selected server's environment variables. Held only until
     /// save, then written to the keychain and dropped.
     var environmentValues: [String: String] = [:]
@@ -77,8 +92,33 @@ struct MCPStoreView: View {
                 Label(error, systemImage: "wifi.exclamationmark")
                     .font(.caption).foregroundStyle(.orange)
             }
-            ForEach(store.servers) { server in
-                MCPStoreRow(server: server).tag(server.id)
+
+            // `SwiftUI.Section` spelled out: the app's own top-level `enum Section` shadows it
+            // module-wide, and the error it produces names `CodingKeyRepresentable` rather than
+            // anything to do with lists.
+            SwiftUI.Section {
+                ForEach(store.visible) { server in
+                    MCPStoreRow(server: server).tag(server.id)
+                }
+            } header: {
+                VStack(alignment: .leading, spacing: 4) {
+                    Toggle("Only what OpenCore can add", isOn: $store.usableOnly)
+                        .toggleStyle(.checkbox)
+                        .font(.caption)
+                    // Says what it removed rather than just removing it. The count is the whole
+                    // point: "hiding 31" is information, a shorter list on its own is not.
+                    if store.hiddenCount > 0 {
+                        Text("hiding \(store.hiddenCount) remote-only or deprecated")
+                            .font(.caption2).foregroundStyle(.tertiary)
+                    }
+                    // The registry sorts by name and offers no ranking parameter, so this
+                    // ordering is within what has been loaded. Saying so keeps the top row from
+                    // reading as "the best server in the catalogue".
+                    Text("verified publishers and launchable servers first, within loaded results")
+                        .font(.caption2).foregroundStyle(.tertiary)
+                }
+                .textCase(nil)
+                .padding(.vertical, 2)
             }
             if store.cursor != nil {
                 Button("Load more") { Task { await store.load(reset: false) } }
@@ -105,11 +145,33 @@ private struct MCPStoreRow: View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 6) {
                 Text(server.title).font(.callout.weight(.medium)).lineLimit(1)
+
+                // What the registry actually checked before publishing this name. Not a quality
+                // score, and the help text says so: a domain-verified server can still be bad,
+                // it just cannot be anonymous.
+                Label(server.trust.label, systemImage: server.trust.symbol)
+                    .labelStyle(.titleAndIcon)
+                    .font(.caption2)
+                    .padding(.horizontal, 5).padding(.vertical, 1)
+                    .background(server.trust == .domain ? Color.green.opacity(0.15) : Color.secondary.opacity(0.12), in: .capsule)
+                    .foregroundStyle(server.trust == .domain ? Color.green : Color.secondary)
+                    .help(server.trust == .domain
+                        ? "The publisher proved control of this DNS domain. It says who they are, not whether the server is good."
+                        : "The publisher proved control of this GitHub account. A real check, and a cheap one: anyone can create an account.")
+
+                if server.isDeprecated {
+                    Text("deprecated")
+                        .font(.caption2)
+                        .padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(Color.orange.opacity(0.15), in: .capsule)
+                        .foregroundStyle(.orange)
+                }
                 if !server.launchability.canLaunch {
                     Text("remote")
                         .font(.caption2)
                         .padding(.horizontal, 5).padding(.vertical, 1)
                         .background(.quaternary, in: .capsule)
+                        .help("Published as an endpoint rather than a package. OpenCore can reach hosted servers, but adding one is a CLI step today, not this screen.")
                 }
             }
             Text(server.description).font(.caption).foregroundStyle(.secondary).lineLimit(2)

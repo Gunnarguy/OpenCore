@@ -88,6 +88,8 @@ public struct Receipt: Hashable, Sendable, Codable, Identifiable {
     public var confidence: Double?
     public var createdAt: Date
 
+    /// - Parameter id: pass the stored id when rehydrating a row. Omit it when recording a new
+    ///   answer, and a fresh unique one is minted.
     public init(
         query: String,
         queryClass: QueryClass,
@@ -102,9 +104,23 @@ public struct Receipt: Hashable, Sendable, Codable, Identifiable {
         model: String?,
         objectsTransmitted: Int,
         confidence: Double?,
-        createdAt: Date = Date()
+        createdAt: Date = Date(),
+        id: ReceiptID? = nil
     ) {
-        self.id = ReceiptID.derived(from: query, String(Int(createdAt.timeIntervalSince1970 * 1000)))
+        // **Unique per answer, not derived from the query.**
+        //
+        // It used to be `derived(from: query, milliseconds)`, which made two answers to the
+        // same question in the same millisecond collide. That is not theoretical: `Reasoner`
+        // does `try await store.save(receipt)`, so the second insert failed the primary key and
+        // the whole call threw, losing an answer the user had already waited for. Reachable by
+        // a double-clicked Ask or an MCP client retrying, and measured 2026-08-10 by a test
+        // that simply asked one question twice.
+        //
+        // Content-addressing is right for an *object*, where re-ingesting the same bytes should
+        // update one row. A receipt is the opposite: it records that an answer happened, and
+        // asking the same question twice is two events with two audit trails. Collapsing them
+        // was never the intent, it was a side effect of reusing the object id scheme.
+        self.id = id ?? ReceiptID(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())
         self.query = query
         self.queryClass = queryClass
         self.domainsAdmitted = domainsAdmitted
