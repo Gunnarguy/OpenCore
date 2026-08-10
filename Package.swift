@@ -51,6 +51,7 @@ let package = Package(
         .testTarget(name: "CoreGraphTests", dependencies: ["CoreGraph", "CoreSearch", "CoreIngest", "CoreJSONRPC", "CoreStore", "CoreModel"]),
         .testTarget(name: "CoreReasonTests", dependencies: ["CoreReason", "CoreSearch", "CoreStore", "CoreModel"]),
         .testTarget(name: "CoreSearchTests", dependencies: ["CoreSearch", "CoreStore", "CoreModel"]),
+        .testTarget(name: "CoreMCPTests", dependencies: ["CoreMCP"]),
         .testTarget(name: "CoreTelemetryTests", dependencies: ["CoreTelemetry"]),
     ]
 )

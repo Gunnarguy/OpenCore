@@ -261,7 +261,15 @@ Carried over from 2026-08-09, not re-run today:
   discovery panel and tool picker already exist; they are only reachable on the new-source
   path.
 - **Known gap:** the MCP *server* still implements `2025-11-25`; the *client* handles both
-  generations. Tracked Critical in Notion.
+  generations. Tracked Critical in Notion. It now **negotiates** properly, though: it answers
+  `initialize` with the client's requested version when that version is one it can serve
+  (`2025-11-25`, `2025-06-18`, `2025-03-26`), instead of hardcoding its own. Being a version
+  behind is survivable; refusing to speak a client's version silently was not.
+- **`core_ask` over MCP and `opencore ask` do not have the counting fix.** `[measured]` Both go
+  through `Reasoner`, and only `Conversation` gained the `.aggregate` path. Asking "how many of
+  my apps are built with swift" over MCP returns 92 claims rather than "12 of 22". Less wrong
+  than the original defect, which stated a confident number, but it still cannot answer the
+  question, and the gap is now reachable by any MCP client.
 - **Not clicked through:** the app compiles and chat has been exercised headlessly, but the
   riskiest path is still unverified end to end: MCP store -> credentials -> Add -> Discover ->
   tick tools -> Sync.

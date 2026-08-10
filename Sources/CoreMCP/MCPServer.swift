@@ -100,7 +100,7 @@ public actor MCPServer {
             scope.attribute("notification", String(request.isNotification))
             switch request.method {
             case "initialize":
-                return initializeResult()
+                return initializeResult(request.params)
             case "ping":
                 return .object([:])
             case "tools/list":
@@ -118,9 +118,37 @@ public actor MCPServer {
         }
     }
 
-    private func initializeResult() -> JSONValue {
-        .object([
-            "protocolVersion": .string(Self.protocolVersion),
+    /// Versions this server can genuinely serve, newest first.
+    ///
+    /// Honest rather than generous. This is a **tools-only** server: no sampling, roots,
+    /// logging, elicitation or resources. Across these three revisions the `initialize`,
+    /// `tools/list` and `tools/call` shapes it actually implements are identical, and every
+    /// difference between them lands in features it does not offer. So it can serve all three
+    /// truthfully. `2026-07-28` is deliberately absent: that one removes the handshake and
+    /// changes result shapes, and claiming it without implementing it is the half-migration
+    /// `.claude/rules/mcp.md` forbids.
+    static let supportedProtocolVersions = ["2025-11-25", "2025-06-18", "2025-03-26"]
+
+    /// Reply with the client's requested version when it is one we can speak.
+    ///
+    /// The previous version answered `2025-11-25` to every `initialize` no matter what was
+    /// asked for. The spec says a client that receives a version it does not support should
+    /// disconnect, so a hardcoded reply turns "one spec behind" into "silently fails to
+    /// connect", and the symptom is a client that lists no tools with nothing in any log.
+    /// The version to answer `initialize` with, given what the client asked for.
+    ///
+    /// Separated from the response body so it can be tested without standing up a store.
+    static func negotiatedProtocolVersion(requested: String?) -> String {
+        guard let requested, supportedProtocolVersions.contains(requested) else { return protocolVersion }
+        return requested
+    }
+
+    private func initializeResult(_ params: JSONValue?) -> JSONValue {
+        let requested = params?.objectValue?["protocolVersion"]?.stringValue
+        let agreed = Self.negotiatedProtocolVersion(requested: requested)
+        log("client requested protocol \(requested ?? "none"), answering \(agreed)")
+        return .object([
+            "protocolVersion": .string(agreed),
             "capabilities": .object(["tools": .object(["listChanged": .bool(false)])]),
             "serverInfo": .object([
                 "name": .string("opencore"),

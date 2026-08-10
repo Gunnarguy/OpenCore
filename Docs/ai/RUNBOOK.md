@@ -90,6 +90,38 @@ retrieves nothing useful and correctly answers "the sources retrieved do not ans
 model has the context and is refusing to answer from memory, which is the design working;
 query rewriting for follow-ups is a tracked gap, not a bug in resume.
 
+## Claude Desktop as an MCP client — verified 2026-08-10
+
+**The binary is not relocatable on its own.** It loads migrations from
+`OpenCore_CoreStore.bundle`, which must sit beside it, or it dies with
+`unable to find bundle named OpenCore_CoreStore`. Install both:
+
+```bash
+mkdir -p ~/.local/libexec/opencore && cp /private/tmp/opencore-build/out/Products/Release/opencore ~/.local/libexec/opencore/ && cp -R /private/tmp/opencore-build/out/Products/Release/OpenCore_CoreStore.bundle ~/.local/libexec/opencore/
+```
+
+Do **not** point a client at `/private/tmp/opencore-build`. That path is periodically cleaned,
+and the failure arrives weeks later as a client that silently lists no tools.
+
+Config lives at `~/Library/Application Support/Claude/claude_desktop_config.json`. Merge, never
+overwrite: it also holds window state, folder grants and per-account preferences.
+
+```json
+{ "mcpServers": { "opencore": { "command": "/Users/gunnarhostetler/.local/libexec/opencore/opencore", "args": ["mcp"] } } }
+```
+
+Claude Desktop reads this only at launch, so it must be fully quit and reopened.
+
+Verify the server by hand before blaming the client:
+
+```bash
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"1"}}}' '{"jsonrpc":"2.0","method":"notifications/initialized"}' '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"core_ask","arguments":{"query":"what is OpenCore built with"}}}' | ~/.local/libexec/opencore/opencore mcp 2>/dev/null
+```
+
+Measured: negotiates the client's version, then returns 92 claims with evidence and authority.
+Tool arguments are `query` for `core_ask` and `core_search`, `entity` for `core_claims`,
+`receipt` for `core_trace`.
+
 ## Exercising the MCP server — verified 2026-08-08
 
 ```bash
