@@ -170,7 +170,7 @@ For Notion over MCP:
 Last run 2026-08-10, against the uncommitted tree:
 
 - `swift build` -> clean
-- `swift test` -> **79 tests pass** (8 + 15 + 3 + 18 + 3 + 32). Was 51: +9 for counting
+- `swift test` -> **81 tests pass** (8 + 15 + 3 + 18 + 3 + 34). Was 51: +9 for counting
   (chat and `Reasoner`), +3 for the dense-leg guard, +5 for saved conversations, +3 for MCP
   protocol negotiation, +3 for receipt identity, +5 for registry ranking. New targets
   `CoreSearchTests` and `CoreMCPTests`.
@@ -283,12 +283,18 @@ Carried over from 2026-08-09, not re-run today:
   Content-addressing is right for an object, where re-ingesting the same bytes should update
   one row; a receipt records that an answer *happened*, so the same question twice is two
   events. 3 tests in `Tests/CoreStoreTests/ReceiptIdentityTests.swift`.
-- **Remote-only MCP servers cannot be added from the MCP Store screen.** `[measured]` About
-  60% of the registry publishes an endpoint rather than a package, and
-  `AppModel.addRegistryServer` still requires `server.command`. The engine gained streamable
-  HTTP and OAuth this session, so hosted servers *are* reachable, but only via
-  `mcp-source add --url` on the CLI. The store's ranking deprioritises them and the row says
-  why, which is honest but is a workaround for a gap rather than the fix.
+- ~~**Remote-only MCP servers cannot be added from the MCP Store screen.**~~ **Fixed
+  2026-08-10.** `RegistryServer.launchability` became `reachability`, which answers "how would
+  OpenCore reach this" rather than "can this be launched as a subprocess", and the registry
+  model now keeps endpoint URLs instead of decoding them down to a transport name and throwing
+  the address away. Measured on one live page: **23 usable to 63** (+40 hosted), 1 still
+  unreachable. A package still wins when a server publishes both, because launching needs no
+  account and no sign-in.
+- **The last step of a hosted source is still CLI-only.** Add now works from the store, and the
+  MCP tab already has a Sign in button with Sync gated on it. What is still stranded is
+  Discover-and-tick-tools for an *existing* source, so a hosted server added in the app reaches
+  `noAllowedTools` unless the allowlist is set from the CLI. Same tab-split cause as before,
+  and unchanged by this work.
 - **Not clicked through:** the app compiles and chat has been exercised headlessly, but the
   riskiest path is still unverified end to end: MCP store -> credentials -> Add -> Discover ->
   tick tools -> Sync.
@@ -307,11 +313,7 @@ No open decisions. Items 1 and 2 of the previous list are done. Build in this or
    follow-up text, so "what language did you just say it uses" retrieves nothing. Expand a
    follow-up into a standalone query using the thread, then retrieve.
 
-3. **Let the MCP Store add hosted servers.** See Blockers. The ranking currently sinks
-   remote-only entries because this screen cannot add them, which is honest but is working
-   around a gap. `mcp-source add --url` already does it from the CLI.
-
-4. **Consolidate the app's 14 tabs.** `[measured]` 14 tabs doing about 8 distinct jobs.
+3. **Consolidate the app's 14 tabs.** `[measured]` 14 tabs doing about 8 distinct jobs.
    Embedding controls appear in three places (`SourcesView.EmbeddingPanel`,
    `MaintenanceEmbeddingPanel`, and a button in `PassagesView`); store counts appear in three
    (StatusBar, Settings > Data, `MaintenanceCountsPanel`); connector lists in two. `Ask` is
@@ -321,11 +323,11 @@ No open decisions. Items 1 and 2 of the previous list are done. Build in this or
    new-source path in the other tab, so fixing that item and this one is the same work.
    `Claims`/`Beliefs` look redundant and are not: asserted versus resolved is the model.
 
-5. **Separate windows per project.** `WindowGroup(for:)`. Zero write risk. The natural
+4. **Separate windows per project.** `WindowGroup(for:)`. Zero write risk. The natural
    identity is a `📦 Projects DB` row, which already carries `GitHub Repo` and so joins to
    what OpenCore already ingests.
 
-6. **Pull the 33 project rows and both roadmaps into OpenCore**, which is what item 1 unlocks
+5. **Pull the 33 project rows and both roadmaps into OpenCore**, which is what item 1 unlocks
    and the reason the whole Notion thread started.
 
 Not on this list on purpose: the create-a-database button. See Decisions.

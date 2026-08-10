@@ -9,9 +9,22 @@ public struct RegistryServer: Sendable, Identifiable, Hashable {
     public let version: String
     public let repositoryURL: String?
     public let package: Package?
-    /// Remote endpoints. A server with only these and no `package` cannot be launched as a
-    /// subprocess, which is the only transport OpenCore's client speaks.
-    public let remotes: [String]
+    /// Hosted endpoints, with their URLs.
+    ///
+    /// These used to be decoded down to their transport *type* and the URL thrown away, which
+    /// was fine while a hosted server was unusable and is not fine now that one can be added.
+    public let remotes: [Remote]
+
+    public struct Remote: Sendable, Hashable {
+        public let type: String
+        public let url: String
+
+        /// Streamable HTTP is what `HTTPTransport` speaks. The registry also publishes a
+        /// handful of `sse` entries (5 of 332 sampled 2026-08-10), which is the older
+        /// two-endpoint protocol and a different client, so those stay unreachable and say so
+        /// rather than being offered and then failing at sync.
+        public var isSupported: Bool { type == "streamable-http" }
+    }
     public let isLatest: Bool
     /// The registry's own lifecycle flag. `deprecated` servers stay listed and stay installable;
     /// they are simply not what anyone should be shown first.
@@ -59,17 +72,16 @@ public struct RegistryServer: Sendable, Identifiable, Hashable {
     /// registry of 9,000 servers listed in raw alphabetical order is unusable in a different
     /// way than a short list is: everything is present and nothing is findable.
     ///
-    /// Launchability outranks trust deliberately. A beautifully verified server this app cannot
-    /// add is worth less to the reader than an ordinary one it can, and today the Add path
-    /// requires a stdio package.
+    /// Reachability outranks trust deliberately. A beautifully verified server this app cannot
+    /// add is worth less to the reader than an ordinary one it can.
     public var priority: Int {
         var score = 0
         if !isDeprecated { score += 8 }
-        if launchability.canLaunch { score += 4 }
+        if reachability.isUsable { score += 4 }
         if trust == .domain { score += 2 }
-        // A server needing no credentials can be tried immediately. Weakest signal of the four,
-        // so it only breaks ties.
-        if requiredEnvironment.isEmpty { score += 1 }
+        // Ready to try without further setup. A hosted server is not: it needs a sign-in before
+        // it can sync. Weakest signal of the four, so it only breaks ties.
+        if requiredEnvironment.isEmpty && !reachability.isHosted { score += 1 }
         return score
     }
 
@@ -94,30 +106,49 @@ public struct RegistryServer: Sendable, Identifiable, Hashable {
         public var id: String { name }
     }
 
-    /// Whether OpenCore can actually run this one.
-    ///
-    /// Reported as a reason rather than a bool, because "cannot use" with no explanation is
-    /// the kind of dead end that makes a catalogue feel broken.
-    public var launchability: Launchability {
-        guard let package else {
-            return remotes.isEmpty
-                ? .no("no package and no endpoint published")
-                : .no("remote-only (\(remotes.joined(separator: ", "))); OpenCore's client speaks stdio")
-        }
-        guard package.transport == "stdio" else {
-            return .no("declares \(package.transport) transport, not stdio")
-        }
-        guard command != nil else {
-            return .no("no runtime hint for a \(package.registryType) package")
-        }
-        return .yes
+    /// The endpoint OpenCore would connect to, if this server publishes a usable one.
+    public var endpoint: String? {
+        remotes.first(where: \.isSupported)?.url
     }
 
-    public enum Launchability: Sendable, Hashable {
-        case yes
+    /// How OpenCore would reach this server.
+    ///
+    /// Replaces the old `launchability`, which asked only "can this be launched as a
+    /// subprocess" and therefore answered "no" for every hosted server. That was accurate when
+    /// the client spoke nothing but stdio and became wrong the day streamable HTTP and OAuth
+    /// landed, at which point roughly 60% of the catalogue was being written off for a reason
+    /// that had stopped being true.
+    ///
+    /// Reported as a reason rather than a bool, because "cannot use" with no explanation is the
+    /// kind of dead end that makes a catalogue feel broken.
+    public var reachability: Reachability {
+        // A package is preferred when both exist: launching a subprocess needs no account and
+        // no network round trip, and the hosted equivalent will usually want an OAuth sign-in.
+        if let package, package.transport == "stdio", let command {
+            return .launch(command: command, arguments: arguments)
+        }
+        if let endpoint { return .connect(endpoint: endpoint) }
+
+        if let package {
+            guard package.transport == "stdio" else {
+                return .no("declares \(package.transport) transport, and publishes no streamable-http endpoint")
+            }
+            return .no("no runtime hint for a \(package.registryType) package")
+        }
+        guard !remotes.isEmpty else { return .no("no package and no endpoint published") }
+        return .no("only \(remotes.map(\.type).joined(separator: ", ")) endpoints; OpenCore speaks streamable-http")
+    }
+
+    public enum Reachability: Sendable, Hashable {
+        /// Runs as a subprocess over stdio.
+        case launch(command: String, arguments: [String])
+        /// Hosted, over streamable HTTP. Authenticates with OAuth rather than an environment
+        /// variable, so adding one is followed by a sign-in rather than by typing a token.
+        case connect(endpoint: String)
         case no(String)
 
-        public var canLaunch: Bool { if case .yes = self { return true }; return false }
+        public var isUsable: Bool { if case .no = self { return false }; return true }
+        public var isHosted: Bool { if case .connect = self { return true }; return false }
         public var reason: String? { if case .no(let why) = self { return why }; return nil }
     }
 
@@ -240,7 +271,11 @@ extension RegistryServer {
         description = server.description ?? ""
         version = server.version ?? "unknown"
         repositoryURL = server.repository?.url
-        remotes = (server.remotes ?? []).map(\.type)
+        // Entries with no URL are dropped rather than kept as unusable rows: a remote with no
+        // address is not something a user can be offered or told how to fix.
+        remotes = (server.remotes ?? []).compactMap { remote in
+            remote.url.map { Remote(type: remote.type, url: $0) }
+        }
         isLatest = entry.meta?.official?.isLatest ?? true
         // Absent status means active. A server the registry has said nothing about is not
         // deprecated, and defaulting the other way would bury entries for missing metadata.

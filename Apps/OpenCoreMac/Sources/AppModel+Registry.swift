@@ -21,11 +21,18 @@ extension AppModel {
         environment: [String: String]
     ) async -> String {
         guard let store else { return "store is not open" }
-        guard let command = server.command else { return "this server has no launchable command" }
+
+        // Both ways in. A hosted server needs no command and no environment variables: it
+        // authenticates with OAuth after it is added, which is why the return message below
+        // sends the reader somewhere different depending on which one this is.
+        let reachability = server.reachability
+        guard reachability.isUsable else {
+            return reachability.reason.map { "cannot add this server: \($0)" } ?? "cannot add this server"
+        }
 
         // Only variables the registry declares, so a stray key in the dictionary cannot smuggle
-        // an unexpected variable into the child process.
-        let declared = server.package?.environment.map(\.name) ?? []
+        // an unexpected variable into the child process. A hosted server declares none.
+        let declared = reachability.isHosted ? [] : (server.package?.environment.map(\.name) ?? [])
 
         do {
             for variable in declared {
@@ -38,19 +45,44 @@ extension AppModel {
                 }
             }
 
-            let config = MCPServerConfig(
-                name: name,
-                command: command,
-                arguments: server.arguments,
-                environmentNames: declared,
-                allowedTools: [],
-                domain: domain
-            )
+            let config: MCPServerConfig
+            switch reachability {
+            case .connect(let endpoint):
+                config = MCPServerConfig(
+                    name: name,
+                    url: endpoint,
+                    // Unused when `url` is set, and empty rather than a placeholder so a
+                    // misconfigured source fails as "no endpoint" instead of trying to launch
+                    // a program called something plausible.
+                    command: "",
+                    allowedTools: [],
+                    domain: domain
+                )
+            case .launch(let command, let arguments):
+                config = MCPServerConfig(
+                    name: name,
+                    command: command,
+                    arguments: arguments,
+                    environmentNames: declared,
+                    allowedTools: [],
+                    domain: domain
+                )
+            case .no:
+                return "cannot add this server"
+            }
 
             var source = MCPClientConnector(config: config).source
             source.config = String(decoding: try JSONEncoder().encode(config), as: UTF8.self)
             try await store.upsert(source)
             await refresh()
+
+            // A hosted server cannot list its tools until it is signed in, so sending the reader
+            // to Discover first would hand them a failure. The order is the opposite of the
+            // subprocess case and saying so is the difference between the flow working and the
+            // reader concluding it is broken.
+            if reachability.isHosted {
+                return "Added \(name). Next: sign in on the MCP tab, then Discover its tools and tick the ones you allow."
+            }
 
             let missing = config.missingEnvironment
             if missing.isEmpty {

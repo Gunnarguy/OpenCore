@@ -20,7 +20,7 @@ struct RegistryRankingTests {
             registryType: "npm", identifier: "thing", runtimeHint: "npx",
             runtimeArguments: [], environment: [], transport: "stdio"
         ),
-        remotes: [String] = [],
+        remotes: [RegistryServer.Remote] = [],
         isDeprecated: Bool = false
     ) -> RegistryServer {
         RegistryServer(
@@ -62,16 +62,49 @@ struct RegistryRankingTests {
         #expect(deprecated.priority < scruffy.priority)
     }
 
-    @Test("what the app can add outranks what it merely trusts")
-    func launchabilityOutranksTrust() {
-        let remoteButVerified = Self.server(name: "com.stripe/mcp", package: nil, remotes: ["streamable-http"])
+    @Test("what the app cannot reach at all outranks nothing")
+    func unreachableSinksBelowUsable() {
+        // `sse` is the older two-endpoint protocol and a different client, so it stays
+        // unreachable and says so rather than being offered and then failing at sync.
+        let sseOnly = Self.server(
+            name: "com.stripe/mcp", package: nil,
+            remotes: [.init(type: "sse", url: "https://example.com/sse")]
+        )
         let launchableUnverified = Self.server(name: "io.github.nobody/thing")
 
-        // A beautifully verified server this screen cannot add is worth less to the reader than
-        // an ordinary one it can. If the Add path ever learns to configure hosted servers, this
-        // expectation is the thing that should be revisited, not quietly left inverted.
-        #expect(!remoteButVerified.launchability.canLaunch)
-        #expect(launchableUnverified.priority > remoteButVerified.priority)
+        #expect(!sseOnly.reachability.isUsable)
+        #expect(launchableUnverified.priority > sseOnly.priority)
+    }
+
+    @Test("a hosted server is reachable, and its endpoint is the streamable-http one")
+    func hostedServersAreReachable() {
+        // This is the change: a server published as an endpoint rather than a package used to
+        // be written off entirely, which discarded roughly 60% of the catalogue for a reason
+        // that stopped being true the day streamable HTTP and OAuth landed.
+        let hosted = Self.server(
+            name: "com.stripe/mcp", package: nil,
+            remotes: [
+                .init(type: "sse", url: "https://example.com/sse"),
+                .init(type: "streamable-http", url: "https://example.com/mcp"),
+            ]
+        )
+        #expect(hosted.reachability.isUsable)
+        #expect(hosted.reachability.isHosted)
+        // Picked by transport, not by position. The sse entry is listed first here on purpose.
+        #expect(hosted.endpoint == "https://example.com/mcp")
+    }
+
+    @Test("a package is preferred when a server publishes both")
+    func packagesWinOverEndpoints() {
+        // Launching a subprocess needs no account and no network round trip, and the hosted
+        // equivalent will usually want an OAuth sign-in first. Offering the heavier path when a
+        // lighter one exists is a worse default even though both work.
+        let both = Self.server(
+            name: "com.stripe/mcp",
+            remotes: [.init(type: "streamable-http", url: "https://example.com/mcp")]
+        )
+        #expect(!both.reachability.isHosted)
+        if case .launch = both.reachability {} else { Issue.record("expected a launch, got \(both.reachability)") }
     }
 
     @Test("among equals, a verified publisher wins")

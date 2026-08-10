@@ -17,17 +17,20 @@ final class MCPStoreModel {
     var error: String?
     var selected: RegistryServer?
 
-    /// Hide what this screen cannot add. On by default: roughly 60% of the registry is
-    /// published as remote endpoints only, and the Add path here needs a launchable package, so
-    /// the default view was mostly things that dead-end.
+    /// Hide what this screen cannot add.
+    ///
+    /// Hosted servers are **not** hidden by this any more. They were, back when adding one was
+    /// a CLI-only step, which meant the default view dropped roughly 60% of the catalogue for a
+    /// reason that stopped being true. What it now removes is genuinely unreachable: `sse`-only
+    /// endpoints and packages with no runtime hint.
     ///
     /// A toggle rather than a permanent filter, and one that reports what it removed, because
-    /// silently dropping half a catalogue is how a registry starts looking broken.
+    /// silently dropping part of a catalogue is how a registry starts looking broken.
     var usableOnly = true
 
     /// Servers to show, and how many the filter is holding back.
     var visible: [RegistryServer] {
-        usableOnly ? servers.filter { $0.launchability.canLaunch && !$0.isDeprecated } : servers
+        usableOnly ? servers.filter { $0.reachability.isUsable && !$0.isDeprecated } : servers
     }
 
     var hiddenCount: Int { servers.count - visible.count }
@@ -108,13 +111,13 @@ struct MCPStoreView: View {
                     // Says what it removed rather than just removing it. The count is the whole
                     // point: "hiding 31" is information, a shorter list on its own is not.
                     if store.hiddenCount > 0 {
-                        Text("hiding \(store.hiddenCount) remote-only or deprecated")
+                        Text("hiding \(store.hiddenCount) unreachable or deprecated")
                             .font(.caption2).foregroundStyle(.tertiary)
                     }
                     // The registry sorts by name and offers no ranking parameter, so this
                     // ordering is within what has been loaded. Saying so keeps the top row from
                     // reading as "the best server in the catalogue".
-                    Text("verified publishers and launchable servers first, within loaded results")
+                    Text("verified publishers and usable servers first, within loaded results")
                         .font(.caption2).foregroundStyle(.tertiary)
                 }
                 .textCase(nil)
@@ -166,12 +169,19 @@ private struct MCPStoreRow: View {
                         .background(Color.orange.opacity(0.15), in: .capsule)
                         .foregroundStyle(.orange)
                 }
-                if !server.launchability.canLaunch {
-                    Text("remote")
+                if server.reachability.isHosted {
+                    Label("hosted", systemImage: "cloud")
+                        .font(.caption2)
+                        .padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(Color.blue.opacity(0.12), in: .capsule)
+                        .foregroundStyle(.blue)
+                        .help("Runs on the publisher's servers over streamable HTTP. Add it here, then sign in with OAuth on the MCP tab.")
+                } else if !server.reachability.isUsable {
+                    Text("unreachable")
                         .font(.caption2)
                         .padding(.horizontal, 5).padding(.vertical, 1)
                         .background(.quaternary, in: .capsule)
-                        .help("Published as an endpoint rather than a package. OpenCore can reach hosted servers, but adding one is a CLI step today, not this screen.")
+                        .help(server.reachability.reason ?? "")
                 }
             }
             Text(server.description).font(.caption).foregroundStyle(.secondary).lineLimit(2)
@@ -206,13 +216,17 @@ private struct MCPStoreDetail: View {
                     }
                 }
 
-                if let reason = server.launchability.reason {
+                switch server.reachability {
+                case .no(let reason):
                     Label(reason, systemImage: "exclamationmark.triangle")
                         .font(.caption).foregroundStyle(.orange)
                         .padding(12)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(Color.orange.opacity(0.1), in: .rect(cornerRadius: 8))
-                } else {
+                case .connect(let endpoint):
+                    hostedSection(endpoint: endpoint)
+                    addSection
+                case .launch:
                     launchSection
                     credentialsSection
                     addSection
@@ -224,6 +238,27 @@ private struct MCPStoreDetail: View {
             }
             .padding(20)
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    /// A hosted server. Nothing is launched and no credential is typed here: it authenticates
+    /// with OAuth after being added, which is a different flow and needs saying so before the
+    /// reader goes looking for a token field that does not exist.
+    private func hostedSection(endpoint: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Connects to").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            Text(endpoint)
+                .font(.caption.monospaced())
+                .textSelection(.enabled)
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.quaternary.opacity(0.4), in: .rect(cornerRadius: 6))
+            Text("Hosted, over streamable HTTP. It signs in with OAuth rather than an API key, so there is nothing to paste here: add it, then sign in on the MCP tab. The token goes to your keychain and the database stores only the endpoint.")
+                .font(.caption2).foregroundStyle(.tertiary)
+            // The order is the reverse of a subprocess server's, and getting it wrong hands the
+            // reader a failure: a hosted server cannot list its tools until it is signed in.
+            Label("Tools can only be listed after signing in.", systemImage: "info.circle")
+                .font(.caption2).foregroundStyle(.secondary)
         }
     }
 
