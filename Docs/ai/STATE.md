@@ -1,9 +1,12 @@
 # Current State
 
-Updated: 2026-08-10
+Updated: 2026-08-11
 Branch/worktree: `measure-and-fix-plus-saved-chats`, primary checkout (not a linked worktree).
 Branched from `main` at `86c06ab`; fast-forward `main` onto it when ready.
-Last verified commit: the tip of that branch. Working tree clean.
+Last commit: `43d6d38`, **"Let the store add hosted servers, which is most of the catalogue"**.
+
+**The working tree is NOT clean.** The UX pass is code-complete and verified but uncommitted:
+13 files. See "In flight" below before doing anything else.
 
 ## Objective
 
@@ -41,6 +44,56 @@ fixed the chat-receipts bug found earlier the same day.
 Verified working end to end today: `opencore eval`, the on-device chat path, MCP sign-in via
 `ASWebAuthenticationSession` against `mcp.notion.com`, one real Notion sync, and
 `--telemetry` across `passages` and `ask`.
+
+## In flight, uncommitted: the UX pass
+
+Prompted by a review of the app's information architecture. The finding that drove it: **the
+sidebar is the database schema with a sidebar around it.** Claims, Beliefs, Contradictions,
+Timeline, Passages, Receipts are the *layers of the system*, not anything a person wants. The
+tell was that `core_ask`'s sibling `core_claims(entity:)` gave an external model a first-class
+entity lens that the app itself did not have.
+
+New and untracked:
+
+- `Sources/CoreStore/EntityDossier.swift` — assembles everything about one entity.
+- `Sources/CoreStore/CorpusSnapshot.swift` — counts by kind, source, domain, time.
+- `Apps/OpenCoreMac/Sources/EntityView.swift` — the subject-first page. This is the centrepiece.
+- `Apps/OpenCoreMac/Sources/CorpusView.swift` — makes the corpus legible.
+- `Sources/CoreStore/Resources/migration_005.sql` — `judgement` and `judged_at` on
+  `conversation_turn`, registered as migration 5 in `Database.migrations`.
+- `Tests/CoreStoreTests/JudgementAndDossierTests.swift` — 6 tests.
+
+Modified: `ChatView.swift`, `OpenCoreApp.swift` (banded sidebar), `Conversation.swift`,
+`Conversations.swift`, `Database.swift`. Deleted: `AskView.swift`, retired into Chat.
+
+**Why migration 5 exists.** Every retrieval constant in this project rests on 20 hand-written
+benchmark cases. Migration 4 already persists every question, answer, source list and receipt;
+one judgement column turns that history into a corpus that grows by using the product. `NULL`
+is unjudged and must never be read as neutral.
+
+### What is verified
+
+All of it, as of 2026-08-11. The pass is code-complete; only the commit is outstanding.
+
+- `xcodebuild -scheme OpenCore` -> **BUILD SUCCEEDED.** This was the one real gap and it is
+  closed. Note the app project is XcodeGen-generated and gitignored, so `xcodegen generate` in
+  `Apps/OpenCoreMac/` is required after adding or deleting a source file: `sources: - path:
+  Sources` enumerates files at generation time rather than referencing the folder.
+- `swift test` -> **87 tests pass** (8 + 21 + 3 + 18 + 3 + 34). Was 81; the +6 are
+  `JudgementAndDossierTests`.
+- **Migration 5 is applied to the live store.** `PRAGMA table_info(conversation_turn)` shows
+  `judgement TEXT` and `judged_at REAL`. Checked against the real database, not a fixture.
+- The Entity page **was** run against the real store earlier and worked. Looking at it
+  immediately found three defects that were then fixed: entity references rendering as raw
+  hashes (`contributed to 6230ffec...`), 477 near-identical claim rows, and a slow load from an
+  N+1 introduced in the dossier assembly.
+- **Thumbs up/down is wired**, contrary to what this file said on 2026-08-10. `ChatView`'s
+  `TurnView.judgement` renders the two icons and `ChatModel.judge` calls `Store.judge`. The
+  id round-trip that makes it durable is real: `Conversation` persists a turn as
+  `StoredTurn(id: turn.id.uuidString)` and `restore()` reads `UUID(uuidString: row.id)` back,
+  so a verdict written today is still shown when the thread is reopened. Judgements are held
+  in a dictionary beside `turns` rather than on `Turn`, because `Turn` is streamed from the
+  conversation actor and replaced wholesale on every frame.
 
 ## Decisions taken this session
 
@@ -167,7 +220,17 @@ For Notion over MCP:
 
 ## Verification
 
-Last run 2026-08-10, against the uncommitted tree:
+Last run 2026-08-11, against the uncommitted tree:
+
+- `xcodebuild -scheme OpenCore` -> **BUILD SUCCEEDED**, after `xcodegen generate`. This is the
+  run that closes the gap left open on 2026-08-10.
+- `swift test` -> **87 tests pass** (8 + 21 + 3 + 18 + 3 + 34). The +6 over 81 are
+  `JudgementAndDossierTests`, run together with the rest for the first time.
+- `PRAGMA table_info(conversation_turn)` on the live store -> `judgement` and `judged_at`
+  present, so migration 5 applied cleanly to a real database at version 4.
+- `opencore chats` -> both saved threads still listed and readable after the migration.
+
+Run 2026-08-10, against the same tree:
 
 - `swift build` -> clean
 - `swift test` -> **81 tests pass** (8 + 15 + 3 + 18 + 3 + 34). Was 51: +9 for counting
@@ -181,7 +244,6 @@ Last run 2026-08-10, against the uncommitted tree:
   retrieved, 0 evidence. Asking it to count `personal` notes returns **no count**: the
   firewall declined and it fell through to retrieval, so an MCP caller cannot count what it
   cannot retrieve.
-- `xcodebuild -scheme OpenCore` -> BUILD SUCCEEDED
 - `opencore passages --telemetry-summary` -> **70ms total**, and no `embed.query`,
   `leg.dense` or `SELECT chunk_vector` span present. Was 350ms.
 - `opencore eval` -> lexical 0.362, dense 0.025, fused 0.365 nDCG@6, missed 7/18/7.
@@ -301,36 +363,32 @@ Carried over from 2026-08-09, not re-run today:
 
 ## Exact Next Action
 
-No open decisions. Items 1 and 2 of the previous list are done. Build in this order.
+Steps 1 to 3 of the previous plan are **done and verified**, 2026-08-11: the app builds, 87
+tests pass, and thumbs up/down turned out to already be wired. What remains:
 
-1. **Fan out list responses into one object per record** (Critical, see Blockers). Do this
-   before any more Notion syncing, or the store fills with JSON blobs. Telemetry makes the bug
-   visible: the `tool` span reports `objects=1` regardless of how many records came back, and
-   it should report the record count.
+1. **Commit the UX pass.** Nothing from it is committed. Suggested split: one commit for the
+   store layer plus migration 5, one for the entity and corpus screens plus the sidebar
+   reorganisation.
 
-2. **Rewrite follow-up questions before retrieval.** See Blockers. Saved chats made this
-   visible: the model now keeps a thread's context but retrieval still runs on the raw
-   follow-up text, so "what language did you just say it uses" retrieves nothing. Expand a
-   follow-up into a standalone query using the thread, then retrieve.
+2. **Then: fan out MCP list responses into one object per record** (Critical, see Blockers).
+   Still the top blocking defect for anything Notion. `MCPClientConnector` currently writes one
+   object per *tool call*, so a list response of N records becomes a single JSON blob. Each
+   record needs its own stable `externalID` or re-syncing updates two blobs forever.
 
-3. **Consolidate the app's 14 tabs.** `[measured]` 14 tabs doing about 8 distinct jobs.
-   Embedding controls appear in three places (`SourcesView.EmbeddingPanel`,
-   `MaintenanceEmbeddingPanel`, and a button in `PassagesView`); store counts appear in three
-   (StatusBar, Settings > Data, `MaintenanceCountsPanel`); connector lists in two. `Ask` is
-   superseded by `Chat`, which does the same query -> retrieval -> model -> receipt path
-   multi-turn. **`MCP` and `MCP Store` are one job split across two tabs, and the split is why
-   the hosted-source flow is broken**: the tool picker exists but is stranded on the
-   new-source path in the other tab, so fixing that item and this one is the same work.
-   `Claims`/`Beliefs` look redundant and are not: asserted versus resolved is the model.
+Three traps worth keeping, each of which has cost time at least once:
 
-4. **Separate windows per project.** `WindowGroup(for:)`. Zero write risk. The natural
-   identity is a `📦 Projects DB` row, which already carries `GitHub Repo` and so joins to
-   what OpenCore already ingests.
+- The app declares its own top-level `enum Section`, which shadows `SwiftUI.Section`
+  module-wide. The error names `CodingKeyRepresentable` and says nothing about lists. Spell it
+  `SwiftUI.Section`.
+- **One SwiftPM build at a time.** `swift build` takes an exclusive lock on the scratch path, so
+  a second invocation queues silently and looks like a hang. It is not a slow type checker.
+  Check `pgrep -f swift-frontend` before concluding anything about performance.
+- **Run `xcodegen generate` after adding or deleting an app source file.** The project is
+  generated and gitignored, and `sources: - path: Sources` enumerates files at generation time.
+  A new view that is never added to the project simply does not exist to the compiler.
 
-5. **Pull the 33 project rows and both roadmaps into OpenCore**, which is what item 1 unlocks
-   and the reason the whole Notion thread started.
-
-Not on this list on purpose: the create-a-database button. See Decisions.
+Not on this list on purpose: the create-a-database button, and third-party model providers. See
+Decisions and the Notion board.
 
 ## Housekeeping
 

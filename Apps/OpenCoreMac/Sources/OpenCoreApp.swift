@@ -16,15 +16,25 @@ struct OpenCoreApp: App {
     }
 }
 
+/// The sidebar, grouped by what a reader is trying to do rather than by which layer of the
+/// pipeline produced the data.
+///
+/// It used to be a flat list of fourteen, named after the architecture: Claims, Beliefs,
+/// Contradictions, Receipts, Passages. That is the schema with a sidebar around it, perfectly
+/// navigable to whoever built the pipeline and unmapped for everyone else.
+///
+/// `Ask` is gone. It ran the same query -> retrieval -> model -> receipt path as `Chat`, which
+/// does it multi-turn and keeps a saved thread, so it was a second door onto one room.
 enum Section: String, CaseIterable, Identifiable, Hashable {
     case chat = "Chat"
-    case ask = "Ask"
-    case passages = "Passages"
-    case claims = "Claims"
-    case beliefs = "Beliefs"
+    case entities = "Entities"
+    case corpus = "Corpus"
     case timeline = "Timeline"
     case timeTravel = "Time travel"
     case contradictions = "Contradictions"
+    case claims = "Claims"
+    case beliefs = "Beliefs"
+    case passages = "Passages"
     case receipts = "Receipts"
     case sources = "Sources"
     case mcp = "MCP"
@@ -34,10 +44,34 @@ enum Section: String, CaseIterable, Identifiable, Hashable {
 
     var id: String { rawValue }
 
+    /// Which band of the sidebar this belongs to.
+    ///
+    /// Ask, browse, configure. The ordering within `Section.allCases` already reflects it; this
+    /// makes the grouping explicit so a row added later lands somewhere deliberate instead of
+    /// at the bottom of whichever list it was appended to.
+    enum Band: String, CaseIterable, Identifiable {
+        case ask = "Ask"
+        case explore = "Explore"
+        case inspect = "Inspect"
+        case configure = "Set up"
+
+        var id: String { rawValue }
+    }
+
+    var band: Band {
+        switch self {
+        case .chat: .ask
+        case .entities, .corpus, .timeline, .timeTravel: .explore
+        case .contradictions, .claims, .beliefs, .passages, .receipts: .inspect
+        case .sources, .mcp, .mcpStore, .maintenance, .settings: .configure
+        }
+    }
+
     var symbol: String {
         switch self {
         case .chat: "bubble.left.and.bubble.right"
-        case .ask: "text.magnifyingglass"
+        case .entities: "square.stack.3d.up"
+        case .corpus: "chart.pie"
         case .passages: "doc.text.magnifyingglass"
         case .claims: "list.bullet.rectangle"
         case .beliefs: "checkmark.seal"
@@ -60,17 +94,26 @@ struct RootView: View {
 
     var body: some View {
         NavigationSplitView {
-            List(Section.allCases, selection: $section) { item in
-                Label(item.rawValue, systemImage: item.symbol)
-                    .badge(badge(for: item))
-                    .tag(item)
+            List(selection: $section) {
+                // Banded rather than flat. Fifteen undifferentiated rows is a list you scan
+                // every time; four short groups is one you learn once.
+                ForEach(Section.Band.allCases) { band in
+                    SwiftUI.Section(band.rawValue) {
+                        ForEach(Section.allCases.filter { $0.band == band }) { item in
+                            Label(item.rawValue, systemImage: item.symbol)
+                                .badge(badge(for: item))
+                                .tag(item)
+                        }
+                    }
+                }
             }
             .navigationSplitViewColumnWidth(min: 190, ideal: 200, max: 240)
             .safeAreaInset(edge: .bottom) { StatusBar() }
         } detail: {
             switch section {
             case .chat: ChatView()
-            case .ask: AskView()
+            case .entities: EntityView()
+            case .corpus: CorpusView()
             case .passages: PassagesView()
             case .claims: ClaimsView()
             case .beliefs: BeliefsView()

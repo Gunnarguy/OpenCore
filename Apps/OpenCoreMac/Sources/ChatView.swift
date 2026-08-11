@@ -61,6 +61,7 @@ final class ChatModel {
         retainedKey = nil
         turns = []
         expandedSource = [:]
+        judgements = [:]
     }
 
     /// Reopen a saved thread, restoring both the visible history and the model's context.
@@ -69,13 +70,42 @@ final class ChatModel {
         retained = nil
         retainedKey = nil
         expandedSource = [:]
+        judgements = [:]
         turns = (try? await conversation(store: store, tuning: tuning).restore()) ?? []
+        // After the turns, because it keys on their ids.
+        await loadJudgements(store: store)
     }
 
     func delete(_ thread: StoredConversation, store: Store) async {
         try? await store.deleteConversation(id: thread.id)
         if thread.id == currentID { startNewThread() }
         await loadThreads(store: store)
+    }
+
+    // MARK: - Judgements
+
+    /// Verdicts for the turns on screen, keyed by turn id.
+    ///
+    /// Held separately from `turns` because `Turn` is `CoreReason`'s type, streamed from the
+    /// conversation actor and replaced wholesale on every update. Putting a judgement on it
+    /// would mean the next streamed frame silently discarding what the reader just clicked.
+    var judgements: [UUID: TurnJudgement] = [:]
+
+    func judge(_ turn: Turn, as verdict: TurnJudgement?, store: Store?) async {
+        guard let store else { return }
+        if let verdict { judgements[turn.id] = verdict } else { judgements[turn.id] = nil }
+        // The stored row keys on the same UUID the turn was persisted under, so this reaches the
+        // right row whether the thread was just typed or reopened from history.
+        try? await store.judge(turn: turn.id.uuidString, as: verdict)
+    }
+
+    /// Load verdicts for a reopened thread, so a judgement made yesterday is still shown.
+    func loadJudgements(store: Store) async {
+        guard let stored = try? await store.turns(conversationID: currentID) else { return }
+        for row in stored {
+            guard let verdict = row.judgement, let id = UUID(uuidString: row.id) else { continue }
+            judgements[id] = verdict
+        }
     }
 }
 
@@ -259,6 +289,7 @@ struct ChatView: View {
 private struct TurnView: View {
     let turn: Turn
     @Bindable var chat: ChatModel
+    @Environment(AppModel.self) private var model
 
     var body: some View {
         if turn.role == .you {
@@ -318,16 +349,78 @@ private struct TurnView: View {
         return attributed
     }
 
+    /// Provenance, always present, one line.
+    ///
+    /// The screen's rule is that provenance stays "quiet until questioned", and that is right
+    /// for citations. But quiet and invisible are different, and the receipt was invisible: it
+    /// lived behind a link phrased as a question, so the thing that distinguishes this product
+    /// from any other chat window only appeared if you thought to ask for it.
+    ///
+    /// So the counters are stated and the receipt code is shown. Reading them costs a glance
+    /// and expanding them is still a click.
     private var footer: some View {
-        HStack(spacing: 10) {
-            GroundingBadge(turn: turn)
-            if let model = turn.modelName {
-                Label(model, systemImage: "cpu").font(.caption2).foregroundStyle(.tertiary)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 10) {
+                GroundingBadge(turn: turn)
+                if let receipt = turn.receipt {
+                    // The one line that says how this answer was produced. A counted answer
+                    // reports rows counted and no sources, which is the honest shape and reads
+                    // as deliberate rather than as a failed retrieval.
+                    Text(provenance(receipt))
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.tertiary)
+                        .textSelection(.enabled)
+                }
+                Spacer()
+                if turn.receipt != nil {
+                    Button("Why do you think that?") { chat.showingReceipt = turn }
+                        .buttonStyle(.link).font(.caption)
+                }
             }
-            Spacer()
-            if turn.receipt != nil {
-                Button("Why do you think that?") { chat.showingReceipt = turn }
-                    .buttonStyle(.link).font(.caption)
+            judgement
+        }
+    }
+
+    private func provenance(_ receipt: Receipt) -> String {
+        var parts: [String] = []
+        if receipt.queryClass == .aggregate {
+            parts.append("counted \(receipt.objectsSearched) rows")
+        } else {
+            parts.append("\(receipt.objectsRetrieved) of \(receipt.objectsSearched) passages")
+        }
+        parts.append(receipt.model == nil ? "no model" : "on-device")
+        parts.append(receipt.shortCode)
+        return parts.joined(separator: " · ")
+    }
+
+    /// Was this any good?
+    ///
+    /// Two icons, and the cheapest high-value affordance in the app. Every retrieval constant in
+    /// this project rests on 20 hand-written benchmark cases, because writing them by hand is
+    /// expensive. Chat turns are already persisted with their sources and receipts, so a verdict
+    /// is the only missing column between ordinary use and a growing eval corpus.
+    ///
+    /// Neither state is preselected. An unjudged answer is unmeasured, not neutral, and a
+    /// default would manufacture agreement out of people not clicking.
+    @ViewBuilder
+    private var judgement: some View {
+        HStack(spacing: 6) {
+            Text("was this right?").font(.caption2).foregroundStyle(.tertiary)
+            ForEach(TurnJudgement.allCases, id: \.self) { verdict in
+                let chosen = chat.judgements[turn.id] == verdict
+                Button {
+                    // Clicking the current verdict withdraws it, so a misclick is recoverable
+                    // without leaving a wrong label in the corpus.
+                    Task { await chat.judge(turn, as: chosen ? nil : verdict, store: model.store) }
+                } label: {
+                    Image(systemName: verdict == .good
+                        ? (chosen ? "hand.thumbsup.fill" : "hand.thumbsup")
+                        : (chosen ? "hand.thumbsdown.fill" : "hand.thumbsdown"))
+                        .font(.caption)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(chosen ? (verdict == .good ? Color.green : Color.orange) : Color.secondary)
+                .help(verdict == .good ? "Useful and correct" : "Wrong, or missed what I asked")
             }
         }
     }
