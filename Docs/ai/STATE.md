@@ -1,12 +1,12 @@
 # Current State
 
-Updated: 2026-08-11
+Updated: 2026-08-11, end of session
 Branch/worktree: `measure-and-fix-plus-saved-chats`, primary checkout (not a linked worktree).
 Branched from `main` at `86c06ab`; fast-forward `main` onto it when ready.
-Last commit: `43d6d38`, **"Let the store add hosted servers, which is most of the catalogue"**.
+Last commit: `d4dc228`, **"Make MCP one tab, which is what unstrands the tool picker"**.
+Nine commits on this branch, four of them today.
 
-**The working tree is NOT clean.** The UX pass is code-complete and verified but uncommitted:
-13 files. See "In flight" below before doing anything else.
+**The working tree is clean.** Everything below is committed.
 
 ## Objective
 
@@ -45,7 +45,18 @@ Verified working end to end today: `opencore eval`, the on-device chat path, MCP
 `ASWebAuthenticationSession` against `mcp.notion.com`, one real Notion sync, and
 `--telemetry` across `passages` and `ask`.
 
-## In flight, uncommitted: the UX pass
+## Landed today: the UX pass, then the MCP merge
+
+Four commits, in this order. Each was built on the one before it.
+
+1. `61671d2` — `EntityDossier`, `CorpusSnapshot`, migration 5 (`judgement`, `judged_at`), and
+   `Turn.init(id:)` so a verdict reaches the row it is about.
+2. `36407e1` — `EntityView`, `CorpusView`, banded sidebar, `AskView` deleted.
+3. `a42394a` — **the OAuth refresh was never called.** See Blockers; this is the most
+   consequential thing found today and it was found by accident.
+4. `d4dc228` — MCP and MCP Store merged into one screen, which unstranded the tool picker.
+
+## Why the UX pass happened
 
 Prompted by a review of the app's information architecture. The finding that drove it: **the
 sidebar is the database schema with a sidebar around it.** Claims, Beliefs, Contradictions,
@@ -53,7 +64,7 @@ Timeline, Passages, Receipts are the *layers of the system*, not anything a pers
 tell was that `core_ask`'s sibling `core_claims(entity:)` gave an external model a first-class
 entity lens that the app itself did not have.
 
-New and untracked:
+What it added:
 
 - `Sources/CoreStore/EntityDossier.swift` — assembles everything about one entity.
 - `Sources/CoreStore/CorpusSnapshot.swift` — counts by kind, source, domain, time.
@@ -66,21 +77,37 @@ New and untracked:
 Modified: `ChatView.swift`, `OpenCoreApp.swift` (banded sidebar), `Conversation.swift`,
 `Conversations.swift`, `Database.swift`. Deleted: `AskView.swift`, retired into Chat.
 
+Then `d4dc228` merged MCP and MCP Store into one screen with a segmented control, and pulled
+the tool picker out of the add-a-server path so both paths share it. That is what made
+**Choose tools** on a configured source possible. Three details in it are load-bearing and
+easy to undo by accident:
+
+- Discovery runs against the source's **stored** config. The OAuth token is keyed by server
+  *name*, so a rebuilt config authenticates as the wrong server or as nobody.
+- Saving upserts the row that was read, not a `Source` rebuilt from the connector, so
+  `lastSyncedAt` and the sync cursor survive.
+- A tool argument stored as an object or a number is shown **read-only**. The form writes text,
+  and parsing it back into JSON is the guess `--tool-arg-json` exists as a separate flag to
+  avoid. Making that field editable would silently flatten a working Notion configuration.
+
 **Why migration 5 exists.** Every retrieval constant in this project rests on 20 hand-written
 benchmark cases. Migration 4 already persists every question, answer, source list and receipt;
 one judgement column turns that history into a corpus that grows by using the product. `NULL`
 is unjudged and must never be read as neutral.
 
-### What is verified
-
-All of it, as of 2026-08-11. The pass is code-complete; only the commit is outstanding.
+### What is verified, and what is not
 
 - `xcodebuild -scheme OpenCore` -> **BUILD SUCCEEDED.** This was the one real gap and it is
   closed. Note the app project is XcodeGen-generated and gitignored, so `xcodegen generate` in
   `Apps/OpenCoreMac/` is required after adding or deleting a source file: `sources: - path:
   Sources` enumerates files at generation time rather than referencing the folder.
-- `swift test` -> **87 tests pass** (8 + 21 + 3 + 18 + 3 + 34). Was 81; the +6 are
-  `JudgementAndDossierTests`.
+- `swift test` -> **89 tests pass** (8 + 21 + 3 + 18 + 3 + 36). Was 81: +6
+  `JudgementAndDossierTests`, +2 OAuth token expiry.
+- `opencore mcp-source discover --url https://mcp.notion.com/mcp --as notion` -> **Notion MCP,
+  protocol 2025-11-25, 28 tools.** This is the exact path the new Choose tools button calls,
+  so the button's engine is verified even though the button is not.
+- **NOT verified: clicking through the merged MCP screen.** The discovery call it makes works
+  against the live server; nobody has pressed the button. Same for Entity and Corpus.
 - **Migration 5 is applied to the live store.** `PRAGMA table_info(conversation_turn)` shows
   `judgement TEXT` and `judged_at REAL`. Checked against the real database, not a fixture.
 - The Entity page **was** run against the real store earlier and worked. Looking at it
@@ -222,10 +249,13 @@ For Notion over MCP:
 
 Last run 2026-08-11, against the uncommitted tree:
 
-- `xcodebuild -scheme OpenCore` -> **BUILD SUCCEEDED**, after `xcodegen generate`. This is the
-  run that closes the gap left open on 2026-08-10.
-- `swift test` -> **87 tests pass** (8 + 21 + 3 + 18 + 3 + 34). The +6 over 81 are
-  `JudgementAndDossierTests`, run together with the rest for the first time.
+- `xcodebuild -scheme OpenCore` -> **BUILD SUCCEEDED**, twice: after the UX pass and again
+  after the MCP merge. This closes the gap left open on 2026-08-10.
+- `swift test` -> **89 tests pass** (8 + 21 + 3 + 18 + 3 + 36). +6 `JudgementAndDossierTests`,
+  +2 OAuth token expiry.
+- `opencore mcp-source discover --url https://mcp.notion.com/mcp --as notion` -> **28 tools**,
+  protocol 2025-11-25, against the live server. The same command failed with `server requires
+  authorization` before `a42394a`, which is the before/after for the OAuth refresh fix.
 - `PRAGMA table_info(conversation_turn)` on the live store -> `judgement` and `judged_at`
   present, so migration 5 applied cleanly to a real database at version 4.
 - `opencore chats` -> both saved threads still listed and readable after the migration.
@@ -233,7 +263,8 @@ Last run 2026-08-11, against the uncommitted tree:
 Run 2026-08-10, against the same tree:
 
 - `swift build` -> clean
-- `swift test` -> **81 tests pass** (8 + 15 + 3 + 18 + 3 + 34). Was 51: +9 for counting
+- `swift test` -> **81 tests pass** (8 + 15 + 3 + 18 + 3 + 34). Superseded by the 89 above.
+  Was 51: +9 for counting
   (chat and `Reasoner`), +3 for the dense-leg guard, +5 for saved conversations, +3 for MCP
   protocol negotiation, +3 for receipt identity, +5 for registry ranking. New targets
   `CoreSearchTests` and `CoreMCPTests`.
@@ -352,28 +383,55 @@ Carried over from 2026-08-09, not re-run today:
   the address away. Measured on one live page: **23 usable to 63** (+40 hosted), 1 still
   unreachable. A package still wins when a server publishes both, because launching needs no
   account and no sign-in.
-- **The last step of a hosted source is still CLI-only.** Add now works from the store, and the
-  MCP tab already has a Sign in button with Sync gated on it. What is still stranded is
-  Discover-and-tick-tools for an *existing* source, so a hosted server added in the app reaches
-  `noAllowedTools` unless the allowlist is set from the CLI. Same tab-split cause as before,
-  and unchanged by this work.
+- ~~**The last step of a hosted source is still CLI-only.**~~ **Done, 2026-08-11**, `d4dc228`.
+  A configured source has a **Choose tools** button that discovers against its stored config
+  and opens the shared picker. What is *still* CLI-only, deliberately, is editing a tool
+  argument that is an object or a number. That is the last remaining reason to reach for the
+  CLI on a Notion source.
+- ~~**The OAuth refresh is never called.**~~ **Found and fixed 2026-08-11**, `a42394a`.
+  `[measured]` `makeClient()` read `MCPOAuth.stored(server:)?.accessToken` raw, with no expiry
+  check, while `MCPOAuth.validAccessToken(server:endpoint:)` sat there doing exactly the right
+  thing with **zero callers**. So every hosted source worked until its first access token
+  expired and then failed every call with `server requires authorization`. Live Notion server,
+  same command: `error: server requires authorization` before, `28 tools` after.
+
+  **How it was found matters more than the fix.** Not by reading the OAuth code, which
+  compiles and looks correct. It surfaced while verifying the unrelated navigation fix above:
+  exercising the newly-reachable discovery path returned a 401 that had nothing to do with the
+  change being tested. A navigation defect was sitting on top of a protocol defect.
+
+  **This is the fifth capability found built, correct and unreachable**, after
+  `BeliefEngine.correct()`, `Store.beliefHistory(key:)`, `Validity.heldInWorld`/`.asOf`, and
+  the v0.1 object scorer. Building things is not this project's failure mode. Wiring them up
+  is. A grep for public functions with no caller outside tests would have caught four of five,
+  and is worth doing as a standing check.
 - **Not clicked through:** the app compiles and chat has been exercised headlessly, but the
   riskiest path is still unverified end to end: MCP store -> credentials -> Add -> Discover ->
   tick tools -> Sync.
 
 ## Exact Next Action
 
-Steps 1 to 3 of the previous plan are **done and verified**, 2026-08-11: the app builds, 87
-tests pass, and thumbs up/down turned out to already be wired. What remains:
+The tree is clean and everything below is committed. Two things are worth doing before more
+features, in this order.
 
-1. **Commit the UX pass.** Nothing from it is committed. Suggested split: one commit for the
-   store layer plus migration 5, one for the entity and corpus screens plus the sidebar
-   reorganisation.
+1. **Click through the app against real data.** This is now the largest gap in the project and
+   it grew today: Entity, Corpus, the banded sidebar, the merged MCP screen and the thumbs are
+   all built, all compiling, and none has been used. Today's session is itself the argument for
+   doing this: exercising one path end to end against a live server found a Critical defect
+   that reading the code did not. Highest risk first, which is the full MCP flow:
+   catalogue -> Add -> Sign in -> **Choose tools** -> Sync. The engine under it is verified,
+   the screen is not.
 
-2. **Then: fan out MCP list responses into one object per record** (Critical, see Blockers).
-   Still the top blocking defect for anything Notion. `MCPClientConnector` currently writes one
-   object per *tool call*, so a list response of N records becomes a single JSON blob. Each
-   record needs its own stable `externalID` or re-syncing updates two blobs forever.
+2. **Fan out MCP list responses into one object per record** (Critical, see Blockers). Still
+   the top blocking defect for anything Notion. `MCPClientConnector` writes one object per
+   *tool call*, so a list of N records becomes a single JSON blob titled
+   `notion · notion-list-recent-pages`, and re-syncing updates two blobs forever while
+   retrieval indexes JSON syntax. Each record needs its own stable `externalID`.
+   *Telemetry makes it visible*: `objects=1` on a `tool` span whatever the record count.
+
+Also worth doing, cheap, and prompted by today's finding: **grep for public functions with no
+caller outside tests.** Five capabilities have now been found built and unreachable, which is a
+pattern rather than a coincidence.
 
 Three traps worth keeping, each of which has cost time at least once:
 
