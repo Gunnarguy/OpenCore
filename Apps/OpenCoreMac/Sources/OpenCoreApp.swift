@@ -25,6 +25,10 @@ struct OpenCoreApp: App {
 ///
 /// `Ask` is gone. It ran the same query -> retrieval -> model -> receipt path as `Chat`, which
 /// does it multi-turn and keeps a saved thread, so it was a second door onto one room.
+///
+/// `MCP Store` is gone too, folded into `MCP` as a mode. That split was not cosmetic: adding a
+/// server lived on one row and managing one on the other, which stranded the tool picker on the
+/// new-source path and left "choose tools after signing in" reachable only from the CLI.
 enum Section: String, CaseIterable, Identifiable, Hashable {
     case chat = "Chat"
     case entities = "Entities"
@@ -38,7 +42,6 @@ enum Section: String, CaseIterable, Identifiable, Hashable {
     case receipts = "Receipts"
     case sources = "Sources"
     case mcp = "MCP"
-    case mcpStore = "MCP Store"
     case maintenance = "Maintenance"
     case settings = "Settings"
 
@@ -63,7 +66,7 @@ enum Section: String, CaseIterable, Identifiable, Hashable {
         case .chat: .ask
         case .entities, .corpus, .timeline, .timeTravel: .explore
         case .contradictions, .claims, .beliefs, .passages, .receipts: .inspect
-        case .sources, .mcp, .mcpStore, .maintenance, .settings: .configure
+        case .sources, .mcp, .maintenance, .settings: .configure
         }
     }
 
@@ -81,7 +84,6 @@ enum Section: String, CaseIterable, Identifiable, Hashable {
         case .receipts: "receipt"
         case .sources: "arrow.triangle.2.circlepath"
         case .mcp: "powerplug"
-        case .mcpStore: "square.grid.2x2"
         case .maintenance: "stethoscope"
         case .settings: "gearshape"
         }
@@ -95,7 +97,7 @@ struct RootView: View {
     var body: some View {
         NavigationSplitView {
             List(selection: $section) {
-                // Banded rather than flat. Fifteen undifferentiated rows is a list you scan
+                // Banded rather than flat. Fourteen undifferentiated rows is a list you scan
                 // every time; four short groups is one you learn once.
                 ForEach(Section.Band.allCases) { band in
                     SwiftUI.Section(band.rawValue) {
@@ -122,8 +124,7 @@ struct RootView: View {
             case .contradictions: ContradictionsView()
             case .receipts: ReceiptsView()
             case .sources: SourcesView()
-            case .mcp: MCPSourcesView()
-            case .mcpStore: MCPStoreView()
+            case .mcp: MCPView()
             case .maintenance: MaintenanceView()
             case .settings: SettingsView()
             }

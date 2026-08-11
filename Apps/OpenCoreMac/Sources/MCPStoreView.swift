@@ -73,6 +73,10 @@ struct MCPStoreView: View {
     @Environment(AppModel.self) private var model
     @State private var store = MCPStoreModel()
 
+    /// Called once a server has been recorded, so the screen can hand the reader back to the
+    /// source list where its tools are chosen. Adding is the middle of the job, not the end.
+    var onAdded: () -> Void = {}
+
     var body: some View {
         @Bindable var store = store
         HSplitView {
@@ -81,7 +85,6 @@ struct MCPStoreView: View {
             detail
                 .frame(minWidth: 340)
         }
-        .navigationTitle("MCP Store")
         .searchable(text: $store.query, prompt: "Search 9,000+ servers")
         .onSubmit(of: .search) { Task { await store.load() } }
         .task { if store.servers.isEmpty { await store.load() } }
@@ -134,7 +137,7 @@ struct MCPStoreView: View {
     @ViewBuilder
     private var detail: some View {
         if let server = store.selected {
-            MCPStoreDetail(server: server, store: store)
+            MCPStoreDetail(server: server, store: store, onAdded: onAdded)
         } else {
             EmptyState(message: "Pick a server.\n\nNothing is installed and nothing is called until you choose its tools.")
         }
@@ -175,7 +178,7 @@ private struct MCPStoreRow: View {
                         .padding(.horizontal, 5).padding(.vertical, 1)
                         .background(Color.blue.opacity(0.12), in: .capsule)
                         .foregroundStyle(.blue)
-                        .help("Runs on the publisher's servers over streamable HTTP. Add it here, then sign in with OAuth on the MCP tab.")
+                        .help("Runs on the publisher's servers over streamable HTTP. Add it here, then sign in with OAuth under Your sources.")
                 } else if !server.reachability.isUsable {
                     Text("unreachable")
                         .font(.caption2)
@@ -200,6 +203,7 @@ private struct MCPStoreRow: View {
 private struct MCPStoreDetail: View {
     let server: RegistryServer
     @Bindable var store: MCPStoreModel
+    let onAdded: () -> Void
     @Environment(AppModel.self) private var model
     @State private var adding = false
     @State private var outcome: String?
@@ -253,7 +257,7 @@ private struct MCPStoreDetail: View {
                 .padding(8)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(.quaternary.opacity(0.4), in: .rect(cornerRadius: 6))
-            Text("Hosted, over streamable HTTP. It signs in with OAuth rather than an API key, so there is nothing to paste here: add it, then sign in on the MCP tab. The token goes to your keychain and the database stores only the endpoint.")
+            Text("Hosted, over streamable HTTP. It signs in with OAuth rather than an API key, so there is nothing to paste here: add it, then sign in on its row under Your sources. The token goes to your keychain and the database stores only the endpoint.")
                 .font(.caption2).foregroundStyle(.tertiary)
             // The order is the reverse of a subprocess server's, and getting it wrong hands the
             // reader a failure: a hosted server cannot list its tools until it is signed in.
@@ -307,7 +311,7 @@ private struct MCPStoreDetail: View {
                     .disabled(adding || store.localName.isEmpty)
                 if adding { ProgressView().controlSize(.small) }
             }
-            Text("Adding records the server. It calls nothing yet: next you run Discover on the MCP tab and tick the tools you allow.")
+            Text("Adding records the server. It calls nothing yet: next, choose the tools you allow under Your sources.")
                 .font(.caption2).foregroundStyle(.tertiary)
         }
     }
@@ -315,7 +319,11 @@ private struct MCPStoreDetail: View {
     private func add() async {
         adding = true
         defer { adding = false }
-        outcome = await model.addRegistryServer(server, name: store.localName, domain: store.chosenDomain, environment: store.environmentValues)
+        let result = await model.addRegistryServer(server, name: store.localName, domain: store.chosenDomain, environment: store.environmentValues)
+        outcome = result.message
+        // Only on success. Moving the reader to the source list after a refusal would replace
+        // the reason with a list the server is not on.
+        if result.didAdd { onAdded() }
     }
 }
 

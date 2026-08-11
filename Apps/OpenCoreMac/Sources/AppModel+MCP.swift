@@ -1,5 +1,6 @@
 import CoreGraph
 import CoreIngest
+import CoreJSONRPC
 import CoreModel
 import CoreStore
 import Foundation
@@ -30,6 +31,21 @@ final class MCPSourcesModel {
     /// Fixed arguments per tool, keyed tool name then argument name.
     var toolArguments: [String: [String: String]] = [:]
 
+    /// The configured source whose tools are being chosen, or `nil` when the discovery panel
+    /// belongs to the add-a-new-server form.
+    ///
+    /// The two cases end differently: a new server is written with `addMCPSource`, an existing
+    /// one has its allowlist updated in place, and only the second must leave `lastSyncedAt`
+    /// alone.
+    var editing: SourceRow?
+
+    /// Arguments already stored as something other than a JSON string, rendered for display.
+    ///
+    /// The form's fields are text, so anything typed here is a `.string`. An object or number
+    /// set from the CLI's `--tool-arg-json` cannot round-trip through a text field, so it is
+    /// shown read-only rather than offered for editing and silently flattened.
+    var lockedArguments: [String: [String: String]] = [:]
+
     var sources: [SourceRow] = []
     /// The one line of outcome text the CLI would have printed.
     var notice: String?
@@ -50,10 +66,18 @@ final class MCPSourcesModel {
     /// A tool whose required arguments are unfilled cannot be ticked. Calling it anyway
     /// would fail inside the server, and the user would read that as the server being broken
     /// rather than as a form they did not finish.
+    ///
+    /// An argument already set as JSON counts as filled. It is not editable here, but it is
+    /// present, and refusing to tick a tool the CLI has fully configured would be wrong.
     func isReady(_ tool: MCPTool) -> Bool {
         tool.requiredArguments.allSatisfy { key in
-            !argument(key, for: tool.name).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            if lockedArguments[tool.name]?[key] != nil { return true }
+            return !argument(key, for: tool.name).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
+    }
+
+    func lockedArgument(_ key: String, for tool: String) -> String? {
+        lockedArguments[tool]?[key]
     }
 
     func setAllowed(_ isOn: Bool, for tool: MCPTool) {
@@ -83,6 +107,64 @@ final class MCPSourcesModel {
         discoveredCommand = nil
         allowed = []
         toolArguments = [:]
+        lockedArguments = [:]
+        editing = nil
+    }
+
+    /// Point the discovery panel at a source that already exists, pre-filled with what it
+    /// already allows.
+    ///
+    /// Showing an allowlist a person previously ticked is not deriving one. Default-deny is a
+    /// rule about what a *server* offers; opening this sheet with every box clear would read as
+    /// the allowlist having been lost and would invite re-ticking from scratch.
+    func beginEditing(_ row: SourceRow, config: MCPServerConfig) {
+        editing = row
+        allowed = Set(config.allowedTools)
+        for (tool, arguments) in config.toolArguments {
+            for (key, value) in arguments {
+                if case .string(let text) = value {
+                    toolArguments[tool, default: [:]][key] = text
+                } else {
+                    lockedArguments[tool, default: [:]][key] = value.displayJSON
+                }
+            }
+        }
+    }
+
+    /// The allowlist's arguments, ready to store.
+    ///
+    /// Values carried in `lockedArguments` are taken from `existing` untouched. The form writes
+    /// strings, and parsing its text back into JSON to preserve an object would be the guess
+    /// this project deliberately refused when it added `--tool-arg-json` as a second flag
+    /// rather than making `--tool-arg` clever: `{"limit":"10"}` and `{"limit":10}` are both
+    /// real, and no rule can tell which a server wants without reading its schema.
+    func mergedArguments(
+        allowed: [String],
+        existing: [String: [String: JSONValue]]
+    ) -> [String: [String: JSONValue]] {
+        var merged: [String: [String: JSONValue]] = [:]
+        for tool in allowed {
+            var arguments: [String: JSONValue] = [:]
+            let locked = lockedArguments[tool] ?? [:]
+            for (key, value) in existing[tool] ?? [:] where locked[key] != nil {
+                arguments[key] = value
+            }
+            for (key, raw) in toolArguments[tool] ?? [:] {
+                let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty, locked[key] == nil else { continue }
+                arguments[key] = .string(trimmed)
+            }
+            if !arguments.isEmpty { merged[tool] = arguments }
+        }
+        return merged
+    }
+}
+
+private extension JSONValue {
+    /// Compact JSON, for showing a value this form cannot edit.
+    var displayJSON: String {
+        guard let data = try? JSONEncoder().encode(self) else { return "unreadable" }
+        return String(decoding: data, as: UTF8.self)
     }
 }
 
@@ -125,16 +207,69 @@ extension AppModel {
             ? nil
             : "Declared but not set in your environment: \(missing.joined(separator: ", ")). The server may fail to authenticate."
 
-        state = .working("connecting to \(config.command)")
+        // A hosted server has no command, so naming one would print "connecting to " and read
+        // as a truncated message rather than as a server reached over HTTP.
+        let reached = config.url ?? config.command
+        state = .working("connecting to \(reached)")
         do {
             let result = try await MCPClientConnector.discover(config: config)
             mcp.discoveredTools = result.tools.sorted { $0.name < $1.name }
             mcp.discoveredServerName = result.serverName
             mcp.discoveredProtocolVersion = result.version
-            mcp.discoveredCommand = config.command
+            mcp.discoveredCommand = reached
             state = .idle
         } catch {
             state = .failed("mcp discover: \(error)")
+        }
+    }
+
+    /// List what an **already configured** source offers, so its allowlist can be changed
+    /// without the CLI.
+    ///
+    /// This is the step that was stranded. Adding a hosted server records it with no allowlist,
+    /// because a hosted server cannot list its tools until it is signed in, and until now
+    /// nothing in the app could run discovery against a source that already existed. Sync then
+    /// failed with `noAllowedTools` and the only remedy was `opencore mcp-source discover`.
+    func discoverTools(for row: MCPSourcesModel.SourceRow, into mcp: MCPSourcesModel) async {
+        guard let config = row.config else {
+            state = .failed("\(row.name): configuration missing or unreadable. Remove and add it again.")
+            return
+        }
+        // Runs first: it calls `clearDiscovery`, which would otherwise wipe the editing target.
+        await discoverMCP(config: config, into: mcp)
+        guard !mcp.discoveredTools.isEmpty else { return }
+        mcp.beginEditing(row, config: config)
+    }
+
+    /// Write a changed allowlist back to a configured source.
+    ///
+    /// Upserts the row that was read rather than rebuilding a `Source` from the connector, so
+    /// `lastSyncedAt` and the sync cursor survive. Rebuilding would reset both and make the
+    /// next sync re-fetch everything as though the source were new.
+    func saveAllowedTools(for row: MCPSourcesModel.SourceRow, into mcp: MCPSourcesModel) async {
+        guard let store, var config = row.config else { return }
+
+        let allowed = mcp.discoveredTools.map(\.name).filter { mcp.isAllowed($0) }
+        guard !allowed.isEmpty else {
+            state = .failed("Nothing is called by default. Tick at least one tool, or remove the source.")
+            return
+        }
+
+        config.allowedTools = allowed
+        config.toolArguments = mcp.mergedArguments(allowed: allowed, existing: config.toolArguments)
+
+        state = .working("updating mcp:\(row.name)")
+        do {
+            var source = row.source
+            source.config = try Self.encodeMCPConfig(config)
+            try await store.upsert(source)
+
+            mcp.clearDiscovery()
+            mcp.notice = "\(row.name) now allows \(allowed.count) tool(s). Sync it to fetch."
+            await loadMCPSources(into: mcp)
+            state = .idle
+        } catch {
+            state = .failed("mcp tools: \(error)")
         }
     }
 

@@ -3,6 +3,27 @@ import CoreModel
 import CoreStore
 import Foundation
 
+/// Whether a server was recorded, and what to tell the reader either way.
+///
+/// A plain string could not distinguish "added, go and choose its tools" from "refused, here is
+/// why", and the caller has to know: moving the reader on to the next step when nothing was
+/// written would hide the reason it was not.
+enum RegistryAddOutcome: Sendable {
+    case added(String)
+    case refused(String)
+
+    var message: String {
+        switch self {
+        case .added(let text), .refused(let text): text
+        }
+    }
+
+    var didAdd: Bool {
+        if case .added = self { return true }
+        return false
+    }
+}
+
 extension AppModel {
     /// Turn a registry listing into a configured source.
     ///
@@ -19,15 +40,15 @@ extension AppModel {
         name: String,
         domain: Domain,
         environment: [String: String]
-    ) async -> String {
-        guard let store else { return "store is not open" }
+    ) async -> RegistryAddOutcome {
+        guard let store else { return .refused("store is not open") }
 
         // Both ways in. A hosted server needs no command and no environment variables: it
         // authenticates with OAuth after it is added, which is why the return message below
         // sends the reader somewhere different depending on which one this is.
         let reachability = server.reachability
         guard reachability.isUsable else {
-            return reachability.reason.map { "cannot add this server: \($0)" } ?? "cannot add this server"
+            return .refused(reachability.reason.map { "cannot add this server: \($0)" } ?? "cannot add this server")
         }
 
         // Only variables the registry declares, so a stray key in the dictionary cannot smuggle
@@ -68,7 +89,7 @@ extension AppModel {
                     domain: domain
                 )
             case .no:
-                return "cannot add this server"
+                return .refused("cannot add this server")
             }
 
             var source = MCPClientConnector(config: config).source
@@ -81,16 +102,16 @@ extension AppModel {
             // subprocess case and saying so is the difference between the flow working and the
             // reader concluding it is broken.
             if reachability.isHosted {
-                return "Added \(name). Next: sign in on the MCP tab, then Discover its tools and tick the ones you allow."
+                return .added("Added \(name). Next: sign in on its row, then Choose tools and tick the ones you allow.")
             }
 
             let missing = config.missingEnvironment
             if missing.isEmpty {
-                return "Added \(name). Next: Discover its tools on the MCP tab and tick the ones you allow."
+                return .added("Added \(name). Next: Choose tools on its row and tick the ones you allow.")
             }
-            return "Added \(name), but these are still unset: \(missing.joined(separator: ", "))."
+            return .added("Added \(name), but these are still unset: \(missing.joined(separator: ", ")).")
         } catch {
-            return "failed: \(error)"
+            return .refused("failed: \(error)")
         }
     }
 }

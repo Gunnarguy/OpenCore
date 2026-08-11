@@ -3,6 +3,49 @@ import CoreJSONRPC
 import CoreModel
 import SwiftUI
 
+/// One screen for MCP, in two modes.
+///
+/// These used to be two sidebar rows, MCP and MCP Store, and the split was not merely
+/// cosmetic: it is why choosing tools after signing in was only possible from the CLI. Adding
+/// a server lived on one tab, managing one lived on the other, and the discovery panel and
+/// tool picker that the second needed were built into the first and reachable only on the
+/// new-source path. Two doors onto one job, with a working part stranded behind the wrong one.
+struct MCPView: View {
+    /// Which half of the job is on screen. `sources` is the default because the catalogue is
+    /// where you go once and the source list is where you come back to.
+    private enum Mode: String, CaseIterable, Identifiable {
+        case sources = "Your sources"
+        case catalogue = "Catalogue"
+
+        var id: String { rawValue }
+    }
+
+    @State private var mode: Mode = .sources
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Picker("", selection: $mode) {
+                ForEach(Mode.allCases) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(maxWidth: 320)
+            .padding(.vertical, 10)
+
+            Divider()
+
+            switch mode {
+            case .sources: MCPSourcesView()
+            // Adding from the catalogue lands you back on the source list, because adding is
+            // not the end of the job: a new source has no allowlist and fetches nothing until
+            // its tools are chosen, which happens over there.
+            case .catalogue: MCPStoreView { mode = .sources }
+            }
+        }
+        .navigationTitle("MCP")
+    }
+}
+
 /// Reviewing a server's tools and ticking the safe ones is the part the terminal does badly.
 /// The CLI makes you read a printed list, then retype each name behind `--tool`. Here the
 /// list you read and the list you approve are the same object.
@@ -20,20 +63,26 @@ struct MCPSourcesView: View {
     @State private var showingRemoval = false
 
     var body: some View {
+        @Bindable var mcp = mcp
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 header
                 form
                 if let notice = mcp.notice { MCPSourcesNotice(text: notice) }
-                if !mcp.discoveredTools.isEmpty { discovery }
+                // Only the add-a-new-server path renders inline. Editing an existing source
+                // puts the same picker in a sheet, so a list of ticks can never be ambiguous
+                // about which server it belongs to.
+                if !mcp.discoveredTools.isEmpty && mcp.editing == nil { discovery }
                 configured
             }
             .padding(24)
             .frame(maxWidth: 780, alignment: .leading)
             .frame(maxWidth: .infinity)
         }
-        .navigationTitle("MCP")
         .task { await model.loadMCPSources(into: mcp) }
+        .sheet(item: $mcp.editing) { row in
+            MCPToolSheet(row: row, mcp: mcp)
+        }
         .confirmationDialog(
             "Remove this MCP source?",
             isPresented: $showingRemoval,
@@ -75,30 +124,9 @@ struct MCPSourcesView: View {
     }
 
     private var discovery: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            MCPSourcesDiscoveryHeader(
-                serverName: mcp.discoveredServerName,
-                protocolVersion: mcp.discoveredProtocolVersion,
-                command: mcp.discoveredCommand,
-                toolCount: mcp.discoveredTools.count
-            )
-
-            MCPSourcesSafetyNote()
-
-            LazyVStack(alignment: .leading, spacing: 10) {
-                ForEach(mcp.discoveredTools, id: \.name) { tool in
-                    MCPSourcesToolRow(tool: tool, mcp: mcp)
-                }
-            }
-
-            MCPSourcesAddBar(
-                allowedCount: mcp.allowedCount,
-                toolCount: mcp.discoveredTools.count,
-                disabled: !canAdd
-            ) {
-                let config = addConfig()
-                Task { await model.addMCPSource(config: config, into: mcp) }
-            }
+        MCPToolPicker(mcp: mcp, actionLabel: "Add source", disabled: !canAdd) {
+            let config = addConfig()
+            Task { await model.addMCPSource(config: config, into: mcp) }
         }
     }
 
@@ -108,13 +136,15 @@ struct MCPSourcesView: View {
             Text("Configured MCP sources").font(.subheadline.weight(.semibold))
 
             if mcp.sources.isEmpty {
-                Text("None yet. Enter a command above and discover what it offers.")
+                Text("None yet. Enter a command above and discover what it offers, or pick one from the catalogue.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             } else {
                 ForEach(mcp.sources) { row in
                     MCPSourcesConfiguredRow(row: row, disabled: isWorking) {
                         Task { await model.syncMCPSource(row, into: mcp) }
+                    } chooseTools: {
+                        Task { await model.discoverTools(for: row, into: mcp) }
                     } remove: {
                         pendingRemoval = row
                         showingRemoval = true
@@ -242,6 +272,87 @@ private struct MCPSourcesField: View {
 }
 
 // MARK: - Discovery
+
+/// The list a person reads and ticks.
+///
+/// Shared by both paths that reach it, adding a new server and changing an existing one's
+/// allowlist, so the safety note and the risk advisories cannot end up on one and not the
+/// other. That divergence is exactly what the old two-tab split produced.
+private struct MCPToolPicker: View {
+    let mcp: MCPSourcesModel
+    let actionLabel: String
+    let disabled: Bool
+    let action: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            MCPSourcesDiscoveryHeader(
+                serverName: mcp.discoveredServerName,
+                protocolVersion: mcp.discoveredProtocolVersion,
+                command: mcp.discoveredCommand,
+                toolCount: mcp.discoveredTools.count
+            )
+
+            MCPSourcesSafetyNote()
+
+            LazyVStack(alignment: .leading, spacing: 10) {
+                ForEach(mcp.discoveredTools, id: \.name) { tool in
+                    MCPSourcesToolRow(tool: tool, mcp: mcp)
+                }
+            }
+
+            MCPSourcesAddBar(
+                allowedCount: mcp.allowedCount,
+                toolCount: mcp.discoveredTools.count,
+                label: actionLabel,
+                disabled: disabled,
+                action: action
+            )
+        }
+    }
+}
+
+/// Choosing tools for a source that already exists.
+///
+/// A sheet rather than the inline panel, because this list belongs to one named server and the
+/// inline version sits under a form describing a different, unsaved one. Cancelling changes
+/// nothing: the stored allowlist is only rewritten by Save.
+private struct MCPToolSheet: View {
+    let row: MCPSourcesModel.SourceRow
+    let mcp: MCPSourcesModel
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Tools for \(row.source.displayName)").font(.headline)
+                    Text("Ticking a tool is the only thing that lets it be called.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Cancel") {
+                    mcp.clearDiscovery()
+                    dismiss()
+                }
+            }
+            .padding()
+            Divider()
+
+            ScrollView {
+                MCPToolPicker(mcp: mcp, actionLabel: "Save", disabled: mcp.allowedCount == 0) {
+                    Task {
+                        await model.saveAllowedTools(for: row, into: mcp)
+                        dismiss()
+                    }
+                }
+                .padding(20)
+            }
+        }
+        .frame(minWidth: 640, minHeight: 620)
+    }
+}
 
 private struct MCPSourcesDiscoveryHeader: View {
     let serverName: String?
@@ -391,14 +502,39 @@ private struct MCPSourcesArgumentField: View {
     }
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
             Text(key)
                 .font(.caption.monospaced())
                 .foregroundStyle(.tertiary)
                 .frame(width: 110, alignment: .leading)
-            TextField("value", text: valueBinding)
-                .textFieldStyle(.roundedBorder)
+            if let locked = mcp.lockedArgument(key, for: tool.name) {
+                lockedValue(locked)
+            } else {
+                TextField("value", text: valueBinding)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.caption.monospaced())
+            }
+        }
+    }
+
+    /// An argument already stored as an object, array or number.
+    ///
+    /// Shown, not offered for editing. This field writes text, and turning `{"page_size":10}`
+    /// back into JSON would mean guessing whether the user meant the number or the string,
+    /// which is the guess `--tool-arg-json` exists as a separate flag to avoid. Editable here
+    /// would silently flatten a working Notion configuration into nonsense.
+    private func lockedValue(_ json: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(json)
                 .font(.caption.monospaced())
+                .textSelection(.enabled)
+                .lineLimit(3)
+                .padding(6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.quaternary.opacity(0.4), in: .rect(cornerRadius: 5))
+            Text("set as JSON, and kept as-is when you save. Change it with opencore mcp-source add --tool-arg-json.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
         }
     }
 }
@@ -406,8 +542,9 @@ private struct MCPSourcesArgumentField: View {
 private struct MCPSourcesAddBar: View {
     let allowedCount: Int
     let toolCount: Int
+    let label: String
     let disabled: Bool
-    let add: () -> Void
+    let action: () -> Void
 
     private var countColor: Color { allowedCount == 0 ? .orange : .secondary }
 
@@ -417,7 +554,7 @@ private struct MCPSourcesAddBar: View {
                 .font(.caption.monospaced())
                 .foregroundStyle(countColor)
             Spacer()
-            Button("Add source", action: add).disabled(disabled)
+            Button(label, action: action).disabled(disabled)
         }
     }
 }
@@ -428,6 +565,7 @@ private struct MCPSourcesConfiguredRow: View {
     let row: MCPSourcesModel.SourceRow
     let disabled: Bool
     let sync: () -> Void
+    let chooseTools: () -> Void
     let remove: () -> Void
 
     @State private var signIn = MCPSignIn()
@@ -444,7 +582,8 @@ private struct MCPSourcesConfiguredRow: View {
                 }
                 Spacer()
                 if hostedEndpoint != nil { signInButton }
-                Button("Sync", action: sync).disabled(disabled || (hostedEndpoint != nil && !signedIn))
+                toolsButton
+                Button("Sync", action: sync).disabled(disabled || !canCall)
                 Button("Remove", action: remove).disabled(disabled)
             }
 
@@ -466,6 +605,37 @@ private struct MCPSourcesConfiguredRow: View {
     private var hostedEndpoint: URL? {
         guard let raw = row.config?.url else { return nil }
         return URL(string: raw)
+    }
+
+    /// A hosted server cannot be reached at all until it is signed in, so neither listing its
+    /// tools nor syncing is offered before that.
+    private var canCall: Bool { hostedEndpoint == nil || signedIn }
+
+    private var hasAllowlist: Bool { !(row.config?.allowedTools.isEmpty ?? true) }
+
+    /// Prominent when the allowlist is empty, because that source fetches nothing and this
+    /// button is the whole remedy. It is the step that used to require the CLI.
+    ///
+    /// Two branches rather than one button with an erased style: type-erasing a view destroys
+    /// its identity, and this app has already paid for that once in Settings.
+    @ViewBuilder
+    private var toolsButton: some View {
+        if hasAllowlist {
+            Button("Tools", action: chooseTools)
+                .disabled(disabled || !canCall)
+                .help(toolsHelp)
+        } else {
+            Button("Choose tools", action: chooseTools)
+                .buttonStyle(.borderedProminent)
+                .disabled(disabled || !canCall)
+                .help(toolsHelp)
+        }
+    }
+
+    private var toolsHelp: String {
+        canCall
+            ? "Connect and list what this server offers. Listing is not calling; nothing runs until you tick it."
+            : "Sign in first. A hosted server cannot list its tools until it is authenticated."
     }
 
     @ViewBuilder
@@ -552,7 +722,7 @@ private struct MCPSourcesAllowlistLine: View {
 
     var body: some View {
         if tools.isEmpty {
-            Text("no tools allowed, so this source fetches nothing")
+            Text("no tools allowed, so this source fetches nothing. Choose tools to fix it.")
                 .font(.caption)
                 .foregroundStyle(.orange)
         } else {
