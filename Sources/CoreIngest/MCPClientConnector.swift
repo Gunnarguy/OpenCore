@@ -67,12 +67,18 @@ public struct MCPServerConfig: Sendable, Codable, Hashable {
     /// One place decides, so a caller cannot accidentally launch a subprocess for a hosted
     /// server or hand a bearer token to a local one. The OAuth token is read at call time
     /// rather than held, because a refresh between two syncs must not be missed.
-    public func makeClient() throws -> MCPClient {
+    public func makeClient() async throws -> MCPClient {
         if let url {
             guard let endpoint = URL(string: url), endpoint.scheme?.hasPrefix("http") == true else {
                 throw MCPClientConnector.ClientError.badEndpoint(name: name, url: url)
             }
-            return MCPClient(endpoint: endpoint, accessToken: MCPOAuth.stored(server: name)?.accessToken)
+            // Refreshed, not read raw. An access token expires in hours and the refresh token
+            // outlives it by a long way, so reading the stored value directly meant every
+            // hosted source stopped working a few hours after sign-in and stayed broken:
+            // `server requires authorization`, with the refresh already implemented and never
+            // called. `validAccessToken` is a no-op when the token is still good.
+            let token = try await MCPOAuth.validAccessToken(server: name, endpoint: endpoint)
+            return MCPClient(endpoint: endpoint, accessToken: token)
         }
         return try MCPClient(command: command, arguments: arguments, environment: resolvedEnvironment())
     }
@@ -201,7 +207,7 @@ public struct MCPClientConnector: Connector {
 
     /// Connect and list tools without calling any. Backs `mcp-source discover`.
     public static func discover(config: MCPServerConfig) async throws -> (tools: [MCPTool], version: String?, serverName: String?) {
-        let client = try config.makeClient()
+        let client = try await config.makeClient()
         defer { Task { await client.disconnect() } }
 
         try await client.connect()
@@ -217,7 +223,7 @@ public struct MCPClientConnector: Connector {
         let missing = config.missingEnvironment
         guard missing.isEmpty else { throw ClientError.missingEnvironment(missing) }
 
-        let client = try config.makeClient()
+        let client = try await config.makeClient()
         defer { Task { await client.disconnect() } }
 
         try await client.connect()

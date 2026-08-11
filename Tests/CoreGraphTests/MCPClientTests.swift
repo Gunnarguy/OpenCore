@@ -201,3 +201,50 @@ func objectIdentityIsStable() throws {
     #expect(first.id == second.id)
     #expect(first.contentHash != second.contentHash)
 }
+
+// MARK: - OAuth token expiry
+
+// Regression, 2026-08-11. `MCPServerConfig.makeClient()` read `MCPOAuth.stored(server:)`
+// directly and handed the raw access token to the client. `MCPOAuth.validAccessToken(server:
+// endpoint:)`, which checks expiry and refreshes, existed and had **zero callers** anywhere in
+// the project. So every hosted MCP source worked for as long as its first access token lasted
+// and then failed with `server requires authorization`, with the remedy being to sign in by
+// hand again. Measured against the live Notion server: discovery failed before the fix and
+// returned 28 tools after it.
+//
+// Two independent things have to hold, so they are asserted separately below: expiry must be
+// detected at all, and a stored token must not silently renew its own clock when it is read
+// back. The second is the subtler half. `expires_in` is a duration, and if it round-tripped as
+// a duration then every read would recompute expiry as "now plus an hour" and `isExpired`
+// could never become true, which looks exactly like a token that never expires.
+
+@Test("a token near expiry is treated as expired before the server rejects it")
+func tokenExpiryIsDetectedWithSkew() throws {
+    func token(_ json: String) throws -> MCPOAuth.Token {
+        try JSONDecoder().decode(MCPOAuth.Token.self, from: Data(json.utf8))
+    }
+
+    // Refreshing 30 seconds early beats discovering expiry from a 401 mid-sync, which is a
+    // failure the user sees and this one is not.
+    #expect(try token(#"{"access_token":"a","refresh_token":"r","expires_in":30}"#).isExpired)
+    #expect(try !token(#"{"access_token":"a","refresh_token":"r","expires_in":3600}"#).isExpired)
+
+    // A server that publishes no expiry has not told us one. Guessing a lifetime here would be
+    // a plausible default standing in for something unmeasured.
+    #expect(try !token(#"{"access_token":"a","refresh_token":"r"}"#).isExpired)
+}
+
+@Test("a stored token keeps its absolute expiry instead of restarting the clock on every read")
+func storedTokenDoesNotRenewItsOwnExpiry() throws {
+    // As the server sends it: a duration, not an instant.
+    let fromServer = #"{"access_token":"a","refresh_token":"r","expires_in":3600}"#
+    let decoded = try JSONDecoder().decode(MCPOAuth.Token.self, from: Data(fromServer.utf8))
+    #expect(decoded.expiresAt != nil)
+
+    let stored = try JSONEncoder().encode(decoded)
+    let reread = try JSONDecoder().decode(MCPOAuth.Token.self, from: stored)
+
+    // Same instant, not "an hour from whenever this was read".
+    let drift = abs((reread.expiresAt ?? .distantPast).timeIntervalSince(decoded.expiresAt ?? .distantFuture))
+    #expect(drift < 1)
+}
