@@ -18,6 +18,17 @@ public struct StoredConversation: Sendable, Hashable, Identifiable {
     }
 }
 
+/// What a person said about an answer after reading it.
+///
+/// Two values and no middle. A three-point scale invites the safe middle and produces a corpus
+/// of shrugs; the question worth answering is whether the answer was usable, and that has two
+/// sides. `nil` is not the middle, it is *unjudged*, which is a different fact and stays
+/// distinguishable.
+public enum TurnJudgement: String, Sendable, Hashable, Codable, CaseIterable {
+    case good
+    case bad
+}
+
 /// One saved exchange, with its payloads left as JSON.
 ///
 /// `sources` and `verdicts` stay opaque strings here on purpose. They are `CoreReason` types,
@@ -36,6 +47,9 @@ public struct StoredTurn: Sendable, Hashable, Identifiable {
     public var model: String?
     public var error: String?
     public var createdAt: Date
+    /// `nil` means nobody has said. Never inferred from silence.
+    public var judgement: TurnJudgement?
+    public var judgedAt: Date?
 
     public init(
         id: String = UUID().uuidString,
@@ -48,8 +62,12 @@ public struct StoredTurn: Sendable, Hashable, Identifiable {
         receiptID: ReceiptID? = nil,
         model: String? = nil,
         error: String? = nil,
-        createdAt: Date = Date()
+        createdAt: Date = Date(),
+        judgement: TurnJudgement? = nil,
+        judgedAt: Date? = nil
     ) {
+        self.judgement = judgement
+        self.judgedAt = judgedAt
         self.id = id
         self.conversationID = conversationID
         self.ordinal = ordinal
@@ -140,21 +158,58 @@ extension Store {
         try await database.query(
             "SELECT * FROM conversation_turn WHERE conversation_id = ? ORDER BY ordinal ASC",
             [.text(conversationID)]
-        ).map {
-            StoredTurn(
-                id: $0.requireString("id"),
-                conversationID: $0.requireString("conversation_id"),
-                ordinal: $0.requireInt("ordinal"),
-                role: $0.requireString("role"),
-                text: $0.requireString("text"),
-                sourcesJSON: $0.string("sources") ?? "[]",
-                verdictsJSON: $0.string("verdicts") ?? "[]",
-                receiptID: $0.string("receipt_id").map { ReceiptID($0) },
-                model: $0.string("model"),
-                error: $0.string("error"),
-                createdAt: $0.requireDate("created_at")
-            )
+        ).map(StoredTurn.init(row:))
+    }
+
+    /// Record, change, or withdraw a verdict on one answer.
+    ///
+    /// Written separately from `append` rather than folded into it, because a judgement arrives
+    /// long after the turn does and re-appending the whole turn to carry one column would risk
+    /// overwriting text with a stale copy held in a view.
+    ///
+    /// Passing `nil` withdraws the verdict and clears the timestamp with it. Leaving a
+    /// `judged_at` behind on an unjudged row would make the corpus report a labelling that no
+    /// longer exists.
+    public func judge(turn id: String, as judgement: TurnJudgement?, at date: Date = Date()) async throws {
+        try await database.execute(
+            "UPDATE conversation_turn SET judgement = ?, judged_at = ? WHERE id = ?",
+            [SQLValue(text: judgement?.rawValue), judgement == nil ? .null : .real(date.timeIntervalSince1970), .text(id)]
+        )
+    }
+
+    /// Every judged answer, newest first. This is the eval corpus, grown by using the product.
+    ///
+    /// Only `core` turns can carry a verdict, since judging your own question is meaningless,
+    /// but the filter is on `judgement IS NOT NULL` rather than on role: a judgement that
+    /// somehow landed on a question is a bug worth seeing rather than hiding.
+    public func judgedTurns(limit: Int = 500) async throws -> [StoredTurn] {
+        try await database.query(
+            "SELECT * FROM conversation_turn WHERE judgement IS NOT NULL ORDER BY judged_at DESC LIMIT ?",
+            [.integer(Int64(limit))]
+        ).map(StoredTurn.init(row:))
+    }
+
+    /// How many answers have been judged each way, and how many never were.
+    public func judgementCounts() async throws -> (good: Int, bad: Int, unjudged: Int) {
+        let rows = try await database.query(
+            """
+            SELECT judgement AS j, COUNT(*) AS n FROM conversation_turn
+            WHERE role = 'core' GROUP BY judgement
+            """
+        )
+        var good = 0, bad = 0, unjudged = 0
+        for row in rows {
+            let n = row.requireInt("n")
+            switch row.string("j").flatMap(TurnJudgement.init(rawValue:)) {
+            case .good: good = n
+            case .bad: bad = n
+            // Counted, not folded into either side. "Nobody said" is its own fact, and an
+            // accuracy figure computed over judged answers alone must be able to report the
+            // denominator it ignored.
+            case nil: unjudged = n
+            }
         }
+        return (good, bad, unjudged)
     }
 
     /// Remove a thread and its turns.
@@ -174,6 +229,29 @@ extension Store {
     public func renameConversation(id: String, title: String) async throws {
         try await database.execute(
             "UPDATE conversation SET title = ? WHERE id = ?", [.text(title), .text(id)]
+        )
+    }
+}
+
+extension StoredTurn {
+    /// One decoder, used by every reader. Two copies of a column list is how one of them
+    /// quietly stops reading a column added later, and the symptom is a field that is always
+    /// nil down one code path and correct down another.
+    init(row: Row) {
+        self.init(
+            id: row.requireString("id"),
+            conversationID: row.requireString("conversation_id"),
+            ordinal: row.requireInt("ordinal"),
+            role: row.requireString("role"),
+            text: row.requireString("text"),
+            sourcesJSON: row.string("sources") ?? "[]",
+            verdictsJSON: row.string("verdicts") ?? "[]",
+            receiptID: row.string("receipt_id").map { ReceiptID($0) },
+            model: row.string("model"),
+            error: row.string("error"),
+            createdAt: row.requireDate("created_at"),
+            judgement: row.string("judgement").flatMap(TurnJudgement.init(rawValue:)),
+            judgedAt: row.date("judged_at")
         )
     }
 }

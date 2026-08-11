@@ -38,6 +38,10 @@ public struct Turn: Sendable, Identifiable {
     /// True while tokens are still arriving, so the UI can show a caret without guessing.
     public var streaming: Bool
 
+    /// - Parameter id: pass the stored id when rehydrating a saved turn. A fresh one otherwise.
+    ///   This is not cosmetic: anything written back against a turn later, a judgement most of
+    ///   all, addresses the row by this id, so a reopened thread that minted new ids would write
+    ///   verdicts against rows that do not exist.
     public init(
         role: Role,
         text: String = "",
@@ -46,9 +50,10 @@ public struct Turn: Sendable, Identifiable {
         receipt: Receipt? = nil,
         modelName: String? = nil,
         error: String? = nil,
-        streaming: Bool = false
+        streaming: Bool = false,
+        id: UUID? = nil
     ) {
-        self.id = UUID()
+        self.id = id ?? UUID()
         self.role = role
         self.text = text
         self.sources = sources
@@ -142,7 +147,10 @@ public actor Conversation {
                 sources: (try? decoder.decode([GroundingSource].self, from: Data(row.sourcesJSON.utf8))) ?? [],
                 verdicts: (try? decoder.decode([Grounding.Verdict].self, from: Data(row.verdictsJSON.utf8))) ?? [],
                 modelName: row.model,
-                error: row.error
+                error: row.error,
+                // Carried through, not regenerated. A verdict clicked on a reopened thread has
+                // to reach the row it is about.
+                id: UUID(uuidString: row.id)
             )
             turn.streaming = false
             return turn

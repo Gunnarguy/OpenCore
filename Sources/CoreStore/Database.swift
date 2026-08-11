@@ -275,6 +275,7 @@ public actor Database {
         (2, "migration_002"),
         (3, "migration_003"),
         (4, "migration_004"),
+        (5, "migration_005"),
     ]
 
     public static var schemaVersion: Int { migrations.map(\.version).max() ?? 0 }
