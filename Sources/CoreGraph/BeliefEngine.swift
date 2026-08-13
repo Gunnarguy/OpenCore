@@ -42,7 +42,7 @@ public struct BeliefEngine: Sendable {
 
             // Distinct values only. Two identical claims from two sources agree; they are
             // corroboration, and corroboration is not a contradiction.
-            let byValue = Dictionary(grouping: claims) { $0.objectEntity?.value ?? $0.literal ?? "∅" }
+            let byValue = Dictionary(grouping: claims) { value(of: $0) }
             guard byValue.count > 1 else { continue }
 
             let representatives = byValue.values.compactMap { group in
@@ -81,9 +81,26 @@ public struct BeliefEngine: Sendable {
 
         // Uncontested functional claims still deserve a belief row, so `memory log` shows
         // the moment something was first believed and not only the moment it changed.
+        //
+        // **One belief per slot, not one per claim row.** This used to call `recordBelief`
+        // for every current functional claim individually, and a slot routinely holds several
+        // rows that say exactly the same thing: `ClaimID` is derived partly from
+        // `validity.validFrom`, so every GitHub push mints a *new* claim id for the unchanged
+        // `status = active`. Each call then saw a `winner.id` different from the one on the
+        // stored belief, so each wrote a version, and the next sync wrote more. Measured on
+        // the real store before this fix: 4 slots holding 5 versions each, 16 of the 17
+        // recorded belief changes reading `changed from 'active' to 'active'`.
+        //
+        // Picking the ranked best also makes the winner deterministic. Previously it was
+        // whichever row `allClaims` happened to return last, which is row order, not evidence.
+        var bestPerKey: [String: CoreClaim] = [:]
         for claim in try await store.allClaims(currentOnly: true, limit: 5_000) {
             guard Predicate.functional.contains(claim.predicate) else { continue }
-            if try await recordBelief(key: claim.claimKey, winner: claim, alternatives: 0) {
+            if let held = bestPerKey[claim.claimKey], rank(held) >= rank(claim) { continue }
+            bestPerKey[claim.claimKey] = claim
+        }
+        for (key, winner) in bestPerKey {
+            if try await recordBelief(key: key, winner: winner, alternatives: 0) {
                 outcome.beliefsWritten += 1
             }
         }
@@ -99,6 +116,15 @@ public struct BeliefEngine: Sendable {
     ///
     /// Authority is compared, never multiplied. A `directStatement` beats an
     /// `authoredArtifact` because the user said so, not because 5 > 4 arithmetically.
+    /// What a claim asserts, for grouping, comparison and display.
+    ///
+    /// One helper because there were two orderings of the same coalesce in this file, and a
+    /// value compared one way and printed the other is the kind of disagreement that only
+    /// shows up in a screenshot.
+    private func value(of claim: CoreClaim) -> String {
+        claim.objectEntity?.value ?? claim.literal ?? "∅"
+    }
+
     private func rank(_ claim: CoreClaim) -> (Int, TimeInterval, Double) {
         (
             claim.authority.rawValue,
@@ -146,15 +172,32 @@ public struct BeliefEngine: Sendable {
     // MARK: - Belief versioning
 
     /// Returns true if a new belief version was written.
+    ///
+    /// **A version records a change of mind.** Re-observing the same fact is not one. The
+    /// guard here used to compare only `claimID`, which asks "did a different row win" rather
+    /// than "does the winner say something different", and those are not the same question
+    /// when a slot holds several rows asserting the same value. See the grouping in
+    /// `reconcile` for why it does.
     private func recordBelief(key: String, winner: CoreClaim, alternatives: Int) async throws -> Bool {
         let current = try await store.currentBelief(key: key)
         if let current, current.claimID == winner.id { return false }
 
+        var previousClaim: CoreClaim?
+        if let current { previousClaim = try await store.claim(current.claimID) }
+
+        // Same value at the same authority is corroboration, not supersession. Authority is
+        // part of the test on purpose: a user correction that re-asserts the value already
+        // held *is* a change worth versioning, because what changed is how well the claim is
+        // known, and that is the whole point of an ordinal authority tier.
+        if let previousClaim,
+           value(of: previousClaim) == value(of: winner),
+           previousClaim.authority == winner.authority {
+            return false
+        }
+
         let reason: String
-        if let current, let previousClaim = try await store.claim(current.claimID) {
-            let was = previousClaim.literal ?? previousClaim.objectEntity?.value ?? "∅"
-            let now = winner.literal ?? winner.objectEntity?.value ?? "∅"
-            reason = "changed from '\(was)' to '\(now)'"
+        if let previousClaim {
+            reason = "changed from '\(value(of: previousClaim))' to '\(value(of: winner))'"
         } else if alternatives > 0 {
             reason = "selected over \(alternatives) competing claim\(alternatives == 1 ? "" : "s")"
         } else {

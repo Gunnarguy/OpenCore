@@ -232,3 +232,74 @@ func ftsQueryIsEscaped() throws {
     // Stopwords are dropped, so the expression is about the terms that carry meaning.
     #expect(!expression.contains("\"why\""))
 }
+
+// MARK: - Phantom belief versions
+
+// Regression, 2026-08-12. Found by the user opening the Beliefs screen and asking what it
+// meant. It was full of entries reading, verbatim:
+//
+//     UPDATED v4 2026-08-09
+//     OpenIntelligence status -> active
+//     changed from 'active' to 'active'
+//
+// Measured on the real store: 60 belief rows across 43 slots, of which 17 claimed to record a
+// change of mind and **16 recorded no change at all**. The single genuine change (a project
+// going dormant -> active) was buried among sixteen that said nothing.
+//
+// Two independent causes, so the two tests below assert them separately. A single test can
+// pass because one was fixed while the other quietly regresses.
+//
+// 1. `ClaimID` is derived partly from `validity.validFrom`, so every GitHub push mints a new
+//    claim id for an unchanged `status = active`. `reconcile`'s second loop then called
+//    `recordBelief` once per claim ROW rather than once per slot, so each same-value row wrote
+//    its own version and the next sync wrote more.
+// 2. The guard in `recordBelief` compared `claimID`, which asks "did a different row win",
+//    not "does the winner say something different". With several rows saying the same thing,
+//    the first question is useless.
+
+@Test("re-observing the same value does not record a change of mind")
+func corroborationIsNotSupersession() async throws {
+    let store = try await temporaryStore()
+    try await store.upsert([project()])
+
+    // The real shape: same subject, same predicate, same value, different world time. These
+    // are two distinct claim rows with two distinct ids that assert exactly one fact.
+    try await store.save([statusClaim("active", from: march), statusClaim("active", from: june)])
+
+    let engine = BeliefEngine(store: store, now: now)
+    try await engine.reconcile()
+    try await engine.reconcile()
+
+    let key = try #require(try await store.allClaims(currentOnly: true, limit: 100).first).claimKey
+    let history = try await store.beliefHistory(key: key)
+
+    // One slot, one belief, however many times it is re-observed or reconciled.
+    #expect(history.count == 1)
+    #expect(history.first?.version == 1)
+
+    // And it must not describe itself as a change. "first evidence for this slot" is the
+    // honest reason; "changed from 'active' to 'active'" is the bug.
+    #expect(history.first?.reason.contains("changed from") == false)
+}
+
+@Test("a re-assertion at higher authority is a change, even at the same value")
+func authorityChangeStillVersions() async throws {
+    let store = try await temporaryStore()
+    try await store.upsert([project()])
+    try await store.save([statusClaim("active", from: march)])
+
+    let engine = BeliefEngine(store: store, now: now)
+    try await engine.reconcile()
+
+    // Same value, higher tier. Skipping this would be the opposite failure: an authority tier
+    // is ordinal precisely so that *how well a thing is known* can change without the thing
+    // itself changing, and a belief that ignored that would lose the correction.
+    try await store.save([statusClaim("active", from: june, authority: .directStatement)])
+    try await engine.reconcile()
+
+    let key = try #require(try await store.allClaims(currentOnly: true, limit: 100).first).claimKey
+    let history = try await store.beliefHistory(key: key)
+
+    #expect(history.count == 2)
+    #expect(history.last?.authority == .directStatement)
+}
