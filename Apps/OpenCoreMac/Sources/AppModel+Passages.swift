@@ -98,9 +98,17 @@ extension AppModel {
                 query: query,
                 queryClass: classification.queryClass,
                 policy: policy,
-                // Eight, matching `opencore passages`. Chosen to fit a reading column, not
-                // measured against any recall target.
-                limit: 8
+                // Both were hardcoded here while Settings offered controls for them. "Results"
+                // and "Expand hits into neighbouring passages" saved to disk, survived a
+                // relaunch, and changed nothing: `search` has taken both parameters all along
+                // and this call site passed neither. A setting that persists a preference it
+                // never applies is worse than no setting, because the screen keeps confirming
+                // it back to you.
+                //
+                // The default remains 8, matching `opencore passages`, chosen to fit a reading
+                // column rather than measured against any recall target.
+                limit: settings.passageLimit,
+                expandContext: settings.expandContext
             )
             if let providerFailure {
                 // Folded into the engine's own channel so the view has one place to render

@@ -284,12 +284,13 @@ private struct RetrievalTab: View {
                         Text(settings.signalScale.formatted(.number.precision(.fractionLength(3)))).monospacedDigit().frame(width: 44, alignment: .trailing)
                     }
                 }
-                Tuned(label: "Results", help: "Passages returned by a search.", isDefault: settings.passageLimit == 8, defaultText: "8") {
+                Tuned(label: "Results", help: "Passages the Passages screen returns. Chat sets its own, because how many passages a model is handed changes the answer and is not the same question as how many you want to read.", isDefault: settings.passageLimit == 8, defaultText: "8") {
                     Stepper(value: $settings.passageLimit, in: 1...50) {
                         Text("\(settings.passageLimit)").monospacedDigit().frame(width: 36, alignment: .trailing)
                     }
                 }
                 Toggle("Expand hits into neighbouring passages", isOn: $settings.expandContext)
+                    .help("Applies to the Passages screen. Chat always expands.")
             } header: {
                 Text("Fusion and ranking")
             } footer: {
