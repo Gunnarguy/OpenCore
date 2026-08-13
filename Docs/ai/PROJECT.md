@@ -27,12 +27,27 @@ and the reverse.
 
 ## Out of scope — decided, not pending
 
-- A chatbot UI. The interesting surface is the receipt, not the conversation.
-- Autonomous agents that act on the user's data.
 - Cloud sync. The store is one SQLite file.
 - Multi-user, teams, sharing.
 
 These are recorded as `Dropped` in the Notion roadmap so they stop being reconsidered.
+
+**A `Dropped` row is a claim about the product, and like every other claim here it can be wrong
+and must be checked against the code.** Two of the four entries on this list were removed from
+it on 2026-08-12 for opposite reasons, and both had been sitting here contradicting reality:
+
+- **A chatbot UI** was dropped and then built anyway. Chat is the app's first sidebar item, with
+  saved resumable threads and per-answer judgements, and the separate Ask tab was retired into
+  it. The drop was reversed rather than the code rolled back, because the row's stated objection
+  was *being undifferentiated* and what shipped is not that: typed citations, per-sentence
+  grounding against the specific source cited, a receipt on every answer, and a refusal to
+  answer from the model's own memory. The receipt is still the interesting surface. It now lives
+  inside the conversation rather than instead of it.
+- **Autonomous agents that act on the user's data** was reopened deliberately, at the author's
+  request, and is `To Do` for v0.6 with its prerequisites and design questions stated on the
+  row. It is genuinely not built: nothing in this codebase sends, schedules or executes
+  anything. Note what it will cost when it is: `Receipt.objectsTransmitted` is `0` today, and
+  acting means transmitting.
 
 ## Major constraints
 

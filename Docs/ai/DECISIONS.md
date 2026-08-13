@@ -759,3 +759,48 @@ question exactly as it does within one sitting.
 you just say it uses" retrieves nothing useful and the answer is "the sources retrieved do not
 answer that". The model has the context and is refusing to answer from memory, which is the
 thesis working. Query rewriting for follow-ups is the missing piece and is tracked separately.
+
+---
+
+## 2026-08-12 — A `Dropped` row is a claim about the product, and it can be wrong
+
+**Decision.** "A chatbot UI" moves from `Dropped` to `Completed`. "Autonomous agents that act on
+the user's data" moves from `Dropped` to `To Do`, v0.6. `Docs/ai/PROJECT.md`'s out-of-scope list
+is cut from four entries to two.
+
+**What actually happened.** The board said a chatbot UI was dropped "so it stops being
+reconsidered". It was not reconsidered. It was silently contradicted: Chat is the app's first
+sidebar item, in a band called Ask, with saved resumable threads and per-answer judgements, and
+on 2026-08-11 the separate Ask tab was retired *into* it. Several sessions of work touched that
+exact screen without anyone opening the dropped rows.
+
+**Alternatives.** Roll the code back to match the decision. Or leave both and record the
+conflict without resolving it.
+
+**Rationale.** The row's stated objection was *being undifferentiated*: "every competitor in this
+space is a chat window; being one is how the project stops being differentiated." What shipped
+is not that. Citations are typed rather than parsed out of prose, so an uncited sentence is
+unrepresentable. Each sentence is checked against the source it actually cited rather than a
+pool of all six. Every answer carries a receipt with measured counters. And it refuses to answer
+from the model's own memory: with a thread resumed and the transcript restored, "what language
+did you just say it uses" returns "the sources retrieved do not answer that" while the model
+plainly has the context.
+
+So the decision was made against a thing that did not get built. The receipt is still the
+interesting surface; it now lives inside the conversation instead of instead of it.
+
+**Consequences.** Agency is reopened as a real direction rather than arriving by accident, with
+its prerequisites on the row: the eval harness reporting a number, and a decision about
+`Receipt.objectsTransmitted`, which is `0` today and cannot stay `0` once anything is sent. The
+shape that keeps it on-thesis is the one already accepted for model-proposed claims: a model may
+**propose** an action, code **executes** it, and the proposal enters at the bottom authority
+tier. The MCP client's default-deny allowlist is the consent model to reuse rather than reinvent.
+An action requested through the MCP *server* must never execute, because an MCP caller is not
+the user.
+
+**The process failure is worth more than either decision.** Both `Dropped` rows and this
+document were describing a product that no longer existed, and nothing surfaced it. It was found
+because the author asked whether OpenCore was becoming a personal assistant, and answering
+honestly required reading the dropped rows rather than the open ones. The repository's own rule
+already covers this and was not being applied to the roadmap: when a document and the code
+disagree, the code is right and the document is a bug to fix.
