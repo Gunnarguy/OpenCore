@@ -62,6 +62,24 @@ extension Store {
         "chunk_vector", "chunk", "embedding_run",
     ]
 
+    /// Every table the schema actually has, excluding SQLite's own FTS shadow tables.
+    ///
+    /// Exists so a test can ask the database what it contains rather than compare two
+    /// hand-written lists. A list of tables maintained by hand is exactly what let the
+    /// exporter fall behind migrations 4 and 5 and start omitting saved conversations while
+    /// its README said nothing was omitted.
+    public func tableNames() async throws -> [String] {
+        try await database.query(
+            """
+            SELECT name FROM sqlite_master
+            WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+              AND name NOT LIKE '%_fts' AND name NOT LIKE '%_fts_%'
+            ORDER BY name
+            """,
+            []
+        ).compactMap { $0.string("name") }
+    }
+
     /// Drop every derived layer. Objects, sources, entities and receipts survive.
     ///
     /// Entities are kept deliberately: the CLI's original list did not clear them either, so a

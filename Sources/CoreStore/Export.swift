@@ -42,10 +42,27 @@ public struct Exporter: Sendable {
     ///
     /// `schema_migration` is deliberately included: without knowing which migrations an export
     /// was taken under, a future reader cannot tell what the columns mean.
+    /// Every table, because this is the archival format and the README promises exactly that.
+    ///
+    /// **`conversation` and `conversation_turn` were missing until 2026-08-12**, and of
+    /// everything in the database they are the worst two to lose. Every other table here is
+    /// either an object or reconstructible from one: drop `claim`, `belief`, `chunk` and the
+    /// rest and `opencore rebuild` puts them back. A conversation cannot be rebuilt from
+    /// anything. It is primary data, which is precisely why it was deliberately left out of
+    /// `derivedTables`, and it carries the turn judgements that the eval corpus is made of.
+    ///
+    /// So an export followed by a wipe silently destroyed every saved chat, every thumbs
+    /// up/down, and the receipt link that made a chat answer traceable, while the README in
+    /// the same directory said "Nothing else is omitted".
+    ///
+    /// The list is checked against the live schema by a test rather than by review, because
+    /// this fell behind two migrations without anyone noticing and would have fallen behind
+    /// the next one too.
     static let tables = [
         "source", "object", "chunk", "evidence", "entity", "entity_alias", "edge",
         "claim", "claim_evidence", "contradiction", "belief", "correction", "event",
         "receipt", "receipt_evidence", "receipt_claim", "embedding_run", "schema_migration",
+        "conversation", "conversation_turn",
     ]
 
     public func export(to directory: URL, format: Format, log: @Sendable (String) -> Void = { _ in }) async throws -> Outcome {
@@ -97,7 +114,8 @@ public struct Exporter: Sendable {
         are recomputable with `opencore embed`; including them would add hundreds of megabytes
         of base64 floats that describe nothing the text does not already say.
 
-        Nothing else is omitted. There are no credentials in this export because there are none
+        Nothing else is omitted, and that is checked by a test against the live schema rather
+        than asserted here. There are no credentials in this export because there are none
         in the database: `source.config` records the *names* of environment variables, never
         their values.
 
