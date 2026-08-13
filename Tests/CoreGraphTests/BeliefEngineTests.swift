@@ -95,11 +95,25 @@ func ambiguityStaysUnresolved() async throws {
     #expect(outcome.unresolved == 1)
     #expect(outcome.resolved == 0)
 
+    let key = try #require(try await store.allClaims(currentOnly: true, limit: 10).first).claimKey
+
     let contradiction = try await store.contradictions(unresolvedOnly: true).first
     #expect(contradiction?.resolution == .unresolved)
     #expect(contradiction?.winner == nil)
     // Neither claim is retracted: both remain visible.
     #expect(try await store.claimCount() == 2)
+
+    // Regression, 2026-08-12. Everything above passed while the engine wrote a belief anyway.
+    // `recordBelief` ran unconditionally after adjudication, so the Contradictions screen said
+    // "equal authority and no temporal ordering; both retained" and the Beliefs screen showed
+    // one of the two as a settled value labelled "selected over 1 competing claim". This test
+    // could not see it, because it only ever asked about contradictions and claim counts.
+    //
+    // An absent belief is the honest answer here, and it is the project's whole argument: the
+    // engine says out loud that a coin flip is not a conclusion, so it must not then record
+    // the coin flip.
+    #expect(try await store.currentBelief(key: key) == nil)
+    #expect(outcome.beliefsWritten == 0)
 }
 
 @Test("a user correction outranks an inference and records why the old belief was reachable")

@@ -32,6 +32,9 @@ public struct BeliefEngine: Sendable {
     public func reconcile() async throws -> Outcome {
         var outcome = Outcome()
         var contradictions: [Contradiction] = []
+        /// Slots where adjudication declined to pick. Collected because **both** loops below
+        /// would otherwise write a belief for them, and the second one is the easier to miss.
+        var undecided: Set<String> = []
 
         for key in try await store.contestedClaimKeys() {
             let predicate = String(key.split(separator: "|").last ?? "")
@@ -65,6 +68,7 @@ public struct BeliefEngine: Sendable {
 
                 if verdict.resolution == .unresolved {
                     outcome.unresolved += 1
+                    undecided.insert(key)
                 } else {
                     outcome.resolved += 1
                     // Retract, never delete. `valid_to` closes the world-time interval so
@@ -73,6 +77,19 @@ public struct BeliefEngine: Sendable {
                     outcome.claimsRetracted += 1
                 }
             }
+
+            // Nothing is written when the engine declined to choose. This used to run
+            // unconditionally, so a slot could carry a contradiction reading "equal authority
+            // and no temporal ordering; both retained" while the Beliefs screen showed one of
+            // the two as a settled value labelled "selected over 1 competing claim". Saying
+            // out loud that a coin flip is not a conclusion, and then recording the coin flip,
+            // is the one failure this project cannot afford: the whole argument is that an
+            // absent belief is an honest answer.
+            //
+            // The existing belief, if any, is left alone rather than retracted. It was a real
+            // decision when it was made, and deleting it to record a change of mind is exactly
+            // what the append-only rule forbids.
+            if undecided.contains(key) { continue }
 
             if try await recordBelief(key: key, winner: winner, alternatives: representatives.count - 1) {
                 outcome.beliefsWritten += 1
@@ -100,6 +117,12 @@ public struct BeliefEngine: Sendable {
             bestPerKey[claim.claimKey] = claim
         }
         for (key, winner) in bestPerKey {
+            // The same exclusion, and the reason it is a separate line rather than one guard:
+            // an undecided slot's claims are all still current, precisely because none was
+            // retracted, so this loop sees them as an ordinary uncontested slot and would
+            // cheerfully pick the top-ranked one. Fixing only the loop above would have moved
+            // the bug rather than removed it.
+            if undecided.contains(key) { continue }
             if try await recordBelief(key: key, winner: winner, alternatives: 0) {
                 outcome.beliefsWritten += 1
             }
