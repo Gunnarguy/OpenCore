@@ -103,7 +103,7 @@ private struct PassagesUnavailablePanel: View {
     /// Nothing is embedded yet, which the user can fix from here. A provider that failed to
     /// construct at all cannot be fixed by embedding, so that case gets the reason only.
     private var canBuild: Bool {
-        model.chunkCount > 0 && (signals["semantic"] != nil || signals["semantic-coverage"] != nil)
+        model.chunkCount > 0 && (signals[PassageOutcome.Signal.semantic] != nil || signals[PassageOutcome.Signal.semanticCoverage] != nil)
     }
 
     private var isWorking: Bool {

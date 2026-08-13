@@ -25,6 +25,32 @@ public struct PassageOutcome: Sendable {
     public var droppedByDiversity: Int
     public var unavailableSignals: [String: String]
     public var stageTimings: [String: Int]
+
+    /// Keys used for the dense leg's unavailability. Named here because they are written in
+    /// one module and read in another, and a literal on each side is a mismatch waiting to
+    /// happen. It happened: the engine wrote `semantic-disabled` and the app tested for
+    /// `semantic`, so a leg that had been switched off read as a leg that ran and found
+    /// nothing.
+    public enum Signal {
+        /// No provider, no vectors, or no query embedding. The leg could not run.
+        public static let semantic = "semantic"
+        /// Weighted to zero by tuning, so it was deliberately not run.
+        public static let semanticDisabled = "semantic-disabled"
+        /// It ran, but part of the corpus has no vectors yet. Still a measurement.
+        public static let semanticCoverage = "semantic-coverage"
+    }
+
+    /// True when the dense leg actually ran, so `denseCandidates` is a measurement rather
+    /// than an absence.
+    ///
+    /// **Zero because a leg never ran is not a measurement of zero**, which is the rule this
+    /// whole `unavailableSignals` channel exists to enforce, and the display was breaking it.
+    /// Partial coverage does not count as "did not run": the leg ran and saw part of the
+    /// corpus, which is a weaker measurement rather than no measurement, and it is reported
+    /// separately as exactly that.
+    public var denseLegRan: Bool {
+        unavailableSignals[Signal.semantic] == nil && unavailableSignals[Signal.semanticDisabled] == nil
+    }
 }
 
 /// The OpenIntelligence retrieval shape, over passages:
@@ -220,11 +246,11 @@ public struct PassageSearch: Sendable {
         // `rankings(...)` deliberately does *not* get this guard. The eval harness measures
         // the dense leg through it, and that measurement is the whole reason this weight is 0.
         if tuning.denseWeight == 0 {
-            unavailable["semantic-disabled"] = "dense leg weighted to 0, so it was not run; measured 2026-08-09 as net-harmful on this corpus (fused nDCG 0.073 at weight 1.0 against 0.422 at 0)"
+            unavailable[PassageOutcome.Signal.semanticDisabled] = "dense leg weighted to 0, so it was not run; measured 2026-08-09 as net-harmful on this corpus (fused nDCG 0.073 at weight 1.0 against 0.422 at 0)"
         } else if let embedder {
             let embedded = try await store.embeddedChunkCount(model: embedder.modelIdentifier)
             if embedded == 0 {
-                unavailable["semantic"] = "provider '\(embedder.modelIdentifier)' is configured but no chunk has a vector yet; run `opencore embed`"
+                unavailable[PassageOutcome.Signal.semantic] = "provider '\(embedder.modelIdentifier)' is configured but no chunk has a vector yet; run `opencore embed`"
             } else {
                 // Separated from `leg.dense` because it is a different cost with a different
                 // cause: this is the embedding model, that is the vector scan. Folded
@@ -235,7 +261,7 @@ public struct PassageSearch: Sendable {
                     return vector
                 }
                 if vector.isEmpty {
-                    unavailable["semantic"] = "query produced no embedding"
+                    unavailable[PassageOutcome.Signal.semantic] = "query produced no embedding"
                 } else {
                     dense = try await Telemetry.span("leg.dense", .search, attributes: ["model": embedder.modelIdentifier]) { leg in
                         leg.attribute("weight", String(tuning.denseWeight))
@@ -249,12 +275,12 @@ public struct PassageSearch: Sendable {
                         // performance one: the dense leg silently cannot see the
                         // un-embedded remainder. Say so rather than returning a
                         // confident answer over a fraction of the corpus.
-                        unavailable["semantic-coverage"] = "\(embedded) of \(chunksSearched) chunks embedded; the dense leg cannot see the rest"
+                        unavailable[PassageOutcome.Signal.semanticCoverage] = "\(embedded) of \(chunksSearched) chunks embedded; the dense leg cannot see the rest"
                     }
                 }
             }
         } else {
-            unavailable["semantic"] = "no embedding provider configured; lexical carries this query alone"
+            unavailable[PassageOutcome.Signal.semantic] = "no embedding provider configured; lexical carries this query alone"
         }
         timings["dense"] = elapsed(since: denseStart)
 

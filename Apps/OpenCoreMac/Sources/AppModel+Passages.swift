@@ -122,7 +122,7 @@ extension AppModel {
                 queryClass: classification.queryClass.rawValue,
                 outcome: outcome,
                 rows: Self.passageRows(from: outcome),
-                denseLegRan: providerFailure == nil && outcome.unavailableSignals["semantic"] == nil,
+                denseLegRan: outcome.denseLegRan,
                 stages: Self.passageStages(from: outcome.stageTimings)
             )
         } catch {

@@ -48,3 +48,49 @@ func measuredDefaultDisablesTheDenseLeg() {
     #expect(RetrievalTuning.default.denseWeight == 0.0)
     #expect(RetrievalTuning.default.lexicalWeight == 1.0)
 }
+
+// MARK: - Reporting a leg that did not run
+
+// Regression, 2026-08-12. `PassageSearch` wrote `unavailableSignals["semantic-disabled"]` when
+// the dense leg was weighted to zero, and the app tested `unavailableSignals["semantic"]`. The
+// two literals never matched, so a leg that had been deliberately switched off was reported as
+// a leg that ran and found nothing, and the Passages screen printed `dense candidates: 0` as
+// though that were a measurement.
+//
+// The comment directly above the display already said "Zero dense candidates because the leg
+// never ran is not a measurement of zero." It was being displayed as one.
+//
+// The keys are constants on the engine's own type now, so the writer and the reader cannot
+// drift, and the question "did it run" is answered in one place instead of by string matching
+// at each call site.
+
+@Test("a leg disabled by tuning did not run, so its zero is not a measurement")
+func disabledDenseLegIsNotAMeasurement() {
+    var outcome = emptyOutcome()
+    outcome.unavailableSignals[PassageOutcome.Signal.semanticDisabled] = "weighted to 0"
+    #expect(!outcome.denseLegRan)
+
+    var missing = emptyOutcome()
+    missing.unavailableSignals[PassageOutcome.Signal.semantic] = "no provider"
+    #expect(!missing.denseLegRan)
+}
+
+@Test("partial vector coverage still counts as having run")
+func partialCoverageStillRan() {
+    // The distinction that makes this worth a separate test: the leg saw part of the corpus.
+    // That is a weaker measurement, not an absent one, and collapsing the two would throw away
+    // the only signal that says "embed the rest".
+    var outcome = emptyOutcome()
+    outcome.unavailableSignals[PassageOutcome.Signal.semanticCoverage] = "12 of 900 chunks embedded"
+    #expect(outcome.denseLegRan)
+
+    #expect(emptyOutcome().denseLegRan)
+}
+
+private func emptyOutcome() -> PassageOutcome {
+    PassageOutcome(
+        hits: [], chunksSearched: 0, lexicalCandidates: 0, denseCandidates: 0,
+        afterFusion: 0, blockedByDomain: 0, droppedByDiversity: 0,
+        unavailableSignals: [:], stageTimings: [:]
+    )
+}
