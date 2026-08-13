@@ -160,16 +160,21 @@ extension AppModel {
             // lexical-only without raising anything.
             state = .working("dropping derived layers")
             try await store.dropDerivedLayers()
-            // Passages have just been rebuilt with the current parameters.
-            settings.chunkingDirty = false
 
             state = .working("loading objects")
             let all = try await store.allObjects()
 
             state = .working("re-deriving from \(all.count) objects")
-            let outcome = try await IngestPipeline(store: store).run(objects: all, storeObjects: false) { [weak self] message in
+            let outcome = try await pipeline(for: store).run(objects: all, storeObjects: false) { [weak self] message in
                 Task { @MainActor in self?.state = .working(message) }
             }
+
+            // Cleared here, not before the work. This used to sit above the rebuild, so the
+            // warning that says "your store no longer matches your chunking settings" was
+            // dismissed by *starting* a re-derive rather than by finishing one: a rebuild that
+            // threw left the store stale and the warning gone. It is only true once the
+            // passages actually exist at the current parameters.
+            settings.chunkingDirty = false
 
             // Rebuild the dense leg before reporting success. `buildEmbeddings` is resumable
             // and skips chunks that already have a vector, so this is the full cost only

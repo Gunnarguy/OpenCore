@@ -89,6 +89,20 @@ final class AppModel {
         }
     }
 
+    /// The one way this app derives anything from objects.
+    ///
+    /// `IngestPipeline(store:)` defaults its chunker, which reads as a harmless convenience and
+    /// is not: two of the app's three call sites omitted it and silently re-chunked at the
+    /// built-in 1200/150 while Settings displayed the size the user had chosen. Re-derive and
+    /// MCP sync both did it, so one store could end up holding passages built to two different
+    /// geometries, which nothing downstream can detect and no warning would mention.
+    ///
+    /// Routing every construction through here means the chunker cannot be forgotten at a call
+    /// site, only changed here on purpose.
+    func pipeline(for store: Store) -> IngestPipeline {
+        IngestPipeline(store: store, chunker: settings.chunker)
+    }
+
     func refresh() async {
         guard let store else { return }
         do {
@@ -169,7 +183,7 @@ final class AppModel {
             }
 
             state = .working("deriving from \(batch.objects.count) objects")
-            _ = try await IngestPipeline(store: store, chunker: settings.chunker).run(objects: batch.objects)
+            _ = try await pipeline(for: store).run(objects: batch.objects)
             try await store.markSynced(connector.source.id, at: Date(), cursor: batch.cursor)
 
             await refresh()

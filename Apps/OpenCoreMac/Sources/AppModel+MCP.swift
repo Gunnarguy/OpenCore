@@ -328,7 +328,7 @@ extension AppModel {
             }
 
             state = .working("deriving from \(batch.objects.count) objects")
-            let outcome = try await IngestPipeline(store: store).run(objects: batch.objects)
+            let outcome = try await pipeline(for: store).run(objects: batch.objects)
             try await store.markSynced(row.id, at: Date(), cursor: batch.cursor)
 
             mcp.notice = "\(row.name): \(outcome.ingest.inserted) new, \(outcome.ingest.updated) changed, \(outcome.ingest.unchanged) unchanged."
