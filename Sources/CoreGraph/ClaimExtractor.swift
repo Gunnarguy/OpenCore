@@ -133,6 +133,12 @@ public struct ClaimExtractor: Sendable {
 
         let statusClaim = CoreClaim(
             subject: subject,
+            // Keeps its `validFrom`, unlike the commit claims. `status` IS in
+            // `Predicate.functional`, so supersession reads its world time to decide which of
+            // two statuses is later. Stripping it would collapse the ordering onto
+            // `observedAt`, which is the sync time, and two statuses learned in one sync would
+            // tie and be reported as an unresolvable contradiction. That would break the one
+            // real contradiction in the store to tidy up a duplicate-row count.
             predicate: Predicate.status,
             literal: statusValue,
             confidence: statusConfidence,
@@ -246,7 +252,21 @@ public struct ClaimExtractor: Sendable {
                 confidence: 0.99,
                 authority: object.authority,
                 derivation: .observed,
-                validity: Validity(validFrom: object.authoredAt, observedAt: now),
+                // **No `validFrom`, deliberately.** `ClaimID` is derived partly from it, so
+                // dating this claim with the commit's timestamp minted a fresh claim row per
+                // commit for one unchanging fact. Measured on the real store: 647 rows
+                // covering 33 actual facts, which filled the Claims screen's window before
+                // anything else could be reached.
+                //
+                // "X contributed to Y" is not true *from* a date, it is true and each commit
+                // is evidence for it. The dates are not lost: every commit is linked below as
+                // its own evidence row, which is finer-grained than one date on the claim and
+                // is where a connector's per-instance detail belongs.
+                //
+                // Safe here specifically because `contributed_to` is not in
+                // `Predicate.functional`, so nothing adjudicates it and no ranking reads its
+                // world time. See `extractRepositoryClaims` for the case where it is not safe.
+                validity: Validity(observedAt: now),
                 domain: object.domain
             )
             claims.append(claim)
@@ -265,7 +285,9 @@ public struct ClaimExtractor: Sendable {
                 confidence: 0.9,
                 authority: object.authority,
                 derivation: .observed,
-                validity: Validity(validFrom: object.authoredAt, observedAt: now),
+                // Undated for the same reason as the author claim above, and also not
+                // functional: a repository has many components.
+                validity: Validity(observedAt: now),
                 domain: object.domain
             )
             claims.append(claim)
