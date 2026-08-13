@@ -80,9 +80,14 @@ public struct RetrievalTuning: Sendable, Hashable, Codable {
     /// noise happens to coincide with the lexical leg's tail, the pair outranks whatever
     /// lexical put first.
     ///
-    /// Both default to 1.0, which is exactly the previous behaviour, so this changes nothing
-    /// until someone sets them. They are here to be swept by `opencore eval` rather than
-    /// argued about.
+    /// They are here to be swept by `opencore eval` rather than argued about.
+    ///
+    /// **These once defaulted to 1.0 in `init` while `.default` said 0.0**, on the reasoning
+    /// that 1.0 preserved the pre-measurement behaviour for callers who omitted them. That is
+    /// how the app spent two days running the measured-worst configuration: `AppSettings`
+    /// built a `RetrievalTuning` without these arguments and got the *old* behaviour, not the
+    /// measured one, while the CLI started from `.default` and was correct. Two defaults that
+    /// disagree is not a compatibility shim, it is a trap. There is one default now.
     public var lexicalWeight: Double
     public var denseWeight: Double
 
@@ -123,7 +128,9 @@ public struct RetrievalTuning: Sendable, Hashable, Codable {
         candidatesPerLeg: Int,
         signalScale: Double,
         lexicalWeight: Double = 1.0,
-        denseWeight: Double = 1.0
+        // 0.0, matching `.default`. Omitting this argument must not hand a caller the
+        // configuration that measurement rejected.
+        denseWeight: Double = 0.0
     ) {
         self.rrfK = rrfK
         self.mmrLambda = mmrLambda

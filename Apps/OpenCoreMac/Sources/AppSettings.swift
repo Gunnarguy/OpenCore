@@ -23,8 +23,23 @@ final class AppSettings {
     var passageLimit: Int { didSet { save(passageLimit, "retrieval.passageLimit") } }
     var expandContext: Bool { didSet { save(expandContext, "retrieval.expandContext") } }
 
+    /// Starts from the measured defaults and overrides only what this screen exposes.
+    ///
+    /// Built this way rather than by calling the initialiser, and the difference is not
+    /// stylistic. Constructing a fresh `RetrievalTuning` silently took the initialiser's
+    /// default for every field the Settings screen does not have a control for, and
+    /// `denseWeight` is one of those: the app ran at 1.0 while `.default` and the CLI ran at
+    /// the measured 0.0, so **every answer in the app came out of the configuration the eval
+    /// harness had already rejected** (fused nDCG@6 0.073 against 0.422). Starting from
+    /// `.default` means a field added to `RetrievalTuning` tomorrow arrives here carrying its
+    /// measured value instead of vanishing. This is the same shape `opencore eval` uses.
     var tuning: RetrievalTuning {
-        RetrievalTuning(rrfK: rrfK, mmrLambda: mmrLambda, candidatesPerLeg: candidatesPerLeg, signalScale: signalScale)
+        var tuning = RetrievalTuning.default
+        tuning.rrfK = rrfK
+        tuning.mmrLambda = mmrLambda
+        tuning.candidatesPerLeg = candidatesPerLeg
+        tuning.signalScale = signalScale
+        return tuning
     }
 
     // MARK: - Chunking

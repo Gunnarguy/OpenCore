@@ -249,26 +249,37 @@ private struct Tuned<Control: View>: View {
 private struct RetrievalTab: View {
     @Environment(AppSettings.self) private var settings
 
+    /// The default a row reports, formatted from the value it actually compares against.
+    ///
+    /// Every row here used to hardcode its default twice, once as a literal in the comparison
+    /// and once as a display string. They drifted, exactly as duplicated constants do: MMR λ
+    /// was measured at 0.85 on 2026-08-09 and this screen went on comparing against 0.7 and
+    /// printing "0.70", so it marked the measured default as a modified value and told the
+    /// reader the wrong number for it. One source now.
+    static func text(_ value: Double, places: Int) -> String {
+        value.formatted(.number.precision(.fractionLength(places)))
+    }
+
     var body: some View {
         @Bindable var settings = settings
         Form {
             SwiftUI.Section {
-                Tuned(label: "RRF k", help: "How fast rank advantage decays when fusing the two legs.", isDefault: settings.rrfK == 60, defaultText: "60") {
+                Tuned(label: "RRF k", help: "How fast rank advantage decays when fusing the two legs.", isDefault: settings.rrfK == RetrievalTuning.default.rrfK, defaultText: Self.text(RetrievalTuning.default.rrfK, places: 0)) {
                     Stepper(value: $settings.rrfK, in: 1...200, step: 5) {
                         Text("\(Int(settings.rrfK))").monospacedDigit().frame(width: 36, alignment: .trailing)
                     }
                 }
-                Tuned(label: "MMR λ", help: "Relevance versus diversity. At 1.0 diversification is off.", isDefault: settings.mmrLambda == 0.7, defaultText: "0.70") {
+                Tuned(label: "MMR λ", help: "Relevance versus diversity. At 1.0 diversification is off.", isDefault: settings.mmrLambda == RetrievalTuning.default.mmrLambda, defaultText: Self.text(RetrievalTuning.default.mmrLambda, places: 2)) {
                     Stepper(value: $settings.mmrLambda, in: 0.1...1.0, step: 0.05) {
                         Text(settings.mmrLambda.formatted(.number.precision(.fractionLength(2)))).monospacedDigit().frame(width: 36, alignment: .trailing)
                     }
                 }
-                Tuned(label: "Candidates per leg", help: "Results each retriever contributes before fusion.", isDefault: settings.candidatesPerLeg == 100, defaultText: "100") {
+                Tuned(label: "Candidates per leg", help: "Results each retriever contributes before fusion.", isDefault: settings.candidatesPerLeg == RetrievalTuning.default.candidatesPerLeg, defaultText: "\(RetrievalTuning.default.candidatesPerLeg)") {
                     Stepper(value: $settings.candidatesPerLeg, in: 10...500, step: 10) {
                         Text("\(settings.candidatesPerLeg)").monospacedDigit().frame(width: 36, alignment: .trailing)
                     }
                 }
-                Tuned(label: "Signal scale", help: "How much authority and recency count once relevance is fused.", isDefault: settings.signalScale == 0.02, defaultText: "0.020") {
+                Tuned(label: "Signal scale", help: "How much authority and recency count once relevance is fused.", isDefault: settings.signalScale == RetrievalTuning.default.signalScale, defaultText: Self.text(RetrievalTuning.default.signalScale, places: 3)) {
                     Stepper(value: $settings.signalScale, in: 0...0.2, step: 0.005) {
                         Text(settings.signalScale.formatted(.number.precision(.fractionLength(3)))).monospacedDigit().frame(width: 44, alignment: .trailing)
                     }
