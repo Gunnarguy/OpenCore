@@ -139,6 +139,22 @@ public struct Receipt: Hashable, Sendable, Codable, Identifiable {
 
     /// Short human-readable handle, e.g. `oc_8f2a91`.
     public var shortCode: String { "oc_" + id.value.prefix(6) }
+
+    /// True when this answer was assembled from the claim graph, so `receipt_evidence` has
+    /// rows behind it and a trace can resolve them.
+    ///
+    /// False for an answer built from passages, which is what chat produces. That is **not**
+    /// an emptier receipt and it is not a worse one: it reports `objectsRetrieved` passages
+    /// and every one of them is shown, with its text, in chat's own receipt sheet. It simply
+    /// has no *claim* evidence to trace, because it never read the claim table, and
+    /// `claimsConsulted: 0` records that honestly rather than as a gap.
+    ///
+    /// This exists because `evidenceAdmitted` counts passages on one path and claim evidence
+    /// on the other, so a screen reading the counter alone offered "trace evidence" on a
+    /// receipt with nothing traceable, then told the reader "this answer admitted no
+    /// evidence" two inches below a number saying six. One word, two meanings, and the screen
+    /// whose entire job is showing where an answer came from was the one contradicting itself.
+    public var answeredFromClaims: Bool { claimsConsulted > 0 }
 }
 
 /// Accumulates a receipt while the query runs. An actor because stages are appended from

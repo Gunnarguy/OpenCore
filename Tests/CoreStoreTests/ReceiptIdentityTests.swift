@@ -76,3 +76,53 @@ struct ReceiptIdentityTests {
         #expect(codes.count == 500)
     }
 }
+
+// MARK: - What a receipt can actually trace
+
+// Regression, 2026-08-12. The Receipts screen offered "Trace evidence" on every row and the
+// sheet reported "This answer admitted no evidence" two inches under a counter reading 6.
+//
+// `evidenceAdmitted` counts two different things. `Reasoner` assembles from the claim graph and
+// writes `receipt_evidence` rows, so its counter is claim evidence and a trace resolves it.
+// Chat answers from passages, sets `evidenceAdmitted: sources.count`, and deliberately never
+// reads the claim table (`claimsConsulted: 0`, with a comment saying it is genuinely zero and
+// not a placeholder). So a chat receipt has a non-zero counter and nothing to trace, and the
+// screen whose whole job is showing where an answer came from contradicted itself.
+//
+// The discriminator lives on the type rather than as a `claimsConsulted > 0` comparison in a
+// view, so the two surfaces cannot disagree about it.
+
+private func receipt(claimsConsulted: Int, evidenceAdmitted: Int) -> Receipt {
+    Receipt(
+        query: "q",
+        queryClass: .factual,
+        domainsAdmitted: [.project],
+        domainsBlocked: [],
+        stages: [],
+        objectsSearched: 100,
+        objectsRetrieved: 6,
+        evidenceAdmitted: evidenceAdmitted,
+        claimsConsulted: claimsConsulted,
+        contradictionsSurfaced: 0,
+        model: nil,
+        objectsTransmitted: 0,
+        confidence: nil
+    )
+}
+
+@Test("a passage-answered receipt reports no claim evidence to trace, however many passages it admitted")
+func passageAnsweredReceiptHasNothingToTrace() {
+    // The exact shape chat writes: six passages admitted, claim table never read.
+    let chat = receipt(claimsConsulted: 0, evidenceAdmitted: 6)
+
+    #expect(!chat.answeredFromClaims)
+    // And the counter is still six. The fix is not to zero it: the passages are real, they are
+    // shown in chat's own receipt sheet, and blanking a measured count to make a button
+    // consistent would be writing a plausible value into a receipt field.
+    #expect(chat.evidenceAdmitted == 6)
+}
+
+@Test("a claim-answered receipt is traceable")
+func claimAnsweredReceiptIsTraceable() {
+    #expect(receipt(claimsConsulted: 4, evidenceAdmitted: 9).answeredFromClaims)
+}

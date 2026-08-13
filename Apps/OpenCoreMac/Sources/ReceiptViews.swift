@@ -25,7 +25,14 @@ struct ReceiptCard: View {
                 row("class", receipt.queryClass.rawValue)
                 row("objects searched", "\(receipt.objectsSearched)")
                 row("objects retrieved", "\(receipt.objectsRetrieved)")
-                row("evidence admitted", "\(receipt.evidenceAdmitted)")
+                // The counter means different things on the two paths: claim evidence when the
+                // answer came from the graph, passages when it came from retrieval. Labelling
+                // both "evidence admitted" is what let this card promise a trace it could not
+                // deliver, so the label says which one it is.
+                row(
+                    receipt.answeredFromClaims ? "evidence admitted" : "passages admitted",
+                    "\(receipt.evidenceAdmitted)"
+                )
                 row("claims consulted", "\(receipt.claimsConsulted)")
                 row("contradictions", "\(receipt.contradictionsSurfaced)")
                 row("model", receipt.model ?? "none — assembled from claims")
@@ -92,9 +99,20 @@ struct TraceSheet: View {
             Divider()
 
             if rows.isEmpty {
-                Text("This answer admitted no evidence.")
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // Reachable now only when a receipt says it consulted claims and no evidence
+                // rows resolve, which is a real inconsistency rather than the ordinary case it
+                // used to describe. Say that, rather than "this answer admitted no evidence",
+                // which read as the answer having had nothing behind it.
+                VStack(spacing: 6) {
+                    Text("No evidence rows resolved for this receipt.")
+                    Text("It reports consulting the claim graph, so there should be some. Either they were removed, or the answer was saved without them.")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .multilineTextAlignment(.center)
+                }
+                .foregroundStyle(.secondary)
+                .padding(24)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 List(rows) { row in
                     VStack(alignment: .leading, spacing: 6) {

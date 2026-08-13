@@ -193,12 +193,17 @@ struct ReceiptsView: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 14) {
                 ForEach(model.receipts) { receipt in
-                    ReceiptCard(receipt: receipt) {
+                    // Offered only when there is something to trace. A chat answer comes from
+                    // passages and never reads the claim table, so it has no claim evidence to
+                    // resolve; the button used to appear on every row and open an empty sheet
+                    // reading "this answer admitted no evidence" directly under a counter
+                    // saying six. The card explains the difference in place instead.
+                    ReceiptCard(receipt: receipt, onTrace: receipt.answeredFromClaims ? {
                         Task {
                             await model.loadTrace(for: receipt)
                             selected = receipt
                         }
-                    }
+                    } : nil)
                 }
             }
             .padding(24)
