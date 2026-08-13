@@ -140,12 +140,20 @@ struct ChatView: View {
                 .help("Start a new thread. The current one is already saved.")
             }
         }
-        .task {
+        // Keyed on whether the store is open, not run once. This tab is the app's landing
+        // screen, so it appears before `start()` has finished opening the database: the first
+        // pass found `model.store` nil, skipped both steps, and never ran again. The History
+        // menu said "No saved chats yet" with a dozen threads on disk until you asked a
+        // question, and the model's assets were never pre-loaded, so the first answer of every
+        // session was slow for no visible reason. Same fix as `TimeTravelView`, which hit this
+        // and solved it; it just was not carried across.
+        .task(id: model.store != nil) {
             chat.refreshReadiness()
-            if let store = model.store { await chat.loadThreads(store: store) }
+            guard let store = model.store else { return }
+            await chat.loadThreads(store: store)
             // Load the model's assets while the reader is still typing rather than after they
             // hit return.
-            if chat.readiness.isReady, let store = model.store {
+            if chat.readiness.isReady {
                 await chat.conversation(store: store, tuning: settings.tuning).prepare()
             }
         }
