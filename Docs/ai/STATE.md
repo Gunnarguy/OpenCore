@@ -1,12 +1,24 @@
 # Current State
 
-Updated: 2026-08-11, end of session
+Updated: 2026-08-12, end of session
 Branch/worktree: `measure-and-fix-plus-saved-chats`, primary checkout (not a linked worktree).
 Branched from `main` at `86c06ab`; fast-forward `main` onto it when ready.
-Last commit: `d4dc228`, **"Make MCP one tab, which is what unstrands the tool picker"**.
-Nine commits on this branch, four of them today.
+Last commit: `d3be5c4`, **"Let 647 commit claims collapse back into the 33 facts they assert"**.
+Eighteen commits on this branch, nine of them on 2026-08-12.
 
 **The working tree is clean.** Everything below is committed.
+
+## Read this first
+
+On 2026-08-12 the user opened the app, looked at the Beliefs screen, and asked what it meant.
+That question found more real defects than the entire test suite has. **89 tests passed on a
+build where the app answered every question from the retrieval configuration the eval harness
+had already rejected, the export silently dropped every saved chat, and the Beliefs screen was
+94% entries recording changes that never happened.** Green tests and a clean build were true
+and said nothing about any of it.
+
+Nine defects were fixed that day, six of them user-visible. **21 confirmed screen defects
+remain**, tracked in one Notion row rather than here. See "Exact Next Action".
 
 ## Objective
 
@@ -45,7 +57,49 @@ Verified working end to end today: `opencore eval`, the on-device chat path, MCP
 `ASWebAuthenticationSession` against `mcp.notion.com`, one real Notion sync, and
 `--telemetry` across `passages` and `ask`.
 
-## Landed today: the UX pass, then the MCP merge
+## The 2026-08-12 wiring audit
+
+The user asked one question: is it fully hooked up. A 16-agent read-only audit traced every
+surface from button to SQL, then a 13-agent adversarial pass verified its own unconfirmed
+output. **27 of 56 unverified claims were refuted**, almost all the same false positive: a
+symbol with no caller reported as a defect without asking whether its absence makes anything
+wrong. That refutation rate is the reason the verification pass is worth running.
+
+Nine fixes landed. In commit order:
+
+1. `308d245` — **the app ran the measured-worst retrieval config.** `[measured]`
+   `RetrievalTuning.default` carried `denseWeight: 0.0`; the initialiser's parameter default
+   was `1.0`; `AppSettings` called the initialiser without the argument. So the app ran at
+   fused nDCG@6 **0.073** while the CLI ran at **0.422**, on every answer, since the day the
+   sweep was done. Unfindable by reading the app: `denseWeight` appeared nowhere in `Apps/`.
+   Two more of the same disease fell out of the blast radius: the Settings rows hardcoded each
+   default twice and had drifted (MMR λ displayed 0.70 against a measured 0.85), and Reset to
+   defaults could never disappear.
+2. `7b16f45` — **phantom belief versions.** 60 rows, 43 slots, 17 claiming a change of mind and
+   16 recording none. Guard compared claim *id*, not asserted *value*; and `reconcile` called
+   `recordBelief` once per claim row rather than once per slot.
+3. `a1e3733` — Trace evidence offered on receipts with nothing to trace. `evidenceAdmitted`
+   counts claim evidence on one path and passages on the other. `Receipt.answeredFromClaims`.
+4. `d557fd0` — `passageLimit` and `expandContext` saved, persisted and did nothing.
+5. `42f769f` — Chat's History said "no saved chats" until you asked a question. `.task` ran
+   once before the store opened.
+6. `8deeda5` — engine wrote `semantic-disabled`, app tested `semantic`. **Latent until fix 1
+   landed**, which is the argument against shipping these one at a time.
+7. `adebc70` — **the export omitted `conversation` and `conversation_turn`** while its README
+   said "Nothing else is omitted". The only rows `rebuild` cannot reconstruct. The test asks
+   the live schema rather than a second hand-written list, and immediately found `object_vector`
+   dead: present only in `schema.sql`, never written, never read, never dropped by `rebuild`.
+8. `8ad342a` — Re-derive and MCP sync ignored the chunk size and cleared the stale-store
+   warning *before* the work. Every construction goes through `AppModel.pipeline(for:)` now.
+9. `4455669` — **the engine recorded a decision after saying none was possible.** Skipped in
+   both loops; guarding only the first moves the bug. The existing test for this scenario
+   passed throughout, because it asked about contradictions and never about beliefs.
+10. `d3be5c4` — 647 `contributed_to` rows for 33 facts. `ClaimID` folds in `validFrom`, which
+    the function's own doc comment omits while describing the collapse it prevents.
+    `status` **keeps** its `validFrom` and there is a test saying so: it is functional, so
+    supersession reads it. The verified audit recommended undating it; that was wrong.
+
+## Landed 2026-08-11: the UX pass, then the MCP merge
 
 Four commits, in this order. Each was built on the one before it.
 
@@ -101,8 +155,10 @@ is unjudged and must never be read as neutral.
   closed. Note the app project is XcodeGen-generated and gitignored, so `xcodegen generate` in
   `Apps/OpenCoreMac/` is required after adding or deleting a source file: `sources: - path:
   Sources` enumerates files at generation time rather than referencing the folder.
-- `swift test` -> **89 tests pass** (8 + 21 + 3 + 18 + 3 + 36). Was 81: +6
-  `JudgementAndDossierTests`, +2 OAuth token expiry.
+- `swift test` -> **102 tests pass** as of 2026-08-12 (was 89 on 08-11, 81 on 08-10). The
+  13 added are all regression tests naming a defect found that day.
+- **Every regression test added on 2026-08-12 was verified to fail without its fix**, by
+  stashing the fix and re-running. A test that passes either way is worse than no test.
 - `opencore mcp-source discover --url https://mcp.notion.com/mcp --as notion` -> **Notion MCP,
   protocol 2025-11-25, 28 tools.** This is the exact path the new Choose tools button calls,
   so the button's engine is verified even though the button is not.
@@ -411,27 +467,34 @@ Carried over from 2026-08-09, not re-run today:
 
 ## Exact Next Action
 
-The tree is clean and everything below is committed. Two things are worth doing before more
-features, in this order.
+Tree is clean, 102 tests pass, `xcodebuild` succeeds.
 
-1. **Click through the app against real data.** This is now the largest gap in the project and
-   it grew today: Entity, Corpus, the banded sidebar, the merged MCP screen and the thumbs are
-   all built, all compiling, and none has been used. Today's session is itself the argument for
-   doing this: exercising one path end to end against a live server found a Critical defect
-   that reading the code did not. Highest risk first, which is the full MCP flow:
-   catalogue -> Add -> Sign in -> **Choose tools** -> Sync. The engine under it is verified,
-   the screen is not.
+1. **Run `opencore rebuild`.** Deliberately deferred until `d3be5c4` landed so it regenerates
+   cleanly the first time. It clears the 16 phantom belief versions and collapses the 647
+   `contributed_to` rows to roughly 33, because both are derived data and the extractor that
+   produced them is fixed. Confirm object and source counts are unchanged afterwards, which is
+   the load-bearing invariant.
 
-2. **Fan out MCP list responses into one object per record** (Critical, see Blockers). Still
-   the top blocking defect for anything Notion. `MCPClientConnector` writes one object per
-   *tool call*, so a list of N records becomes a single JSON blob titled
-   `notion · notion-list-recent-pages`, and re-syncing updates two blobs forever while
-   retrieval indexes JSON syntax. Each record needs its own stable `externalID`.
-   *Telemetry makes it visible*: `objects=1` on a `tool` span whatever the record count.
+   ```
+   DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer swift run \
+     --scratch-path /private/tmp/opencore-build opencore rebuild
+   ```
 
-Also worth doing, cheap, and prompted by today's finding: **grep for public functions with no
-caller outside tests.** Five capabilities have now been found built and unreachable, which is a
-pattern rather than a coincidence.
+2. **Then re-run `opencore eval`.** The app now uses the same tuning as the CLI for the first
+   time, and the corpus has changed shape underneath it. Nothing has re-measured since.
+
+3. **Then the 21 remaining screen defects**, in the Notion row *"21 confirmed screen defects
+   remain from the 2026-08-12 wiring audit"*. Ranked there by user impact. The top of that list
+   is the hex belief reasons, the Time Travel phantom changes, three screens that count the same
+   things and disagree, and the startup race in Corpus, Entities and Timeline that Chat already
+   had fixed.
+
+4. **Then: fan out MCP list responses into one object per record** (Critical, see Blockers).
+   Still the top blocking defect for anything Notion, and untouched by any of today's work.
+
+Worth building and still not built: **a grep for public functions with no caller outside
+tests.** Five capabilities have been found built, correct and unreachable. It would have caught
+four of them.
 
 Three traps worth keeping, each of which has cost time at least once:
 
