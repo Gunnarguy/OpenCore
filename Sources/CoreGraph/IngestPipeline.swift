@@ -114,6 +114,44 @@ public struct IngestPipeline: Sendable {
             return outcome
         }
     }
+
+    /// Re-derive every layer from the floor: what objects used to say, then what they say now.
+    ///
+    /// **This is what `rebuild` must call.** Running the pipeline over current objects alone
+    /// silently produces a *smaller* graph than the one it replaced and reports success.
+    /// Measured 2026-08-12: a routine rebuild deleted the store's only contradiction and left
+    /// 43 beliefs all reading "first evidence for this slot", because the older `pushed_at` a
+    /// `dormant` reading came from had been overwritten by a later sync.
+    ///
+    /// Two things here are deliberate and easy to undo by accident.
+    ///
+    /// **History is replayed in stages, each with its own `now`.** A belief version is a
+    /// transaction-time record: it says OpenCore changed its mind at a particular moment.
+    /// Deriving every epoch in one pass gets the conclusion right and flattens the history into
+    /// a single belief reading "selected over 1 competing claim", which for a project whose
+    /// headline is bitemporality is most of the loss. Passing the epoch's own timestamp also
+    /// makes time-dependent extraction correct: the dormancy threshold asks how long ago
+    /// something was pushed, and answering that with today's date turns every historical
+    /// reading into the current one.
+    ///
+    /// **Only current objects are chunked.** Superseded content is replayed for *derivation*
+    /// and must never reach the passage index: retrieval answers from what is true now, and
+    /// indexing old revisions would surface a README's previous wording as though it stood.
+    public func rederive(log: @Sendable (String) -> Void = { _ in }) async throws -> Outcome {
+        let epochs = try await store.objectEpochs()
+        if !epochs.isEmpty {
+            log("replaying \(epochs.count) earlier state(s) of \(epochs.reduce(0) { $0 + $1.objects.count }) object(s)")
+        }
+
+        for epoch in epochs {
+            // Entities first, or a claim references a subject that does not exist yet.
+            _ = try await EntityResolver(store: store).resolve(objects: epoch.objects)
+            _ = try await ClaimExtractor(store: store, now: epoch.learnedAt).extract(from: epoch.objects)
+            _ = try await BeliefEngine(store: store, now: epoch.learnedAt).reconcile()
+        }
+
+        return try await run(objects: try await store.allObjects(), storeObjects: false, log: log)
+    }
 }
 
 /// Builds vectors for chunks that do not have one yet.

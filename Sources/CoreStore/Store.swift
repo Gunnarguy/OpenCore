@@ -98,6 +98,10 @@ public struct IngestOutcome: Sendable {
     public var inserted: Int = 0
     public var updated: Int = 0
     public var unchanged: Int = 0
+    /// Objects whose previous content was preserved into `object_version` before being
+    /// overwritten. Equal to `updated` in normal operation; reported separately so a sync that
+    /// updates without versioning is visible rather than silent.
+    public var versioned: Int = 0
 
     public init() {}
 
@@ -116,13 +120,49 @@ extension Store {
             var outcome = IngestOutcome()
             for object in objects {
                 let existing = try connection.query(
-                    "SELECT content_hash FROM object WHERE id = ?",
+                    "SELECT * FROM object WHERE id = ?",
                     [.text(object.id.value)]
                 ).first
 
                 if let existing, existing.requireString("content_hash") == object.contentHash {
                     outcome.unchanged += 1
                     continue
+                }
+
+                // Keep what it used to say, before the update below overwrites it.
+                //
+                // This is the floor doing its job. Without it an upsert destroyed the only
+                // record of an object's previous content, and every claim derived from that
+                // content became unreconstructible: a `rebuild` then produced a smaller graph
+                // than the one it replaced and reported success. Measured 2026-08-12, that
+                // silently deleted the store's only contradiction.
+                //
+                // `INSERT OR IGNORE` because the primary key is (object, content hash): an
+                // object that flips back to earlier content is the same version returning, not
+                // a new one, and recording it twice would double-derive from it on replay.
+                if let existing {
+                    try connection.execute(
+                        """
+                        INSERT OR IGNORE INTO object_version
+                            (object_id, content_hash, title, text, uri, authored_at, ingested_at,
+                             domain, authority, metadata, superseded_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        [
+                            .text(object.id.value),
+                            .text(existing.requireString("content_hash")),
+                            .text(existing.requireString("title")),
+                            .text(existing.requireString("text")),
+                            SQLValue(text: existing.string("uri")),
+                            SQLValue(date: existing.date("authored_at")),
+                            .real(existing.requireDate("ingested_at").timeIntervalSince1970),
+                            .text(existing.requireString("domain")),
+                            .integer(Int64(existing.requireInt("authority"))),
+                            .text(existing.string("metadata") ?? "{}"),
+                            .real(object.ingestedAt.timeIntervalSince1970),
+                        ]
+                    )
+                    outcome.versioned += 1
                 }
 
                 let metadata = (try? JSONEncoder().encode(object.metadata)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"

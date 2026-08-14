@@ -161,11 +161,12 @@ extension AppModel {
             state = .working("dropping derived layers")
             try await store.dropDerivedLayers()
 
-            state = .working("loading objects")
-            let all = try await store.allObjects()
-
-            state = .working("re-deriving from \(all.count) objects")
-            let outcome = try await pipeline(for: store).run(objects: all, storeObjects: false) { [weak self] message in
+            state = .working("re-deriving from the floor")
+            // `rederive`, not `run`: it replays each object's earlier states before deriving
+            // from the current ones. Calling `run` on current objects alone quietly produces a
+            // smaller graph than the one just dropped, which is how a rebuild deleted the
+            // store's only contradiction and reported success.
+            let outcome = try await pipeline(for: store).rederive { [weak self] message in
                 Task { @MainActor in self?.state = .working(message) }
             }
 

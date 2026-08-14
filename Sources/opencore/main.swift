@@ -874,9 +874,7 @@ func rebuild() async throws {
     // and a chunk whose boundaries moved has a vector that describes text that no longer
     // exists.
     try await store.dropDerivedLayers()
-    let all = try await store.allObjects()
-
-    let outcome = try await IngestPipeline(store: store).run(objects: all, storeObjects: false, log: progress)
+    let outcome = try await IngestPipeline(store: store).rederive(log: progress)
     report(outcome)
 
     // Vectors are a derived layer like every other, and this is the command that promises to

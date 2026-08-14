@@ -111,4 +111,61 @@ extension Store {
         }
         return all
     }
+
+    /// Every superseded version of every object, oldest first.
+    ///
+    /// Primary data, not derived: this is what an object *used to say*, and nothing can
+    /// reconstruct it. `dropDerivedLayers` must never touch it and the exporter must include it.
+    public func objectHistory() async throws -> [CoreObject] {
+        // Aliased to the `object` column names so `CoreObject.init(row:)` reads it unchanged.
+        // The stable fields come from the surviving object row; everything that can change
+        // comes from the version.
+        try await database.query(
+            """
+            SELECT o.source_id AS source_id, o.kind AS kind, o.external_id AS external_id,
+                   v.title AS title, v.text AS text, v.uri AS uri, v.authored_at AS authored_at,
+                   v.ingested_at AS ingested_at, v.domain AS domain, v.authority AS authority,
+                   v.metadata AS metadata
+            FROM object_version v JOIN object o ON o.id = v.object_id
+            ORDER BY v.superseded_at ASC
+            """
+        ).map(CoreObject.init(row:))
+    }
+
+    /// Superseded content grouped by the moment it stopped being current, oldest first.
+    ///
+    /// Grouped rather than flat because a rebuild has to replay history **in stages**. A belief
+    /// version records that OpenCore changed its mind at a particular transaction time, so
+    /// deriving every epoch at once produces one belief that says "selected over 1 competing
+    /// claim" where the real history was "first evidence", then "changed from dormant to
+    /// active". The conclusion would be right and the history would be flattened, which for a
+    /// project whose headline is bitemporality is most of the loss.
+    public func objectEpochs() async throws -> [(learnedAt: Date, objects: [CoreObject])] {
+        let rows = try await database.query(
+            """
+            SELECT v.superseded_at AS superseded_at,
+                   o.source_id AS source_id, o.kind AS kind, o.external_id AS external_id,
+                   v.title AS title, v.text AS text, v.uri AS uri, v.authored_at AS authored_at,
+                   v.ingested_at AS ingested_at, v.domain AS domain, v.authority AS authority,
+                   v.metadata AS metadata
+            FROM object_version v JOIN object o ON o.id = v.object_id
+            ORDER BY v.superseded_at ASC
+            """
+        )
+
+        var epochs: [(learnedAt: Date, objects: [CoreObject])] = []
+        for row in rows {
+            let at = row.requireDate("superseded_at")
+            let object = CoreObject(row: row)
+            // Consecutive rows share a timestamp when one sync superseded several objects, which
+            // is the common case: they were learned together and must reconcile together.
+            if var last = epochs.last, last.learnedAt == at {
+                last.objects.append(object)
+                epochs[epochs.count - 1] = last
+            } else {
+                epochs.append((learnedAt: at, objects: [object]))
+            }
+        }
+        return epochs
+    }
 }
