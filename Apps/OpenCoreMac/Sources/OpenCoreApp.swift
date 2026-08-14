@@ -30,48 +30,48 @@ struct OpenCoreApp: App {
 /// server lived on one row and managing one on the other, which stranded the tool picker on the
 /// new-source path and left "choose tools after signing in" reachable only from the CLI.
 enum Section: String, CaseIterable, Identifiable, Hashable {
+    case home = "Home"
     case chat = "Chat"
     case entities = "Entities"
     case corpus = "Corpus"
     case timeline = "Timeline"
     case timeTravel = "Time travel"
+    case sources = "Sources"
+    case mcp = "MCP"
+    case settings = "Settings"
+    // Developer. Each of these is a view onto one layer of the pipeline: excellent for
+    // debugging, and not a product. They stay reachable and stop being peers of Chat.
     case contradictions = "Contradictions"
     case claims = "Claims"
     case beliefs = "Beliefs"
     case passages = "Passages"
     case receipts = "Receipts"
-    case sources = "Sources"
-    case mcp = "MCP"
     case maintenance = "Maintenance"
-    case settings = "Settings"
 
     var id: String { rawValue }
 
     /// Which band of the sidebar this belongs to.
-    ///
-    /// Ask, browse, configure. The ordering within `Section.allCases` already reflects it; this
-    /// makes the grouping explicit so a row added later lands somewhere deliberate instead of
-    /// at the bottom of whichever list it was appended to.
     enum Band: String, CaseIterable, Identifiable {
-        case ask = "Ask"
+        case main = ""
         case explore = "Explore"
-        case inspect = "Inspect"
         case configure = "Set up"
+        case developer = "Developer"
 
         var id: String { rawValue }
     }
 
     var band: Band {
         switch self {
-        case .chat: .ask
+        case .home, .chat: .main
         case .entities, .corpus, .timeline, .timeTravel: .explore
-        case .contradictions, .claims, .beliefs, .passages, .receipts: .inspect
-        case .sources, .mcp, .maintenance, .settings: .configure
+        case .sources, .mcp, .settings: .configure
+        case .contradictions, .claims, .beliefs, .passages, .receipts, .maintenance: .developer
         }
     }
 
     var symbol: String {
         switch self {
+        case .home: "house"
         case .chat: "bubble.left.and.bubble.right"
         case .entities: "square.stack.3d.up"
         case .corpus: "chart.pie"
@@ -92,27 +92,57 @@ enum Section: String, CaseIterable, Identifiable, Hashable {
 
 struct RootView: View {
     @Environment(AppModel.self) private var model
-    @State private var section: Section = .chat
+    @State private var section: Section = .home
+
+    /// Developer rows are collapsed by default. They are debugging surfaces onto single
+    /// layers of the pipeline, and having them sit as peers of Chat is what made the app read
+    /// as a database inspector. Kept one click away rather than deleted: today they found six
+    /// real defects, so they earn their place, just not the front page.
+    @AppStorage("sidebar.showDeveloper") private var showDeveloper = false
 
     var body: some View {
         NavigationSplitView {
             List(selection: $section) {
-                // Banded rather than flat. Fourteen undifferentiated rows is a list you scan
-                // every time; four short groups is one you learn once.
                 ForEach(Section.Band.allCases) { band in
-                    SwiftUI.Section(band.rawValue) {
-                        ForEach(Section.allCases.filter { $0.band == band }) { item in
+                    if band != .developer {
+                        SwiftUI.Section(band.rawValue) {
+                            ForEach(Section.allCases.filter { $0.band == band }) { item in
+                                Label(item.rawValue, systemImage: item.symbol)
+                                    .badge(badge(for: item))
+                                    .tag(item)
+                            }
+                        }
+                    }
+                }
+
+                SwiftUI.Section {
+                    if showDeveloper {
+                        ForEach(Section.allCases.filter { $0.band == .developer }) { item in
                             Label(item.rawValue, systemImage: item.symbol)
                                 .badge(badge(for: item))
                                 .tag(item)
                         }
                     }
+                } header: {
+                    Button {
+                        withAnimation(.easeOut(duration: 0.15)) { showDeveloper.toggle() }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text("Developer")
+                            Image(systemName: showDeveloper ? "chevron.down" : "chevron.right")
+                                .font(.caption2)
+                            Spacer()
+                        }
+                        .contentShape(.rect)
+                    }
+                    .buttonStyle(.plain)
                 }
             }
             .navigationSplitViewColumnWidth(min: 190, ideal: 200, max: 240)
             .safeAreaInset(edge: .bottom) { StatusBar() }
         } detail: {
             switch section {
+            case .home: HomeView(section: $section)
             case .chat: ChatView()
             case .entities: EntityView()
             case .corpus: CorpusView()

@@ -65,7 +65,17 @@ struct EntityView: View {
         }
         .navigationTitle("Entities")
         .searchable(text: $entities.filter, prompt: "Filter entities")
-        .task { if let store = model.store { await entities.load(store: store) } }
+        // Keyed on the store, not fired once: a bare `.task` runs before the database has
+        // finished opening and never retries, which showed an empty entity list on every launch.
+        .task(id: model.store == nil) {
+            guard let store = model.store else { return }
+            await entities.load(store: store)
+            // A row clicked on Home names a subject; open it rather than whatever sorted first.
+            if let wanted = PendingEntity.shared.take(),
+               let match = entities.entities.first(where: { $0.0.canonicalName == wanted })?.0.id {
+                await entities.select(match, store: store)
+            }
+        }
     }
 
     private var list: some View {

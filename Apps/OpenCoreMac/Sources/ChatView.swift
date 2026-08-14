@@ -148,6 +148,9 @@ struct ChatView: View {
         // session was slow for no visible reason. Same fix as `TimeTravelView`, which hit this
         // and solved it; it just was not carried across.
         .task(id: model.store != nil) {
+            // Typed on Home and handed over rather than answered there. Two answer surfaces for
+            // one question is exactly the split that produced Ask and Chat.
+            if let question = PendingQuestion.shared.take() { chat.draft = question }
             chat.refreshReadiness()
             guard let store = model.store else { return }
             await chat.loadThreads(store: store)
