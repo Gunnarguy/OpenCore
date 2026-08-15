@@ -31,6 +31,20 @@ public struct ClaimExtractor: Sendable {
     /// Named because it is a judgement call, not a fact, and it belongs somewhere findable.
     public static let dormantAfter: TimeInterval = 180 * 24 * 3600
 
+    /// Above this many accepted attendees, an event is a broadcast and `met_with` is not
+    /// asserted for it.
+    ///
+    /// **Chosen, not measured**, and the gap it sits in was measured. On the real corpus the
+    /// attendee counts run 2, 2, 2, 4, 12, 22, then 37, 39, 84, 94, 110, 240, 270, 297, 4004.
+    /// 25 falls in the empty space between a 22-person huddle and a 37-person team gathering,
+    /// so it separates the two populations rather than cutting through one. Any value from 23
+    /// to 36 behaves identically on this corpus, which is the honest way to say that the exact
+    /// number is not load-bearing and the existence of a boundary is.
+    ///
+    /// The event still produces a timeline entry, `attended` claims, and stays retrievable.
+    /// Only the assertion that you *met* everyone present is withheld.
+    public static let metWithCeiling = 25
+
     @discardableResult
     public func extract(from objects: [CoreObject]) async throws -> Outcome {
         var claims: [CoreClaim] = []
@@ -358,9 +372,30 @@ public struct ClaimExtractor: Sendable {
             authority: object.authority
         ))
 
+        // **Who accepted, not who was invited**, and the difference is the whole rule here.
+        //
+        // Measured 2026-08-14: this used to read `attendees`, the raw invite list, and assert
+        // `met_with` at `derivation: .observed` and confidence 0.9 for every name on it. A
+        // company-wide yoga invite therefore stated as observed fact that the user had met
+        // 4,004 people. Nine broadcast events produced **5,175 of the store's 5,216 met_with
+        // claims**; six real meetings produced the other 44.
+        //
+        // That is the exact failure this extractor refuses elsewhere. It declines to derive
+        // claims from notes because "inferring facts from prose without a model is exactly the
+        // guessing this extractor refuses to do", and then inferred *met* from a distribution
+        // list, which is the same guess wearing structured data as an alibi. What an invite
+        // list observes is that someone was invited. Meeting is an inference on top of it.
+        //
+        // A **missing** key means the object predates the connector recording status: nobody
+        // looked, so nothing is asserted. Unmeasured stays nil rather than becoming "everyone
+        // attended", which is what reading the invite list amounted to. Those objects yield a
+        // timeline entry and stay fully retrievable; they simply stop claiming who was met.
+        // Re-syncing the calendar is what fills this in.
+        guard let acceptedField = object.metadata["attendees_accepted"] else { return }
+
         // ASCII 31 separated, matching what the connector wrote. A comma would split names
         // containing one.
-        let attendees = (object.metadata["attendees"] ?? "")
+        let attendees = acceptedField
             .split(separator: "\u{1F}")
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { $0.count > 1 }
@@ -388,6 +423,10 @@ public struct ClaimExtractor: Sendable {
             )
             claims.append(attended)
             links.append((attended.id, item.id, .supports, 1.0))
+
+            // Accepting a 270-person town hall is attending it. It is not meeting 270 people,
+            // so `met_with` carries a size gate that `attended` does not.
+            guard attendees.count <= Self.metWithCeiling else { continue }
 
             let met = CoreClaim(
                 subject: calendar,
