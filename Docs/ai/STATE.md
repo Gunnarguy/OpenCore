@@ -1,10 +1,11 @@
 # Current State
 
-Updated: 2026-08-12, end of session
-Branch/worktree: `measure-and-fix-plus-saved-chats`, primary checkout (not a linked worktree).
-Branched from `main` at `86c06ab`; fast-forward `main` onto it when ready.
-Last commit: `d3be5c4`, **"Let 647 commit claims collapse back into the 33 facts they assert"**.
-Eighteen commits on this branch, nine of them on 2026-08-12.
+Updated: 2026-09-14 (header only; body current to 2026-08-12)
+Branch/worktree: `main`, primary checkout. On 2026-09-14 `main` was fast-forwarded onto
+`measure-and-fix-plus-saved-chats` (27 commits, `86c06ab..a28f27e`) and that branch was deleted, at
+the owner's instruction that every project sits on its main with no branches. Before the merge the
+branch was built and tested outside iCloud: `swift build` complete, 109 tests passed across six
+swift-testing runs. The body below was written on 2026-08-12 from that branch and is unchanged.
 
 **The working tree is clean.** Everything below is committed.
 
