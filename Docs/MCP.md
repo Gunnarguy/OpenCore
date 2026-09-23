@@ -119,8 +119,8 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":
 | `core_changed` | what it learned or changed its mind about recently |
 | `core_trace` | the exact evidence behind a previous `core_ask`, by receipt code |
 
-By default only the lexical leg runs: the 2026-08-09 eval scored fused nDCG@6 at 0.422
-without the dense leg and 0.073 with it.
+The 2026-08-09 eval scored the fused result lower with the dense leg than without it, so
+the default runs the lexical leg alone.
 
 `core_ask` → `core_trace` is the pair that matters. An assistant can answer from your
 history and then show the user the commits and documents that produced the answer.

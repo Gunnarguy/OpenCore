@@ -121,8 +121,8 @@ BM25 returns unbounded negatives and cosine returns -1…1, so blending the raw 
 inventing a normalisation constant that ends up doing more work than either retriever.
 Reciprocal Rank Fusion compares ranks, which are comparable by construction.
 
-By default only the lexical leg runs: the 2026-08-09 eval scored fused nDCG@6 at 0.422
-without the dense leg and 0.073 with it. The example below predates that.
+The 2026-08-09 eval scored the fused result lower with the dense leg than without it, so
+the default runs the lexical leg alone. The example below predates that.
 
 ```bash
 .build/debug/opencore passages "why did retrieval move on device"
