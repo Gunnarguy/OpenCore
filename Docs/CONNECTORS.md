@@ -23,6 +23,7 @@ before any ranking happens.
 | Calendar | `personal` | see below |
 | Reminders | `personal` | see below |
 | Notes | **per folder name**, defaulting to `personal` | `[source]` `AppleNotesConnector.domain(forFolder:)` |
+| Apple Health | `medical`, not configurable | workouts and daily step totals, synced from the app |
 
 Calendar and Reminders are `personal` and not configurable. A calendar is the single
 richest source of who you meet, when you are ill, and who you are close to, and it arrives

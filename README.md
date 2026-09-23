@@ -62,6 +62,7 @@ worse than no receipt, because it looks like proof.
 | **Apple Calendar** | events, attendees, locations | personal |
 | **Apple Reminders** | tasks, lists, completion | personal |
 | **Apple Notes** | notes and folders, via AppleScript | per folder, default personal |
+| **Apple Health** | workouts and daily step totals, synced from the app | medical, not configurable |
 
 Calendar and Reminders are `personal` and not configurable. A calendar is the richest
 source of who you meet, when you are ill, and who you are close to, and it arrives looking
@@ -119,6 +120,9 @@ query ──┬─► dense   (cosine over on-device NLContextualEmbedding vecto
 BM25 returns unbounded negatives and cosine returns -1…1, so blending the raw values means
 inventing a normalisation constant that ends up doing more work than either retriever.
 Reciprocal Rank Fusion compares ranks, which are comparable by construction.
+
+By default only the lexical leg runs: the 2026-08-09 eval scored fused nDCG@6 at 0.422
+without the dense leg and 0.073 with it. The example below predates that.
 
 ```bash
 .build/debug/opencore passages "why did retrieval move on device"
@@ -190,6 +194,7 @@ says so. Setup and the full reasoning: [Docs/MCP.md](Docs/MCP.md).
 | `opencore trace oc_abc123` | the exact evidence behind one answer |
 | `opencore embed` | build on-device vectors for every passage |
 | `opencore passages "TEXT"` | passage retrieval: dense + BM25, RRF, MMR |
+| `opencore eval` | retrieval quality per leg over a benchmark |
 | `opencore mcp` | serve MCP over stdio |
 | `opencore rebuild` | drop every derived layer and re-derive from objects |
 
@@ -210,6 +215,8 @@ Same engine, same store. The app and the CLI read one database on purpose.
 | Module | Owns |
 |---|---|
 | `CoreModel` | the vocabulary. Value types, no I/O, no dependencies |
+| `CoreJSONRPC` | JSON-RPC types and transports, shared by the MCP server and the MCP client |
+| `CoreTelemetry` | measurement. Depends on nothing |
 | `CoreStore` | SQLite. **Every SQL string in the project is here** |
 | `CoreIngest` | connectors. Produce objects and nothing else |
 | `CoreGraph` | entity resolution, claim extraction, contradictions, beliefs |
@@ -227,9 +234,9 @@ Stated plainly, because the whole project is an argument for doing that:
 - **No calibrated confidence.** Claim confidences are hand-set except the language-share
   number, which is genuinely derived. Receipt confidence is `nil` and renders as
   "not measured".
-- **No eval harness.** Nothing here has a measured accuracy number, so this README does not
-  quote one. Retrieval constants — RRF's k=60, MMR's λ=0.7, the 0.02 signal scaling — are
-  all *chosen*, and are labelled as chosen everywhere they appear.
+- **A small eval harness.** `opencore eval` scores retrieval per leg over the 20 cases in
+  `Benchmarks/rag_eval_v1.jsonl`. Its 2026-08-09 run set MMR's λ to 0.85 and the dense
+  weight to 0. RRF's k=60 and the 0.02 signal scaling are still chosen.
 - **Contradiction detection is test-verified, not yet field-observed.** A first sync has
   nothing to contradict; conflicts appear on the second sync after a source changes its mind.
 - **Dense search is brute force.** Linear cosine over every vector. Deliberate at personal
@@ -242,10 +249,9 @@ Stated plainly, because the whole project is an argument for doing that:
 - **Calendar and Reminders need the app.** EventKit reads usage strings from the calling
   binary's Info.plist, which a SwiftPM executable does not have. The CLI reports that
   specific cause rather than returning an empty calendar.
-- **Only GitHub produces claims.** Files, notes, calendar and reminders are ingested,
-  chunked, embedded and retrievable, but the claim extractor only understands GitHub
-  shapes, so they contribute passages and not beliefs. `sync files` reporting
-  `claims 0` is correct behaviour today, not a failure.
+- **Only GitHub and Calendar produce claims.** Files, notes, reminders and Health are
+  ingested and retrievable, but only GitHub shapes and accepted calendar attendees become
+  claims. `sync files` reporting `claims 0` is correct behaviour today, not a failure.
 - **Rule-based extraction only.** A model may later *propose* claims. It would enter at
   `modelInference`, the bottom authority tier, outranked by every rule.
 
