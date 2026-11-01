@@ -5,7 +5,7 @@ Branch/worktree: main, ~/Documents/GitHub/OpenCore
 `main` matches `origin/main`. The 16 earlier local commits were squashed into one on 2026-10-31 at the owner's word, and the full history is the bundle in `~/Backups/OpenCore-2026-10-31`. Do not commit, stash or check out anything
 without the owner's word.
 
-Installed 2026-10-31 from this code, not launched: `/Applications/OpenCore.app`, `~/.local/bin/opencore`,
+Installed 2026-10-31 from this code: `/Applications/OpenCore.app`, `~/.local/bin/opencore`,
 `~/.local/libexec/opencore/opencore` and `private-names.json`. A fresh installed `opencore mcp` listed 8
 tools [measured]. Running clients keep the old image until reconnected. The store and the old install are
 backed up in `AuditBackups/before-install-2026-10-31`, and the bundle and `Local/` are in
@@ -22,8 +22,9 @@ named below. The feature-by-surface audit is in Notion, row "Ubiquity audit, 202
 
 ## Exact Next Action
 
-The owner opens the app once on dry run and reports what he sees. His first sync changes the live store
-about 20 s after launch. Fix only what that run finds. The iPhone companion then goes to Codex from the
+[measured] The app first launched at 18:53 PDT on 2026-10-31 and its first sync ran: objects 9,537 to
+9,738, claims 944 to 1,084, no crash in 80 s. The owner looks through its screens on dry run and reports
+what he sees. Fix only what that finds. The iPhone companion then goes to Codex from the
 Notion row "iPhone companion: full fidelity and control from an iPhone, connected to the MacBook", whose
 first step is three owner decisions.
 
