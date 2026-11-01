@@ -318,16 +318,15 @@ enum MCPSourceCommands {
         let started = Date()
 
         let connector = MCPClientConnector(config: config)
-        let batch = try await connector.fetch(since: source.lastSyncedAt, cursor: nil, log: progress)
-
-        guard !batch.objects.isEmpty else {
-            print("nothing returned")
-            try await store.markSynced(source.id, at: Date(), cursor: batch.cursor)
+        let result = try await SourceSync(store: store, pipeline: IngestPipeline(store: store)).run(
+            source.id,
+            log: progress,
+            fetch: { since in try await connector.fetch(since: since, cursor: nil, log: progress) }
+        )
+        guard let outcome = result.derived else {
+            print(result.heldBecause ?? "nothing new")
             return
         }
-
-        let outcome = try await IngestPipeline(store: store).run(objects: batch.objects, log: progress)
-        try await store.markSynced(source.id, at: Date(), cursor: batch.cursor)
 
         report(outcome)
         print("\ndone in \(Int(Date().timeIntervalSince(started)))s")

@@ -96,13 +96,39 @@ public struct MCPServerConfig: Sendable, Codable, Hashable {
         for key in ["PATH", "HOME", "LANG", "TMPDIR", "USER"] {
             if let value = parent[key] { child[key] = value }
         }
+        // GUI apps launched from Finder/Dock receive a minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin)
+        // that omits Homebrew, nvm, and user-local toolchains where npx, uvx, node, and python3 live.
+        let home = parent["HOME"] ?? NSHomeDirectory()
+        var extraPaths = [
+            "/opt/homebrew/bin",
+            "/opt/homebrew/sbin",
+            "/usr/local/bin",
+            "\(home)/.local/bin",
+        ]
+        let nvmNodesDir = URL(fileURLWithPath: "\(home)/.nvm/versions/node")
+        if let versions = try? FileManager.default.contentsOfDirectory(atPath: nvmNodesDir.path) {
+            for version in versions.sorted().reversed() {
+                extraPaths.insert("\(home)/.nvm/versions/node/\(version)/bin", at: 0)
+            }
+        }
+        var pathParts = (child["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin")
+            .split(separator: ":")
+            .map(String.init)
+        for extra in extraPaths.reversed() where !pathParts.contains(extra) {
+            pathParts.insert(extra, at: 0)
+        }
+        child["PATH"] = pathParts.joined(separator: ":")
+
         for variable in environmentNames {
             // Process environment first, so a one-off shell override still works, then the
-            // keychain, which is the only source the app has when launched from Finder.
+            // keychain, which is the only source the app has when launched from Finder, and
+            // finally the authenticated gh CLI when a GitHub MCP server requests a token.
             if let value = parent[variable], !value.isEmpty {
                 child[variable] = value
             } else if let stored = Keychain.read(account: Keychain.mcpAccount(server: name, variable: variable)), !stored.isEmpty {
                 child[variable] = stored
+            } else if Self.isGitHubTokenVariable(variable), let ghToken = GitHubConnector.resolveToken(), !ghToken.isEmpty {
+                child[variable] = ghToken
             }
         }
         return child
@@ -112,8 +138,13 @@ public struct MCPServerConfig: Sendable, Codable, Hashable {
         let parent = ProcessInfo.processInfo.environment
         return environmentNames.filter { variable in
             if let value = parent[variable], !value.isEmpty { return false }
-            let stored = Keychain.read(account: Keychain.mcpAccount(server: name, variable: variable))
-            return (stored ?? "").isEmpty
+            if let stored = Keychain.read(account: Keychain.mcpAccount(server: name, variable: variable)), !stored.isEmpty {
+                return false
+            }
+            if Self.isGitHubTokenVariable(variable), let ghToken = GitHubConnector.resolveToken(), !ghToken.isEmpty {
+                return false
+            }
+            return true
         }
     }
 
@@ -123,11 +154,23 @@ public struct MCPServerConfig: Sendable, Codable, Hashable {
         let parent = ProcessInfo.processInfo.environment
         return environmentNames.map { variable in
             if let value = parent[variable], !value.isEmpty { return (variable, "environment") }
-            if let stored = Keychain.read(account: Keychain.mcpAccount(server: name, variable: variable)), !stored.isEmpty {
-                return (variable, "keychain")
+            switch Keychain.readResult(account: Keychain.mcpAccount(server: name, variable: variable)) {
+            case .found(_, source: .keychain): return (variable, "system Keychain")
+            case .found(_, source: .legacyVault): return (variable, "legacy vault; save again to protect in Keychain")
+            case .authenticationRequired: return (variable, "Keychain authorization required")
+            case .failed: return (variable, "credential storage error; original preserved")
+            case .missing: break
+            }
+            if Self.isGitHubTokenVariable(variable), let ghToken = GitHubConnector.resolveToken(), !ghToken.isEmpty {
+                return (variable, "gh CLI")
             }
             return (variable, "not set")
         }
+    }
+
+    private static func isGitHubTokenVariable(_ variable: String) -> Bool {
+        let upper = variable.uppercased()
+        return upper == "GITHUB_TOKEN" || upper == "GITHUB_PERSONAL_ACCESS_TOKEN"
     }
 }
 
@@ -271,15 +314,18 @@ public struct MCPClientConnector: Connector {
                         log("'\(tool)': \(outcome.skippedBlocks) non-text block(s) skipped")
                     }
 
-                    // One object per call is the known-wrong granularity for a list-shaped
-                    // response: `objects` incrementing by exactly one per tool regardless of
-                    // how many records came back is the signature of that bug, and this
-                    // counter is what makes it visible without reading the store.
-                    scope.set("objects", 1)
+                    let produced = Self.fanOutObjects(
+                        tool: tool,
+                        rawText: outcome.text,
+                        config: config,
+                        sourceID: source.id,
+                        offered: offered.first { $0.name == tool }
+                    )
+                    scope.set("objects", produced.count)
                     scope.set("characters", outcome.text.count)
                     scope.attribute("outcome", "ok")
-                    objects.append(makeObject(tool: tool, text: outcome.text, offered: offered.first { $0.name == tool }))
-                    log("'\(tool)': \(outcome.text.count) characters")
+                    objects.append(contentsOf: produced)
+                    log("'\(tool)': \(outcome.text.count) characters -> \(produced.count) object(s)")
                 }
             } catch {
                 // One bad tool must not abort the sync. Everything else this server offers is
@@ -296,13 +342,243 @@ public struct MCPClientConnector: Connector {
         }
     }
 
-    /// One object per tool call.
+    // MARK: - Structured record fan-out
+
+    /// Fan a tool's raw text response out into one `CoreObject` per logical record when the
+    /// payload is a structured collection (JSON array, collection-wrapped JSON object such as
+    /// Notion's `results` or REA's `records`, or JSON Lines), falling back to a single object
+    /// when the response is prose or a single unstructured blob.
     ///
-    /// `externalID` is the server name plus the tool name, deliberately excluding the result
-    /// content, so a re-sync of the same tool *updates* one object rather than accumulating a
-    /// new one every run. Content-hash comparison in the store then makes an unchanged result
-    /// free.
-    private func makeObject(tool: String, text: String, offered: MCPTool?) -> CoreObject {
+    /// Each fanned-out record gets a stable `externalID` (`<server>#<tool>#<recordID>`) keyed to
+    /// the record's own identifier (or a deterministic digest of its canonical fields if the
+    /// record carries no id), so re-syncing updates existing records in place rather than
+    /// duplicating them or shifting identities when list order changes.
+    public static func fanOutObjects(
+        tool: String,
+        rawText: String,
+        config: MCPServerConfig,
+        sourceID: SourceID,
+        offered: MCPTool? = nil
+    ) -> [CoreObject] {
+        let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+
+        if let records = extractRecordDictionaries(from: trimmed), !records.isEmpty {
+            return records.enumerated().map { index, record in
+                makeRecordObject(
+                    record: record,
+                    index: index,
+                    tool: tool,
+                    config: config,
+                    sourceID: sourceID,
+                    offered: offered
+                )
+            }
+        }
+
+        return [
+            makeSingleObject(
+                tool: tool,
+                text: rawText,
+                config: config,
+                sourceID: sourceID,
+                offered: offered
+            )
+        ]
+    }
+
+    private static let collectionKeys: [String] = [
+        "results", "records", "items", "pages", "rows", "entries",
+        "issues", "pull_requests", "channels", "messages", "documents", "data",
+    ]
+
+    private static func extractRecordDictionaries(from text: String) -> [[String: Any]]? {
+        if let data = text.data(using: .utf8),
+           let parsed = try? JSONSerialization.jsonObject(with: data, options: []) {
+            if let array = parsed as? [[String: Any]], !array.isEmpty {
+                return array
+            }
+            if let dict = parsed as? [String: Any] {
+                for key in collectionKeys {
+                    if let array = dict[key] as? [[String: Any]], !array.isEmpty {
+                        return array
+                    }
+                    if let nested = dict[key] as? [String: Any] {
+                        for innerKey in collectionKeys {
+                            if let array = nested[innerKey] as? [[String: Any]], !array.isEmpty {
+                                return array
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // JSON Lines (2+ non-empty lines, every line a JSON object).
+        let lines = text
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        if lines.count >= 2, lines.allSatisfy({ $0.hasPrefix("{") && $0.hasSuffix("}") }) {
+            var objects: [[String: Any]] = []
+            objects.reserveCapacity(lines.count)
+            for line in lines {
+                guard let data = line.data(using: .utf8),
+                      let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+                else { return nil }
+                objects.append(obj)
+            }
+            return objects
+        }
+
+        return nil
+    }
+
+    private static func makeRecordObject(
+        record: [String: Any],
+        index: Int,
+        tool: String,
+        config: MCPServerConfig,
+        sourceID: SourceID,
+        offered: MCPTool?
+    ) -> CoreObject {
+        let canonicalData = (try? JSONSerialization.data(
+            withJSONObject: record,
+            options: [.sortedKeys, .prettyPrinted]
+        )) ?? Data()
+        let canonicalJSON = String(decoding: canonicalData, as: UTF8.self)
+
+        let recordID = extractRecordIdentifier(from: record)
+            ?? String(Digest.hex(canonicalJSON).prefix(16))
+        let title = extractRecordTitle(from: record)
+            ?? "\(config.name) · \(tool) · \(recordID)"
+        let uri = extractString(from: record, keys: ["url", "html_url", "uri"])
+        let authoredAt = extractDate(from: record)
+
+        var metadata: [String: String] = [
+            "mcp_server": config.name,
+            "mcp_tool": tool,
+            "mcp_command": config.command,
+            "mcp_record_id": recordID,
+            "mcp_record_index": String(index),
+        ]
+        if let hint = offered?.readOnlyHint { metadata["mcp_read_only_hint"] = String(hint) }
+        if let description = offered?.description, !description.isEmpty {
+            metadata["mcp_tool_description"] = String(description.prefix(500))
+        }
+        if let predicateType = record["predicate_type"] as? String, !predicateType.isEmpty {
+            metadata["predicate_type"] = predicateType
+        }
+        if let evidenceID = record["evidence_id"] as? String, !evidenceID.isEmpty {
+            metadata["evidence_id"] = evidenceID
+        }
+
+        let summaryHeader = extractRecordSummary(from: record, title: title)
+        let body = summaryHeader.isEmpty ? canonicalJSON : "\(summaryHeader)\n\n\(canonicalJSON)"
+
+        return CoreObject(
+            sourceID: sourceID,
+            kind: .document,
+            externalID: "\(config.name)#\(tool)#\(recordID)",
+            title: title,
+            text: body,
+            uri: uri,
+            authoredAt: authoredAt,
+            domain: config.domain,
+            authority: config.authority,
+            metadata: metadata
+        )
+    }
+
+    private static func extractRecordIdentifier(from record: [String: Any]) -> String? {
+        let idKeys = ["id", "evidence_id", "page_id", "uuid", "key", "slug", "sha", "number", "uri", "url"]
+        for key in idKeys {
+            if let str = record[key] as? String, !str.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return str.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            if let num = record[key] as? Int {
+                return String(num)
+            }
+        }
+        if let name = record["name"] as? String, !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return name.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return nil
+    }
+
+    private static func extractRecordTitle(from record: [String: Any]) -> String? {
+        for key in ["title", "name", "headline", "summary"] {
+            if let str = record[key] as? String, !str.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return str.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+        // REA analysis record: subject.name + normalized_result.procedure.name
+        if let subject = record["subject"] as? [String: Any],
+           let subjectName = subject["name"] as? String, !subjectName.isEmpty {
+            if let norm = record["normalized_result"] as? [String: Any],
+               let proc = norm["procedure"] as? [String: Any],
+               let procName = proc["name"] as? String, !procName.isEmpty {
+                return "\(subjectName) · \(procName)"
+            }
+            return subjectName
+        }
+        // Notion page properties: look for property of type "title" or named "Name" / "Title" / "Item"
+        if let properties = record["properties"] as? [String: Any] {
+            for (_, value) in properties {
+                if let prop = value as? [String: Any],
+                   (prop["type"] as? String) == "title",
+                   let titleArray = prop["title"] as? [[String: Any]] {
+                    let joined = titleArray.compactMap { $0["plain_text"] as? String }.joined()
+                    if !joined.isEmpty { return joined }
+                }
+                if let str = value as? String, !str.isEmpty {
+                    return str
+                }
+            }
+        }
+        return nil
+    }
+
+    private static func extractRecordSummary(from record: [String: Any], title: String) -> String {
+        var lines: [String] = [title]
+        for key in ["description", "text", "body", "content", "notes", "status"] {
+            if let str = record[key] as? String, !str.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                lines.append("\(key): \(str)")
+            }
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private static func extractString(from record: [String: Any], keys: [String]) -> String? {
+        for key in keys {
+            if let str = record[key] as? String, !str.isEmpty { return str }
+        }
+        return nil
+    }
+
+    private static func extractDate(from record: [String: Any]) -> Date? {
+        let dateKeys = ["authored_at", "created_time", "created_at", "last_edited_time", "updated_at", "timestamp", "date"]
+        let iso = ISO8601DateFormatter()
+        let isoFractional = ISO8601DateFormatter()
+        isoFractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        for key in dateKeys {
+            if let str = record[key] as? String {
+                if let d = isoFractional.date(from: str) ?? iso.date(from: str) {
+                    return d
+                }
+            }
+        }
+        return nil
+    }
+
+    /// Fallback when a tool returns a single document or unstructured prose.
+    private static func makeSingleObject(
+        tool: String,
+        text: String,
+        config: MCPServerConfig,
+        sourceID: SourceID,
+        offered: MCPTool?
+    ) -> CoreObject {
         var metadata: [String: String] = [
             "mcp_server": config.name,
             "mcp_tool": tool,
@@ -314,7 +590,7 @@ public struct MCPClientConnector: Connector {
         }
 
         return CoreObject(
-            sourceID: source.id,
+            sourceID: sourceID,
             kind: .document,
             externalID: "\(config.name)#\(tool)",
             title: "\(config.name) · \(tool)",

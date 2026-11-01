@@ -47,6 +47,18 @@ public struct Source: Hashable, Sendable, Codable, Identifiable {
     }
 }
 
+extension Source {
+    /// Whether `last_synced_at` may move after a successful fetch.
+    ///
+    /// **Empty is not a first sync.** Connectors take that date as "nothing older matters", so
+    /// recording an empty first pass tells every later one to skip everything that already
+    /// existed. Apple Notes did exactly this on 2026-08-14: an empty result set the date, and
+    /// notes older than that could never arrive. The screen said "already up to date".
+    public static func shouldAdvanceSync(previous: Date?, fetched: Int) -> Bool {
+        previous != nil || fetched > 0
+    }
+}
+
 // MARK: - Object
 
 public enum ObjectKind: String, Sendable, Codable, CaseIterable {
@@ -122,9 +134,13 @@ public struct Evidence: Hashable, Sendable, Codable, Identifiable {
     public var snippet: String
     public var authority: Authority
 
-    public init(objectID: ObjectID, range: Range<Int>? = nil, snippet: String, authority: Authority) {
+    /// - Parameter reading: Separates this row from another at the same place in the object. An
+    ///   object's text changes under a fixed range, and `claim_evidence` holds one stance per pair,
+    ///   so a row can't both support a claim and refute it. Left `nil` the id is what it has always
+    ///   been, which receipts link to.
+    public init(objectID: ObjectID, range: Range<Int>? = nil, snippet: String, authority: Authority, reading: String? = nil) {
         let rangeKey = range.map { "\($0.lowerBound)-\($0.upperBound)" } ?? "whole"
-        self.id = EvidenceID.derived(from: objectID.value, rangeKey)
+        self.id = reading.map { EvidenceID.derived(from: objectID.value, rangeKey, $0) } ?? EvidenceID.derived(from: objectID.value, rangeKey)
         self.objectID = objectID
         self.range = range
         self.snippet = snippet
@@ -253,6 +269,10 @@ public enum Predicate {
     public static let contributedTo = "contributed_to"
     public static let hasComponent = "has_component"
     public static let organiser = "organised_by"
+    public static let objective = "objective"
+    public static let lastVerifiedCommit = "last_verified_commit"
+    public static let nextAction = "next_action"
+    public static let verifyCommand = "verify_command"
 
     /// Predicates where one subject may hold only one current value. These are the ones
     /// that can contradict; `uses` cannot, because a project genuinely uses many things.
@@ -260,7 +280,63 @@ public enum Predicate {
     /// `metWith`, `attended` and `builtWith` are deliberately absent: you meet many people and
     /// attend many events, and treating a second one as a contradiction would manufacture
     /// conflict out of an ordinary calendar.
-    public static let functional: Set<String> = [status, primaryLanguage, worksAt, releasedVersion, partOf]
+    public static let functional: Set<String> = [
+        status, primaryLanguage, worksAt, releasedVersion, partOf,
+        objective, lastVerifiedCommit, nextAction,
+    ]
+
+    /// Functional predicates that a working document restates as it is rewritten.
+    ///
+    /// These stay functional because a project has one objective and one next step at a time, and
+    /// only functional predicates get a belief: `next_action` sat outside the set and showed what
+    /// that costs, with three live values in OpenCore's own slot and none ever replaced. What was
+    /// wrong was calling each rewrite a contradiction.
+    ///
+    /// A new value here is usually the same file saying something newer, so `BeliefEngine` settles
+    /// it by time and it never raises an alert. See `BeliefEngine.revisions(among:)`. Two different
+    /// documents disagreeing are still a contradiction. `verify_command` stays out on purpose: a
+    /// repository can have several, and no rewrite of one retires another.
+    public static let documentRestated: Set<String> = [objective, lastVerifiedCommit, nextAction]
+
+    /// Controlled predicate vocabulary permitted for model-proposed claims (`v0.6` #11).
+    /// Restricting proposals to this set guarantees that model-proposed claims participate
+    /// in the same contradiction and belief-resolution slots as deterministic rules.
+    public static let allVocabulary: Set<String> = [
+        uses, builtWith, dependsOn, authoredBy, worksAt, status, describes, prefers,
+        releasedVersion, primaryLanguage, metWith, attended, partOf, contributedTo,
+        hasComponent, organiser, objective, lastVerifiedCommit, nextAction, verifyCommand,
+    ]
+}
+
+/// A model-proposed claim candidate (`v0.6` #11) stored on a `CoreObject`'s metadata so
+/// `IngestPipeline` and `opencore rebuild` can deterministically verify its UTF-8 byte span
+/// and derive an `Authority.modelInference` claim without re-invoking the language model.
+public struct ProposedClaimRecord: Hashable, Sendable, Codable {
+    public var subject: String
+    public var subjectKind: EntityKind
+    public var predicate: String
+    public var value: String
+    public var valueKind: EntityKind?
+    public var verbatimQuote: String
+    public var confidence: Double
+
+    public init(
+        subject: String,
+        subjectKind: EntityKind,
+        predicate: String,
+        value: String,
+        valueKind: EntityKind? = nil,
+        verbatimQuote: String,
+        confidence: Double = 0.72
+    ) {
+        self.subject = subject
+        self.subjectKind = subjectKind
+        self.predicate = predicate
+        self.value = value
+        self.valueKind = valueKind
+        self.verbatimQuote = verbatimQuote
+        self.confidence = confidence
+    }
 }
 
 // MARK: - Event

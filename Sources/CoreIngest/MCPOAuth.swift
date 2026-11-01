@@ -297,12 +297,12 @@ public enum MCPOAuth {
     /// accounts so a server can have both without either overwriting the other.
     public static func keychainAccount(server: String) -> String { "mcp-oauth:\(server)" }
 
-    public static func store(_ token: Token, server: String) throws {
+    public static func store(_ token: Token, server: String, authentication: Keychain.Authentication = .nonInteractive) throws {
         let data = try JSONEncoder().encode(token)
         guard let text = String(data: data, encoding: .utf8) else {
             throw OAuthError.malformed("could not encode token")
         }
-        try Keychain.write(text, toAccount: keychainAccount(server: server))
+        try Keychain.write(text, toAccount: keychainAccount(server: server), authentication: authentication)
     }
 
     /// The registered client is a credential too, and it must survive to refresh a token: a
@@ -310,16 +310,16 @@ public enum MCPOAuth {
     /// re-authorization.
     public static func clientKeychainAccount(server: String) -> String { "mcp-oauth-client:\(server)" }
 
-    public static func store(_ client: Client, server: String) throws {
+    public static func store(_ client: Client, server: String, authentication: Keychain.Authentication = .nonInteractive) throws {
         let data = try JSONEncoder().encode(client)
         guard let text = String(data: data, encoding: .utf8) else {
             throw OAuthError.malformed("could not encode client registration")
         }
-        try Keychain.write(text, toAccount: clientKeychainAccount(server: server))
+        try Keychain.write(text, toAccount: clientKeychainAccount(server: server), authentication: authentication)
     }
 
-    public static func storedClient(server: String) -> Client? {
-        guard let text = Keychain.read(account: clientKeychainAccount(server: server)),
+    public static func storedClient(server: String, authentication: Keychain.Authentication = .nonInteractive) -> Client? {
+        guard let text = Keychain.readResult(account: clientKeychainAccount(server: server), authentication: authentication).value,
               let data = text.data(using: .utf8)
         else { return nil }
         return try? JSONDecoder().decode(Client.self, from: data)

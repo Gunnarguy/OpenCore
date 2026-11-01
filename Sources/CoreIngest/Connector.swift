@@ -1,18 +1,6 @@
 import CoreModel
 import Foundation
 
-/// What a connector hands back after a sync pass.
-public struct ConnectorBatch: Sendable {
-    public var objects: [CoreObject]
-    /// Opaque resume token stored on the source, so the next sync can be incremental.
-    public var cursor: String?
-
-    public init(objects: [CoreObject], cursor: String? = nil) {
-        self.objects = objects
-        self.cursor = cursor
-    }
-}
-
 /// A source of objects.
 ///
 /// Connectors produce `CoreObject`s and nothing else. They never write claims, never touch

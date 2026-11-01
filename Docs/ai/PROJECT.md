@@ -24,6 +24,8 @@ and the reverse.
 - Passage-level retrieval with domain admission enforced before ranking.
 - Answering from stored claims with evidence and a receipt.
 - Serving the store to other tools over MCP.
+- A Mac operator console in the same app: repository fleet, coding agents, computer use, local
+  models, hardware and monitors. It is outside the evidence store and writes no objects.
 
 ## Out of scope — decided, not pending
 
@@ -45,31 +47,39 @@ it on 2026-08-12 for opposite reasons, and both had been sitting here contradict
   inside the conversation rather than instead of it.
 - **Autonomous agents that act on the user's data** was reopened deliberately, at the author's
   request, and is `To Do` for v0.6 with its prerequisites and design questions stated on the
-  row. It is genuinely not built: nothing in this codebase sends, schedules or executes
-  anything. Note what it will cost when it is: `Receipt.objectsTransmitted` is `0` today, and
-  acting means transmitting.
+  row. It is not built as an agent over the store. Be exact about the rest of the app, though: it
+  schedules syncs, and the operator console drives a Local Hub, changes monitor settings and can
+  run live computer control, which stays on dry run until its gaps are fixed. None of that goes
+  through a receipt. `Receipt.objectsTransmitted` is `0` for answers, and opt-in Gemini chat is the
+  exception it has to report. Acting on the store's data will mean transmitting.
 
 ## Major constraints
 
 - **Zero external Swift dependencies.** A personal knowledge store that stops building when a
   package moves is a personal knowledge store you lose. This is why JSON-RPC is hand-rolled
-  rather than taken from the official MCP Swift SDK.
+  rather than taken from the official MCP Swift SDK. The zero applies to the Swift package graph.
+  The operator screens use BetterDisplay and a Local Hub when they are present, and neither is
+  needed to build.
 - **Local-first, genuinely.** Ingestion, chunking, embedding, retrieval and answering all run
-  on device. `Receipt.objectsTransmitted` is `0` and must stay honest if that changes.
+  on device by default. Gemini chat is opt-in. `Receipt.objectsTransmitted` must stay honest.
+- **A public repository.** Private names live in `private-names.json` beside the store.
 - **No unmeasured number may be presented as measured.** Receipt confidence is `nil`. Every
   retrieval constant carries a comment saying it was chosen rather than measured.
 
 ## Platforms
 
-macOS 15+ for the package; the app targets macOS 15+ and is developed against macOS 27 /
-Xcode 27 beta. Swift 6.2 tools, Swift 6 strict concurrency.
+macOS 26+ for the package and the app, developed against macOS 27 and Xcode 27.0 (Swift 6.4).
+Swift 6.2 tools, Swift 6 strict concurrency.
 
 ## Critical dependencies
 
 None in the package graph. System frameworks only: `SQLite3`, `NaturalLanguage`
 (`NLContextualEmbedding`), `EventKit`, `CryptoKit`, `SwiftUI`.
 
-Developer tooling: Xcode 27 beta, `xcodegen` for the app project, `gh` for the GitHub token.
+`FoundationModels`, `EventKit`, `CoreSpotlight`, `AppIntents`, `IOKit` and `CoreGraphics` are used by
+the reasoning layer and the app.
+
+Developer tooling: Xcode 27.0, `xcodegen` for the app project, `gh` for the GitHub token.
 
 ## Source-of-truth locations
 

@@ -104,6 +104,35 @@ func notesFoldersMapToDomains() throws {
     #expect(AppleNotesConnector.domain(forFolder: "Random Thoughts") == .personal)
 }
 
+// The bug: every list matched anywhere in the name, so these landed in `.work` and `.project`,
+// which an MCP caller can reach, and the comment above that method said it erred the other way.
+@Test("a folder name only opens a note to a project query as a whole word")
+func notesFolderWordsAreWhole() {
+    for folder in ["Passcodes", "Devices", "Workouts", "Homework", "Zip Codes", "Network", "Fireworks", "Barcode Scans"] {
+        #expect(AppleNotesConnector.domain(forFolder: folder) == .personal, "\(folder)")
+    }
+    #expect(AppleNotesConnector.domain(forFolder: "Work") == .work)
+    #expect(AppleNotesConnector.domain(forFolder: "Job Search") == .work)
+    #expect(AppleNotesConnector.domain(forFolder: "side-project") == .project)
+    #expect(AppleNotesConnector.domain(forFolder: "Dev Notes") == .project)
+    #expect(AppleNotesConnector.domain(forFolder: "Code") == .project)
+}
+
+// A separate guard: whole-word matching alone would still put these where an MCP caller reaches.
+@Test("a folder that says it is closed stays closed, whatever else its name says")
+func closedFolderNamesWin() {
+    for folder in ["Work Passwords", "Project Secrets", "Dev Logins", "Personal Projects", "Private Work"] {
+        #expect(AppleNotesConnector.domain(forFolder: folder) == .personal, "\(folder)")
+    }
+}
+
+// The other half of the asymmetry: closing is allowed to over-match, and must stay that way.
+@Test("a word that closes a note still matches inside a longer word")
+func sensitiveWordsStillMatchAnywhere() {
+    #expect(AppleNotesConnector.domain(forFolder: "Healthcare") == .medical)
+    #expect(AppleNotesConnector.domain(forFolder: "My Work Taxes") == .financial)
+}
+
 // MARK: - Filesystem safety
 
 @Test("the filesystem connector refuses to read binaries as text")

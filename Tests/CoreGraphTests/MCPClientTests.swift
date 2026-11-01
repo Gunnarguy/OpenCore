@@ -248,3 +248,105 @@ func storedTokenDoesNotRenewItsOwnExpiry() throws {
     let drift = abs((reread.expiresAt ?? .distantPast).timeIntervalSince(decoded.expiresAt ?? .distantFuture))
     #expect(drift < 1)
 }
+
+// MARK: - Structured record fan-out
+
+@Test("list-shaped JSON responses fan out into one object per record with stable record identities")
+func listResponseFansOutPerRecord() throws {
+    let config = MCPServerConfig(
+        name: "notion",
+        command: "notion-mcp",
+        allowedTools: ["query_database"],
+        domain: .project,
+        authority: .thirdPartyRecord
+    )
+    let sourceID = MCPClientConnector(config: config).source.id
+    let payload = """
+    {
+      "results": [
+        {
+          "id": "row-alpha",
+          "title": "Fix dense-leg waste",
+          "status": "Done",
+          "created_time": "2026-08-09T12:00:00Z",
+          "url": "https://notion.so/row-alpha"
+        },
+        {
+          "id": "row-beta",
+          "title": "MCP record fan-out",
+          "status": "In progress",
+          "created_time": "2026-08-10T15:30:00Z",
+          "url": "https://notion.so/row-beta"
+        }
+      ]
+    }
+    """
+
+    let objects = MCPClientConnector.fanOutObjects(
+        tool: "query_database",
+        rawText: payload,
+        config: config,
+        sourceID: sourceID
+    )
+
+    #expect(objects.count == 2)
+    #expect(objects[0].externalID == "notion#query_database#row-alpha")
+    #expect(objects[0].title == "Fix dense-leg waste")
+    #expect(objects[0].uri == "https://notion.so/row-alpha")
+    #expect(objects[0].authoredAt != nil)
+    #expect(objects[0].metadata["mcp_record_id"] == "row-alpha")
+
+    #expect(objects[1].externalID == "notion#query_database#row-beta")
+    #expect(objects[1].title == "MCP record fan-out")
+
+    // Re-syncing the same records in reversed order must preserve each record's ObjectID
+    // and contentHash so the store treats unchanged records as a no-op.
+    let reorderedPayload = """
+    {
+      "results": [
+        {
+          "id": "row-beta",
+          "title": "MCP record fan-out",
+          "status": "In progress",
+          "created_time": "2026-08-10T15:30:00Z",
+          "url": "https://notion.so/row-beta"
+        },
+        {
+          "id": "row-alpha",
+          "title": "Fix dense-leg waste",
+          "status": "Done",
+          "created_time": "2026-08-09T12:00:00Z",
+          "url": "https://notion.so/row-alpha"
+        }
+      ]
+    }
+    """
+    let reordered = MCPClientConnector.fanOutObjects(
+        tool: "query_database",
+        rawText: reorderedPayload,
+        config: config,
+        sourceID: sourceID
+    )
+    #expect(reordered.count == 2)
+    #expect(reordered[0].id == objects[1].id)
+    #expect(reordered[0].contentHash == objects[1].contentHash)
+    #expect(reordered[1].id == objects[0].id)
+    #expect(reordered[1].contentHash == objects[0].contentHash)
+}
+
+@Test("unstructured prose tool output still produces a single document object")
+func proseResponseFallsBackToSingleObject() throws {
+    let config = MCPServerConfig(name: "docs", command: "docs-mcp", allowedTools: ["read_page"], domain: .project)
+    let sourceID = MCPClientConnector(config: config).source.id
+
+    let objects = MCPClientConnector.fanOutObjects(
+        tool: "read_page",
+        rawText: "Plain markdown documentation with no JSON record array.",
+        config: config,
+        sourceID: sourceID
+    )
+
+    #expect(objects.count == 1)
+    #expect(objects[0].externalID == "docs#read_page")
+    #expect(objects[0].authoredAt == nil)
+}

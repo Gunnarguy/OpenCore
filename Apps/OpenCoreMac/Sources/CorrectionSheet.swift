@@ -54,7 +54,7 @@ extension AppModel {
 
 struct CorrectionSheet: View {
     let row: AppModel.ClaimRow
-    @Environment(AppModel.self) private var model
+    @Environment(\.appModel) private var model
     @Environment(\.dismiss) private var dismiss
 
     @State private var newValue = ""

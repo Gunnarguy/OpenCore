@@ -80,13 +80,29 @@ extension Store {
         ).compactMap { $0.string("name") }
     }
 
-    /// Drop every derived layer. Objects, sources, entities and receipts survive.
+    /// Drop every derived layer in place. Objects, sources, entities and receipts survive.
     ///
     /// Entities are kept deliberately: the CLI's original list did not clear them either, so a
     /// changed entity count after a rebuild is a real defect in resolution rather than an
     /// artifact of the reset.
+    ///
+    /// **Refuses on any store with something a drop cannot give back.** The guard used to count
+    /// only corrections and user assertions, both 0 on the real store, so it passed there, and
+    /// the drop would have cut every receipt's links to its evidence, lifted the privacy
+    /// quarantine by re-deriving claims from object domains, and reset knowledge time. Nothing
+    /// that matters goes through here any more: `RebuildRehearsal` rebuilds a copy, carries
+    /// those things across, shows the difference, and applies it in one transaction.
     public func dropDerivedLayers() async throws {
         try await database.write { connection in
+            let corrections = try connection.scalarInt("SELECT COUNT(*) FROM correction")
+            let assertions = try connection.scalarInt("SELECT COUNT(*) FROM claim WHERE authority = ?", [.integer(Int64(Authority.directStatement.rawValue))])
+            guard corrections == 0, assertions == 0 else {
+                throw RebuildSafetyError.userAssertionsPresent
+            }
+            let links = try connection.scalarInt("SELECT (SELECT COUNT(*) FROM receipt_evidence) + (SELECT COUNT(*) FROM receipt_claim)")
+            guard links == 0 else { throw RebuildSafetyError.receiptLinksPresent(links) }
+            let pending = try connection.scalarInt("SELECT COUNT(*) FROM object WHERE json_extract(metadata, '$.classification_requires_rebuild') = 'true'")
+            guard pending == 0 else { throw RebuildSafetyError.quarantinePending(pending) }
             for table in Self.derivedTables {
                 try connection.execute("DELETE FROM \(table)")
             }
@@ -167,5 +183,44 @@ extension Store {
             }
         }
         return epochs
+    }
+}
+
+/// User assertions and corrections are not reconstructible from connector objects today.
+/// Refusing before the first DELETE is preferable to a successful rebuild that loses them.
+public enum RebuildSafetyError: Error, LocalizedError, Sendable {
+    case userAssertionsPresent
+    case receiptLinksPresent(Int)
+    case quarantinePending(Int)
+    /// The store changed after the rehearsal, so what was reviewed is no longer what would land.
+    case staleRehearsal
+    /// A rehearsal found something that must not reach the store.
+    case rehearsalBlocked([String])
+    /// The destructive step was pointed at the real store.
+    case notARehearsalCopy
+    /// The copy of the store taken just before an apply could not be proved good.
+    case backupFailed(String)
+    /// A table did not land as rehearsed. The transaction was rolled back.
+    case applyMismatch(table: String, expected: Int, landed: Int)
+
+    public var errorDescription: String? {
+        switch self {
+        case .userAssertionsPresent:
+            "Rebuild was stopped because this store contains user assertions or corrections. Nothing was deleted. Run `opencore rebuild`, which rehearses on a copy and replays them."
+        case .receiptLinksPresent(let links):
+            "Rebuild was stopped because \(links) receipt link(s) would be cut. Nothing was deleted. Run `opencore rebuild`, which rehearses on a copy and keeps them."
+        case .quarantinePending(let objects):
+            "Rebuild was stopped because \(objects) object(s) are quarantined pending review, and an in-place rebuild would lift that without audit. Nothing was deleted. Run `opencore rebuild`, which rehearses on a copy and keeps the quarantine."
+        case .staleRehearsal:
+            "The store changed after this rehearsal, so what was reviewed is not what would land. Nothing was changed. Rehearse again."
+        case .rehearsalBlocked(let reasons):
+            "This rehearsal cannot be applied: \(reasons.joined(separator: "; ")). Nothing was changed."
+        case .notARehearsalCopy:
+            "Refused: this step only runs on a rehearsal copy, never on the real store."
+        case .backupFailed(let why):
+            "The backup taken before applying could not be proved good: \(why). Nothing was changed."
+        case .applyMismatch(let table, let expected, let landed):
+            "\(table) would have held \(landed) row(s) where the rehearsal has \(expected). Everything was rolled back and nothing was changed."
+        }
     }
 }

@@ -1,5 +1,10 @@
 import CoreModel
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#else
+import Glibc
+#endif
 
 /// Typed persistence for every OpenCore primitive.
 ///
@@ -52,6 +57,16 @@ extension Store {
         )
     }
 
+    /// Where an incremental fetch should start, or nil to read everything.
+    ///
+    /// A source with a sync date and no objects has been poisoned by an empty first pass (see
+    /// `Source.shouldAdvanceSync`), so its date is ignored rather than trusted.
+    public func incrementalStart(for sourceID: SourceID) async throws -> Date? {
+        guard let since = try await sources().first(where: { $0.id == sourceID })?.lastSyncedAt else { return nil }
+        let held = try await database.scalarInt("SELECT COUNT(*) FROM object WHERE source_id = ?", [.text(sourceID.value)])
+        return held > 0 ? since : nil
+    }
+
     public func sources() async throws -> [Source] {
         try await database.query("SELECT * FROM source ORDER BY kind, handle").map(Source.init(row:))
     }
@@ -98,9 +113,8 @@ public struct IngestOutcome: Sendable {
     public var inserted: Int = 0
     public var updated: Int = 0
     public var unchanged: Int = 0
-    /// Objects whose previous content was preserved into `object_version` before being
-    /// overwritten. Equal to `updated` in normal operation; reported separately so a sync that
-    /// updates without versioning is visible rather than silent.
+    /// Objects whose previous text was preserved into `object_version`. Metadata and policy
+    /// repairs can increment `updated` without creating a new text version.
     public var versioned: Int = 0
 
     public init() {}
@@ -111,20 +125,49 @@ public struct IngestOutcome: Sendable {
 extension Store {
     /// Insert or refresh objects in one transaction.
     ///
-    /// Content-hash comparison is the reason a re-sync is cheap: an object whose text has
-    /// not changed is left completely alone, so its evidence, claims and FTS rows survive
-    /// untouched rather than being torn down and rebuilt identically.
+    /// Re-sync skips identical text and metadata. Policy changes are still applied when text
+    /// is unchanged; affected interpretations are quarantined until an audited replay.
     @discardableResult
     public func ingest(_ objects: [CoreObject]) async throws -> IngestOutcome {
         try await database.write { connection in
             var outcome = IngestOutcome()
-            for object in objects {
+            var needsGlobalLegacyAudit = true
+            for incoming in objects {
+                var object = incoming
                 let existing = try connection.query(
                     "SELECT * FROM object WHERE id = ?",
                     [.text(object.id.value)]
                 ).first
 
-                if let existing, existing.requireString("content_hash") == object.contentHash {
+                if let existing {
+                    object.domain = Self.retainedImportDomain(existing: Domain(rawValue: existing.requireString("domain")) ?? .restricted, proposed: object.domain)
+                    object.authority = min(Authority(rawValue: existing.requireInt("authority")) ?? .modelInference, object.authority)
+                }
+                let contentChanged = existing.map { $0.requireString("content_hash") != object.contentHash } ?? true
+                let policyChanged = existing.map {
+                    $0.requireString("domain") != object.domain.rawValue || $0.requireInt("authority") != object.authority.rawValue
+                } ?? false
+                let previousMetadata = existing.flatMap { $0.string("metadata") }.flatMap { $0.data(using: .utf8) }
+                    .flatMap { try? JSONDecoder().decode([String: String].self, from: $0) } ?? [:]
+                var mergedMetadata = previousMetadata.merging(object.metadata) { _, new in new }
+                let metadataChanged = mergedMetadata != previousMetadata
+                // Dates are compared as stored, never rebuilt. A `Date` keeps seconds since 2001, so
+                // a file's sub-second mtime does not survive the trip through the 1970-based column:
+                // 33 of 102 real mtimes came back unequal, measured 2026-10-31. Comparing the rebuilt
+                // date called about a third of unchanged files changed on every re-read, and wrote
+                // presentation history onto objects nothing had touched.
+                let presentationChanged = existing.map {
+                    $0.requireString("title") != object.title || $0.string("uri") != object.uri
+                        || $0.double("authored_at") != object.authoredAt?.timeIntervalSince1970
+                } ?? false
+                let containerChanged = ["folder", "list", "root"].contains { previousMetadata[$0] != mergedMetadata[$0] }
+                if let existing, !contentChanged, presentationChanged || containerChanged {
+                    var history = ObjectPresentation.history(in: previousMetadata)
+                    let prior = ObjectPresentation(object: CoreObject(row: existing))
+                    if !history.contains(prior) { history.append(prior) }
+                    mergedMetadata[ObjectPresentation.metadataKey] = (try? JSONEncoder().encode(history)).flatMap { String(data: $0, encoding: .utf8) }
+                }
+                if existing != nil, !contentChanged, !policyChanged, !metadataChanged, !presentationChanged {
                     outcome.unchanged += 1
                     continue
                 }
@@ -140,7 +183,7 @@ extension Store {
                 // `INSERT OR IGNORE` because the primary key is (object, content hash): an
                 // object that flips back to earlier content is the same version returning, not
                 // a new one, and recording it twice would double-derive from it on replay.
-                if let existing {
+                if let existing, contentChanged {
                     try connection.execute(
                         """
                         INSERT OR IGNORE INTO object_version
@@ -165,7 +208,15 @@ extension Store {
                     outcome.versioned += 1
                 }
 
-                let metadata = (try? JSONEncoder().encode(object.metadata)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+                if let existing, policyChanged {
+                    mergedMetadata = try Self.repairPolicy(
+                        objectID: object.id, existing: existing, domain: object.domain,
+                        authority: object.authority, reason: "connector reclassification", metadata: mergedMetadata,
+                        connection: connection, auditLegacyGlobally: needsGlobalLegacyAudit
+                    ).metadata
+                    needsGlobalLegacyAudit = false
+                }
+                let metadata = Self.encodeMetadata(mergedMetadata)
                 try connection.execute(
                     """
                     INSERT INTO object (id, source_id, kind, external_id, title, text, uri, authored_at,
@@ -178,13 +229,15 @@ extension Store {
                         authored_at = excluded.authored_at,
                         ingested_at = excluded.ingested_at,
                         content_hash = excluded.content_hash,
+                        domain = excluded.domain,
+                        authority = excluded.authority,
                         metadata = excluded.metadata
                     """,
                     [
                         .text(object.id.value), .text(object.sourceID.value), .text(object.kind.rawValue),
                         .text(object.externalID), .text(object.title), .text(object.text),
                         SQLValue(text: object.uri), SQLValue(date: object.authoredAt),
-                        .real(object.ingestedAt.timeIntervalSince1970), .text(object.contentHash),
+                        .real((contentChanged ? object.ingestedAt : existing?.requireDate("ingested_at") ?? object.ingestedAt).timeIntervalSince1970), .text(object.contentHash),
                         .text(object.domain.rawValue), .integer(Int64(object.authority.rawValue)), .text(metadata),
                     ]
                 )
@@ -194,8 +247,332 @@ extension Store {
         }
     }
 
+    public struct ObjectPolicyRepair: Sendable {
+        public let objectID: ObjectID
+        public let domain: Domain
+        public let authority: Authority
+        public let reason: String
+        public init(objectID: ObjectID, domain: Domain, authority: Authority, reason: String) {
+            self.objectID = objectID; self.domain = domain; self.authority = authority; self.reason = reason
+        }
+    }
+
+    public struct PolicyRepairReport: Sendable {
+        public var objectsChanged = 0
+        public var versionsChanged = 0
+        public var claimsQuarantined = 0
+        public var objectsPendingRebuild = 0
+        public var legacySnapshotsAdded = 0
+        public var requiresRebuild: Bool { claimsQuarantined > 0 || objectsPendingRebuild > 0 || legacySnapshotsAdded > 0 }
+    }
+
+    /// Makes the consistent snapshot itself instead of trusting a caller-supplied file's
+    /// header. The destination must be new; exclusive creation rejects symlink/hardlink
+    /// aliases to the active database and never overwrites another backup.
+    public func createPolicyRepairBackup(at url: URL) async throws {
+        try await database.createPolicyRepairBackup(at: url)
+    }
+
+    /// An explicit, dry-run-first repair. Text, version content, metadata, corrections and
+    /// receipts survive. Existing interpretations are quarantined rather than assigned an
+    /// invented new confidence or provenance. A separately audited rebuild is still required.
+    public func reclassifyObjects(_ repairs: [ObjectPolicyRepair], dryRun: Bool = true) async throws -> PolicyRepairReport {
+        try await database.write { connection in
+            var report = PolicyRepairReport()
+            var affectedClaims: Set<String> = []
+            var seenRepairIDs: Set<ObjectID> = []
+            let uniqueRepairs = repairs.filter { seenRepairIDs.insert($0.objectID).inserted }
+            // Unchanged safe candidates remain independent proof even when the CLI scans
+            // their source in this same batch. Exclude only floors actually changing policy.
+            let repairingIDs = Set(try uniqueRepairs.compactMap { repair -> String? in
+                guard let row = try connection.query("SELECT * FROM object WHERE id = ?", [.text(repair.objectID.value)]).first else { return nil }
+                let current = CoreObject(row: row)
+                if Self.retainedImportDomain(existing: current.domain, proposed: repair.domain) != current.domain || min(current.authority, repair.authority) != current.authority {
+                    return repair.objectID.value
+                }
+                let versions = try connection.query("SELECT domain, authority FROM object_version WHERE object_id = ?", [.text(repair.objectID.value)])
+                return versions.contains {
+                    Self.retainedImportDomain(existing: Domain(rawValue: $0.requireString("domain")) ?? .restricted, proposed: repair.domain).rawValue != $0.requireString("domain")
+                        || min($0.requireInt("authority"), repair.authority.rawValue) != $0.requireInt("authority")
+                } ? repair.objectID.value : nil
+            })
+            let timelineProof: [String: Set<Domain>]
+            if dryRun { timelineProof = [:] }
+            else { timelineProof = try Self.independentTimelineProof(excluding: repairingIDs, connection: connection) }
+            var needsGlobalLegacyAudit = true
+            for repair in uniqueRepairs {
+                guard let existing = try connection.query("SELECT * FROM object WHERE id = ?", [.text(repair.objectID.value)]).first else { continue }
+                let current = CoreObject(row: existing)
+                let domain = Self.retainedImportDomain(existing: current.domain, proposed: repair.domain)
+                let authority = min(current.authority, repair.authority)
+                let versions = try connection.query("SELECT * FROM object_version WHERE object_id = ?", [.text(repair.objectID.value)])
+                let versionChanges = versions.filter {
+                    Self.retainedImportDomain(existing: Domain(rawValue: $0.requireString("domain")) ?? .restricted, proposed: repair.domain).rawValue != $0.requireString("domain")
+                        || min($0.requireInt("authority"), repair.authority.rawValue) != $0.requireInt("authority")
+                }.count
+                let changed = current.domain != domain || current.authority != authority
+                if current.metadata["classification_requires_rebuild"] == "true" || changed || versionChanges > 0 { report.objectsPendingRebuild += 1 }
+                guard changed || versionChanges > 0 else { continue }
+                report.objectsChanged += changed ? 1 : 0
+                report.versionsChanged += versionChanges
+                for row in try connection.query("SELECT DISTINCT ce.claim_id FROM claim_evidence ce JOIN evidence e ON e.id = ce.evidence_id WHERE e.object_id = ?", [.text(repair.objectID.value)]) {
+                    affectedClaims.insert(row.requireString("claim_id"))
+                }
+                if dryRun { continue }
+                let result = try Self.repairPolicy(objectID: repair.objectID, existing: existing, domain: domain, authority: authority, reason: repair.reason, metadata: current.metadata, connection: connection, repairingIDs: repairingIDs, provenTimelineEvents: timelineProof, auditLegacyGlobally: needsGlobalLegacyAudit)
+                needsGlobalLegacyAudit = false
+                report.legacySnapshotsAdded += result.legacySnapshotsAdded
+                try connection.execute("UPDATE object SET domain = ?, authority = ?, metadata = ? WHERE id = ?", [.text(domain.rawValue), .integer(Int64(authority.rawValue)), .text(Self.encodeMetadata(result.metadata)), .text(repair.objectID.value)])
+            }
+            report.claimsQuarantined = affectedClaims.count
+            return report
+        }
+    }
+
+    /// Automated imports can restrict an existing compartment, never promote a private
+    /// source to project/public by a filename guess. Explicit retagging needs its own action.
+    private static func retainedImportDomain(existing: Domain, proposed: Domain) -> Domain {
+        if existing == proposed || existing == .restricted { return existing }
+        if proposed == .restricted { return .restricted }
+        if existing.isSensitive { return existing }
+        if proposed.isSensitive { return proposed }
+        if existing == .publicRecord { return proposed }
+        if existing == .project, [.personal, .work].contains(proposed) { return proposed }
+        if [.personal, .work].contains(existing), [.project, .publicRecord].contains(proposed) { return existing }
+        return .restricted
+    }
+
+    private static func encodeMetadata(_ metadata: [String: String]) -> String {
+        (try? JSONEncoder().encode(metadata)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+    }
+
+    private static func policyAudit(_ metadata: [String: String], domain: String, authority: Int, reason: String) -> [String: String] {
+        var result = metadata
+        let entry = "domain=\(domain),authority=\(authority),reason=\(reason)"
+        var history = metadata["classification_history"].flatMap { $0.data(using: .utf8) }.flatMap { try? JSONDecoder().decode([String].self, from: $0) } ?? []
+        if !history.contains(entry) { history.append(entry) }
+        result["classification_history"] = (try? JSONEncoder().encode(history)).flatMap { String(data: $0, encoding: .utf8) }
+        result["classification_requires_rebuild"] = "true"
+        return result
+    }
+
+    private static func repairPolicy(
+        objectID: ObjectID, existing: Row, domain: Domain, authority: Authority, reason: String,
+        metadata: [String: String], connection: Connection, repairingIDs: Set<String> = [],
+        provenTimelineEvents: [String: Set<Domain>]? = nil, auditLegacyGlobally: Bool = true
+    ) throws -> (metadata: [String: String], versions: Int, legacySnapshotsAdded: Int) {
+        var updated = policyAudit(metadata, domain: existing.requireString("domain"), authority: existing.requireInt("authority"), reason: reason)
+        let versions = try connection.query("SELECT * FROM object_version WHERE object_id = ?", [.text(objectID.value)])
+        var eventObjects = [CoreObject(row: existing)]
+        for version in versions {
+            let oldMetadata = version.string("metadata").flatMap { $0.data(using: .utf8) }.flatMap { try? JSONDecoder().decode([String: String].self, from: $0) } ?? [:]
+            var oldObject = CoreObject(row: existing)
+            oldObject.title = version.requireString("title"); oldObject.authoredAt = version.date("authored_at"); oldObject.metadata = oldMetadata
+            eventObjects.append(oldObject)
+            let versionDomain = retainedImportDomain(existing: Domain(rawValue: version.requireString("domain")) ?? .restricted, proposed: domain)
+            let versionAuthority = min(version.requireInt("authority"), authority.rawValue)
+            guard version.requireString("domain") != versionDomain.rawValue || version.requireInt("authority") != versionAuthority else { continue }
+            let audited = policyAudit(oldMetadata, domain: version.requireString("domain"), authority: version.requireInt("authority"), reason: reason)
+            try connection.execute("UPDATE object_version SET domain = ?, authority = ?, metadata = ? WHERE object_id = ? AND content_hash = ?", [.text(versionDomain.rawValue), .integer(Int64(versionAuthority)), .text(encodeMetadata(audited)), .text(objectID.value), .text(version.requireString("content_hash"))])
+        }
+        let claims = try connection.query("SELECT DISTINCT c.id, c.subject, c.object_entity FROM claim c JOIN claim_evidence ce ON ce.claim_id = c.id JOIN evidence e ON e.id = ce.evidence_id WHERE e.object_id = ?", [.text(objectID.value)])
+        var entities = Set(claims.flatMap { [$0.string("subject"), $0.string("object_entity")].compactMap { $0 } })
+        var eventIDs: Set<String> = []
+        for object in eventObjects {
+            for event in ObjectPresentation.timelineEvents(for: object) {
+                eventIDs.insert(event.id.value); entities.insert(event.subject.value)
+            }
+        }
+        for id in eventIDs { try connection.execute("UPDATE event SET domain = 'restricted' WHERE id = ?", [.text(id)]) }
+        let excludedObjects = repairingIDs.union([objectID.value])
+        let provenEvents: [String: Set<Domain>]
+        if let provenTimelineEvents { provenEvents = provenTimelineEvents }
+        else { provenEvents = try independentTimelineProof(excluding: excludedObjects, connection: connection) }
+        var legacy: [CoreEvent] = []
+        var safeTimelineContainers: Set<String> = []
+        var legacyIDs: Set<EventID> = []
+        // Older releases could overwrite a folder/title/date without preserving its floor
+        // descriptor. There is then no truthful way to attribute the orphan by the current
+        // container alone. Audit every legacy file/note event and retain visibility only
+        // when an independent admitted floor proves that exact deterministic event.
+        let candidateIDs = entities.sorted()
+        let placeholders = candidateIDs.map { _ in "?" }.joined(separator: ",")
+        let bindings = candidateIDs.map { SQLValue.text($0) }
+        let entityRows: [Row]
+        let eventRows: [Row]
+        if auditLegacyGlobally {
+            entityRows = try connection.query("SELECT * FROM entity")
+            eventRows = try connection.query("SELECT * FROM event WHERE verb IN ('noted', 'edited', 'wrote')")
+        } else if candidateIDs.isEmpty {
+            entityRows = []; eventRows = []
+        } else {
+            entityRows = try connection.query("SELECT * FROM entity WHERE id IN (\(placeholders))", bindings)
+            eventRows = try connection.query("SELECT * FROM event WHERE subject IN (\(placeholders)) AND verb IN ('noted', 'edited', 'wrote')", bindings)
+        }
+        let containers = Dictionary(uniqueKeysWithValues: entityRows.map { ($0.requireString("id"), $0) })
+        for row in eventRows {
+            let event = CoreEvent(row: row)
+            if eventIDs.contains(event.id.value) { continue }
+            let containerID = event.subject.value
+            let originalDomain = containers[containerID].flatMap { Domain(rawValue: $0.requireString("domain")) } ?? .restricted
+            let allowed: Set<Domain> = [.project, .publicRecord].contains(originalDomain) ? [.project, .publicRecord] : originalDomain.readableDomains
+            if let proof = provenEvents[event.id.value], !proof.isDisjoint(with: allowed) {
+                safeTimelineContainers.insert(containerID)
+                continue
+            }
+            entities.insert(containerID)
+            if event.domain == .restricted { continue }
+            if legacyIDs.insert(event.id).inserted { legacy.append(event) }
+            try connection.execute("UPDATE event SET domain = 'restricted' WHERE id = ?", [.text(event.id.value)])
+        }
+        let legacySnapshotsAdded = try preserveUnprovenLegacyEvents(legacy, connection: connection)
+        let affectedClaimIDs = Set(claims.map { $0.requireString("id") })
+        for entityID in entities {
+            guard let entity = try connection.query("SELECT * FROM entity WHERE id = ?", [.text(entityID)]).first else { continue }
+            let currentDomain = Domain(rawValue: entity.requireString("domain")) ?? .restricted
+            let safeDomains: Set<Domain> = [.project, .publicRecord].contains(currentDomain) ? [.project, .publicRecord] : currentDomain.readableDomains.subtracting([.restricted])
+            let independentClaim = try connection.query(
+                """
+                SELECT DISTINCT c.id, c.domain AS claim_domain, o.id AS object_id, o.domain AS object_domain
+                FROM claim c JOIN claim_evidence ce ON ce.claim_id = c.id AND ce.stance = 'supports'
+                JOIN evidence e ON e.id = ce.evidence_id JOIN object o ON o.id = e.object_id
+                WHERE (c.subject = ? OR c.object_entity = ?) AND c.retracted_at IS NULL
+                  AND c.domain != 'restricted' AND o.domain != 'restricted'
+                """, [.text(entityID), .text(entityID)]
+            ).contains { row in
+                !affectedClaimIDs.contains(row.requireString("id"))
+                    && !excludedObjects.contains(row.requireString("object_id"))
+                    && Domain(rawValue: row.requireString("claim_domain")).map { safeDomains.contains($0) } == true
+                    && Domain(rawValue: row.requireString("object_domain")).map { safeDomains.contains($0) } == true
+            }
+            if !independentClaim && !safeTimelineContainers.contains(entityID) {
+                try connection.execute("UPDATE entity SET domain = 'restricted' WHERE id = ?", [.text(entityID)])
+            }
+        }
+        for claim in claims { try connection.execute("UPDATE claim SET domain = 'restricted' WHERE id = ?", [.text(claim.requireString("id"))]) }
+        try connection.execute("UPDATE evidence SET authority = MIN(authority, ?) WHERE object_id = ?", [.integer(Int64(authority.rawValue)), .text(objectID.value)])
+        // Aliases have no per-object provenance. Affected shared entities remain usable by
+        // canonical name, but external clients must not receive or resolve unproven aliases.
+        let prior = metadata["classification_affected_entities"].flatMap { $0.data(using: .utf8) }.flatMap { try? JSONDecoder().decode([String].self, from: $0) } ?? []
+        updated["classification_affected_entities"] = (try? JSONEncoder().encode(entities.union(prior).sorted())).flatMap { String(data: $0, encoding: .utf8) }
+        return (updated, versions.count, legacySnapshotsAdded)
+    }
+
+    private static func independentTimelineProof(excluding excluded: Set<String>, connection: Connection) throws -> [String: Set<Domain>] {
+        var proof: [String: Set<Domain>] = [:]
+        for row in try connection.query("SELECT * FROM object") where !excluded.contains(row.requireString("id")) {
+            for event in ObjectPresentation.timelineEvents(for: CoreObject(row: row)) where event.domain != .restricted {
+                proof[event.id.value, default: []].insert(event.domain)
+            }
+        }
+        let historical = try connection.query("""
+            SELECT o.id AS parent_id, o.domain AS parent_domain, o.source_id, o.kind,
+                   o.external_id, v.title, v.text, v.uri, v.authored_at,
+                   v.ingested_at, v.domain, v.authority, v.metadata
+            FROM object_version v JOIN object o ON o.id = v.object_id
+            """)
+        for row in historical where !excluded.contains(row.requireString("parent_id")) {
+            var object = CoreObject(row: row)
+            if let parent = Domain(rawValue: row.requireString("parent_domain")),
+               parent == .restricted || (!object.domain.isSensitive && parent != .project && parent != .publicRecord) {
+                object.domain = parent
+            }
+            for event in ObjectPresentation.timelineEvents(for: object) where event.domain != .restricted {
+                proof[event.id.value, default: []].insert(event.domain)
+            }
+        }
+        return proof
+    }
+
+    /// The source repair writes unproven legacy rows to. It holds objects and is never synced.
+    static let privacyLedgerHandle = "privacy-repair-ledger"
+
+    /// Uncertain legacy rows are observations of an older store, not evidence about the
+    /// repaired project's content. Keep them in their own immutable restricted floor objects
+    /// so a project artifact never acquires somebody else's private metadata by repair.
+    private static func preserveUnprovenLegacyEvents(_ events: [CoreEvent], connection: Connection) throws -> Int {
+        guard !events.isEmpty else { return 0 }
+        let source = Source(kind: .manual, handle: privacyLedgerHandle, displayName: "Unproven legacy timeline records", defaultAuthority: .generatedSummary, defaultDomain: .restricted)
+        try connection.execute("INSERT OR IGNORE INTO source (id, kind, handle, display_name, default_authority, default_domain) VALUES (?, ?, ?, ?, ?, ?)", [.text(source.id.value), .text(source.kind.rawValue), .text(source.handle), .text(source.displayName), .integer(Int64(source.defaultAuthority.rawValue)), .text(source.defaultDomain.rawValue)])
+        var added = 0
+        for event in events {
+            let body = String(decoding: try JSONEncoder().encode(event), as: UTF8.self)
+            let snapshot = String(decoding: try JSONEncoder().encode([event]), as: UTF8.self)
+            let object = CoreObject(sourceID: source.id, kind: .document, externalID: event.id.value,
+                title: "Unproven legacy timeline record", text: body, domain: .restricted,
+                authority: .generatedSummary, metadata: [ObjectPresentation.legacyEventsKey: snapshot, "legacy_provenance": "original floor unknown", "classification_requires_rebuild": "true", "classification_affected_entities": String(decoding: try JSONEncoder().encode([event.subject.value]), as: UTF8.self)])
+            added += try connection.execute("""
+                INSERT OR IGNORE INTO object (id, source_id, kind, external_id, title, text, uri,
+                    authored_at, ingested_at, content_hash, domain, authority, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?)
+                """, [.text(object.id.value), .text(source.id.value), .text(object.kind.rawValue), .text(object.externalID), .text(object.title), .text(object.text), .real(object.ingestedAt.timeIntervalSince1970), .text(object.contentHash), .text(object.domain.rawValue), .integer(Int64(object.authority.rawValue)), .text(encodeMetadata(object.metadata))])
+        }
+        return added
+    }
+
     public func object(_ id: ObjectID) async throws -> CoreObject? {
         try await database.query("SELECT * FROM object WHERE id = ?", [.text(id.value)]).first.map(CoreObject.init(row:))
+    }
+
+    /// Merge metadata keys onto an existing `CoreObject` without altering its `text` or
+    /// `contentHash`. Used by `ModelClaimProposer` to persist byte-verified
+    /// `model_proposed_claims` on the floor object so `IngestPipeline` and `opencore rebuild`
+    /// can deterministically reconstruct `Authority.modelInference` claims.
+    public func updateObjectMetadata(_ id: ObjectID, merging entries: [String: String]) async throws -> CoreObject? {
+        guard var current = try await object(id) else { return nil }
+        for (key, value) in entries {
+            current.metadata[key] = value
+        }
+        let encoded = (try? JSONEncoder().encode(current.metadata)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        try await database.execute(
+            "UPDATE object SET metadata = ? WHERE id = ?",
+            [.text(encoded), .text(id.value)]
+        )
+        return current
+    }
+
+    /// Objects whose title or text mentions `surface`, ordered newest first.
+    public func objectsMentioning(_ surface: String, limit: Int = 6) async throws -> [CoreObject] {
+        let trimmed = surface.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+        let pattern = "%\(trimmed)%"
+        return try await database.query(
+            """
+            SELECT * FROM object
+            WHERE title LIKE ? OR text LIKE ?
+            ORDER BY COALESCE(authored_at, ingested_at) DESC
+            LIMIT ?
+            """,
+            [.text(pattern), .text(pattern), .integer(Int64(max(1, limit)))]
+        ).map(CoreObject.init(row:))
+    }
+
+    /// Filters run in SQLite before the limit, using the same labels and authored month
+    /// as CorpusSnapshot, so a global distribution card is not a search of the latest page.
+    public func recentObjects(
+        kind: ObjectKind? = nil, domain: Domain? = nil, sourceName: String? = nil,
+        authoredMonth: String? = nil, searchText: String? = nil, limit: Int = 60
+    ) async throws -> [CoreObject] {
+        var clauses: [String] = []
+        var bindings: [SQLValue] = []
+        if let kind { clauses.append("o.kind = ?"); bindings.append(.text(kind.rawValue)) }
+        if let domain { clauses.append("o.domain = ?"); bindings.append(.text(domain.rawValue)) }
+        if let sourceName { clauses.append("COALESCE(s.display_name, o.source_id) = ?"); bindings.append(.text(sourceName)) }
+        if let authoredMonth { clauses.append("strftime('%Y-%m', o.authored_at, 'unixepoch') = ?"); bindings.append(.text(authoredMonth)) }
+        if let searchText, !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            clauses.append("(instr(lower(o.title), lower(?)) > 0 OR instr(lower(o.text), lower(?)) > 0 OR instr(lower(COALESCE(o.uri, '')), lower(?)) > 0)")
+            bindings += [.text(searchText), .text(searchText), .text(searchText)]
+        }
+        let whereSQL = clauses.isEmpty ? "" : "WHERE " + clauses.joined(separator: " AND ")
+        bindings.append(.integer(Int64(max(1, limit))))
+        return try await database.query(
+            """
+            SELECT o.* FROM object o LEFT JOIN source s ON s.id = o.source_id
+            \(whereSQL)
+            ORDER BY COALESCE(o.authored_at, o.ingested_at) DESC
+            LIMIT ?
+            """, bindings
+        ).map(CoreObject.init(row:))
     }
 
     public func objects(ids: [ObjectID]) async throws -> [CoreObject] {
@@ -399,6 +776,10 @@ extension Store {
         }
     }
 
+    public func evidence(id: EvidenceID) async throws -> Evidence? {
+        try await database.query("SELECT * FROM evidence WHERE id = ?", [.text(id.value)]).first.map(Evidence.init(row:))
+    }
+
     public func evidence(for claimID: ClaimID, stance: Stance? = nil) async throws -> [(Evidence, Stance, Double)] {
         var sql = """
             SELECT e.*, ce.stance AS stance, ce.weight AS weight
@@ -411,7 +792,7 @@ extension Store {
             sql += " AND ce.stance = ?"
             bindings.append(.text(stance.rawValue))
         }
-        sql += " ORDER BY ce.weight DESC"
+        sql += " ORDER BY ce.weight DESC, e.id ASC"
 
         return try await database.query(sql, bindings).map { row in
             (
@@ -435,6 +816,8 @@ extension Evidence {
             snippet: row.requireString("snippet"),
             authority: Authority(rawValue: row.requireInt("authority")) ?? .thirdPartyRecord
         )
+        // The stored id, because a row made with `reading` can't be re-derived from its columns.
+        id = EvidenceID(row.requireString("id"))
     }
 }
 
@@ -497,6 +880,47 @@ extension Store {
             """,
             [.text(surface.lowercased())]
         ).map { (CoreEntity(row: $0), $0.requireDouble("alias_confidence")) }
+    }
+
+    private func entitiesWithUnprovenExternalAliases() async throws -> Set<EntityID> {
+        let rows = try await database.query("SELECT metadata FROM object WHERE metadata LIKE '%classification_affected_entities%'")
+        var ids: Set<EntityID> = []
+        for row in rows {
+            let metadata = row.string("metadata").flatMap { $0.data(using: .utf8) }.flatMap { try? JSONDecoder().decode([String: String].self, from: $0) } ?? [:]
+            let values = metadata["classification_affected_entities"].flatMap { $0.data(using: .utf8) }.flatMap { try? JSONDecoder().decode([String].self, from: $0) } ?? []
+            ids.formUnion(values.map { EntityID($0) })
+        }
+        return ids
+    }
+
+    /// Canonical names remain usable for mixed-source entities; their aliases have no
+    /// source provenance and cannot safely be attributed to the independently public facts.
+    public func resolveForExternalCaller(surface: String) async throws -> [(CoreEntity, Double)] {
+        let mixed = try await entitiesWithUnprovenExternalAliases()
+        let needle = surface.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let matches = try await resolve(surface: needle).filter { entity, _ in
+            !mixed.contains(entity.id) || entity.canonicalName.lowercased() == needle
+        }
+        if !matches.isEmpty { return matches }
+        return try await database.query("SELECT * FROM entity WHERE lower(canonical_name) = ?", [.text(needle)]).map { (CoreEntity(row: $0), 1.0) }
+    }
+
+    public func aliasesForExternalCaller(for id: EntityID) async throws -> [String] {
+        if try await entitiesWithUnprovenExternalAliases().contains(id) {
+            return try await entity(id).map { [$0.canonicalName] } ?? []
+        }
+        return try await aliases(for: id)
+    }
+
+    public func aliasSurfacesForExternalCaller() async throws -> Set<String> {
+        let mixed = try await entitiesWithUnprovenExternalAliases()
+        let rows = try await database.query("SELECT a.entity_id, a.surface, e.canonical_name, e.domain FROM entity_alias a JOIN entity e ON e.id = a.entity_id")
+        return Set(rows.compactMap { row in
+            guard let domain = Domain(rawValue: row.requireString("domain")), !domain.isSensitive else { return nil }
+            let surface = row.requireString("surface")
+            if mixed.contains(EntityID(row.requireString("entity_id"))), surface.lowercased() != row.requireString("canonical_name").lowercased() { return nil }
+            return surface
+        })
     }
 
     /// Every surface form the graph knows, lowercased.
@@ -573,9 +997,12 @@ extension Store {
                                        derivation, domain, valid_from, valid_to, observed_at, retracted_at, claim_key)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
-                        confidence = excluded.confidence,
-                        authority = MAX(claim.authority, excluded.authority),
-                        valid_to = excluded.valid_to
+                        confidence = CASE WHEN excluded.authority > claim.authority OR (excluded.authority = claim.authority AND excluded.confidence > claim.confidence) THEN excluded.confidence ELSE claim.confidence END,
+                        derivation = CASE WHEN excluded.authority > claim.authority OR (excluded.authority = claim.authority AND excluded.confidence > claim.confidence) THEN excluded.derivation ELSE claim.derivation END,
+                        domain = CASE WHEN claim.domain != excluded.domain THEN 'restricted' WHEN excluded.authority > claim.authority OR (excluded.authority = claim.authority AND excluded.confidence > claim.confidence) THEN excluded.domain ELSE claim.domain END,
+                        valid_to = CASE WHEN excluded.authority > claim.authority OR (excluded.authority = claim.authority AND excluded.confidence > claim.confidence) THEN excluded.valid_to ELSE claim.valid_to END,
+                        observed_at = CASE WHEN excluded.authority > claim.authority OR (excluded.authority = claim.authority AND excluded.confidence > claim.confidence) THEN excluded.observed_at ELSE claim.observed_at END,
+                        authority = MAX(claim.authority, excluded.authority)
                     """,
                     [
                         .text(claim.id.value), .text(claim.subject.value), .text(claim.predicate),
@@ -612,12 +1039,70 @@ extension Store {
         ).map(CoreClaim.init(row:))
     }
 
-    public func claims(subject: EntityID, currentOnly: Bool = true) async throws -> [CoreClaim] {
-        let filter = currentOnly ? "AND retracted_at IS NULL" : ""
-        return try await database.query(
-            "SELECT * FROM claim WHERE subject = ? \(filter) ORDER BY predicate, observed_at DESC",
+    /// Every claim in a slot that rests on `object`, retired ones included, in the order read.
+    public func claims(key: String, readFrom object: ObjectID) async throws -> [CoreClaim] {
+        try await database.query(
+            """
+            SELECT DISTINCT c.* FROM claim c
+            JOIN claim_evidence ce ON ce.claim_id = c.id AND ce.stance = 'supports'
+            JOIN evidence e ON e.id = ce.evidence_id
+            WHERE c.claim_key = ? AND e.object_id = ?
+            ORDER BY c.observed_at ASC, COALESCE(c.valid_from, c.observed_at) ASC, c.id ASC
+            """,
+            [.text(key), .text(object.value)]
+        ).map(CoreClaim.init(row:))
+    }
+
+    public func claims(
+        subject: EntityID,
+        currentOnly: Bool = true,
+        asOfWorld: Date? = nil,
+        asOfKnowledge: Date? = nil
+    ) async throws -> [CoreClaim] {
+        let filter = (currentOnly && asOfWorld == nil && asOfKnowledge == nil) ? "AND retracted_at IS NULL" : ""
+        let rows = try await database.query(
+            "SELECT * FROM claim WHERE subject = ? \(filter) ORDER BY predicate, observed_at DESC, id ASC",
             [.text(subject.value)]
         ).map(CoreClaim.init(row:))
+        return Self.held(rows, currentOnly: currentOnly, asOfWorld: asOfWorld, asOfKnowledge: asOfKnowledge)
+    }
+
+    /// Claims whose value is `entity`, under the same time rules as `claims(subject:)`.
+    ///
+    /// "Which projects use Swift" names Swift, and Swift is the subject of nothing: every fact
+    /// about it reads "OpenClinic is built with Swift", with Swift in the value position.
+    public func claims(
+        pointingAt entity: EntityID,
+        currentOnly: Bool = true,
+        asOfWorld: Date? = nil,
+        asOfKnowledge: Date? = nil
+    ) async throws -> [CoreClaim] {
+        let filter = (currentOnly && asOfWorld == nil && asOfKnowledge == nil) ? "AND retracted_at IS NULL" : ""
+        let rows = try await database.query(
+            "SELECT * FROM claim WHERE object_entity = ? \(filter) ORDER BY predicate, observed_at DESC, id ASC",
+            [.text(entity.value)]
+        ).map(CoreClaim.init(row:))
+        return Self.held(rows, currentOnly: currentOnly, asOfWorld: asOfWorld, asOfKnowledge: asOfKnowledge)
+    }
+
+    private static func held(
+        _ rows: [CoreClaim],
+        currentOnly: Bool,
+        asOfWorld: Date?,
+        asOfKnowledge: Date?
+    ) -> [CoreClaim] {
+        if let asOfWorld, let asOfKnowledge {
+            return rows.filter { $0.validity.asOf(world: asOfWorld, knowledge: asOfKnowledge) }
+        }
+        if let asOfWorld {
+            return rows.filter {
+                $0.validity.heldInWorld(at: asOfWorld) && (!currentOnly || $0.validity.isCurrent)
+            }
+        }
+        if let asOfKnowledge {
+            return rows.filter { $0.validity.wasBelieved(at: asOfKnowledge) }
+        }
+        return rows
     }
 
     public func allClaims(currentOnly: Bool = true, limit: Int = 500) async throws -> [CoreClaim] {
@@ -651,6 +1136,20 @@ extension Store {
 
     public func claimCount() async throws -> Int {
         try await database.scalarInt("SELECT COUNT(*) FROM claim WHERE retracted_at IS NULL")
+    }
+
+    /// Subject entities of non-retracted claims backed by evidence from `objectID`.
+    public func claimSubjects(forObject objectID: ObjectID) async throws -> [EntityID] {
+        try await database.query(
+            """
+            SELECT DISTINCT c.subject AS subject
+            FROM claim c
+            JOIN claim_evidence ce ON ce.claim_id = c.id
+            JOIN evidence e ON e.id = ce.evidence_id
+            WHERE e.object_id = ? AND c.retracted_at IS NULL
+            """,
+            [.text(objectID.value)]
+        ).map { EntityID($0.requireString("subject")) }
     }
 }
 
@@ -704,7 +1203,7 @@ extension Store {
 
     public func contradictions(unresolvedOnly: Bool = false) async throws -> [Contradiction] {
         let filter = unresolvedOnly ? "WHERE resolution = 'unresolved'" : ""
-        return try await database.query("SELECT * FROM contradiction \(filter) ORDER BY detected_at DESC")
+        return try await database.query("SELECT * FROM contradiction \(filter) ORDER BY detected_at DESC, id ASC")
             .map(Contradiction.init(row:))
     }
 
@@ -747,18 +1246,69 @@ extension Store {
         ).map(Belief.init(row:))
     }
 
-    /// What OpenCore believed at a past instant. Backs `opencore memory checkout`.
-    public func beliefs(asOfKnowledge instant: Date) async throws -> [Belief] {
-        try await database.query(
+    /// What OpenCore believed at a past instant, optionally filtered to what held in the world at `world`.
+    /// Backs `opencore memory checkout` and `TimeTravelView`.
+    public func beliefs(asOfKnowledge instant: Date, asOfWorld world: Date? = nil) async throws -> [Belief] {
+        let rows = try await database.query(
             """
-            SELECT b.* FROM belief b
-            JOIN (
-                SELECT claim_key, MAX(version) AS v FROM belief WHERE decided_at <= ? GROUP BY claim_key
-            ) latest ON latest.claim_key = b.claim_key AND latest.v = b.version
-            ORDER BY b.claim_key
+            SELECT b.*, c.retracted_at AS c_retracted_at, c.valid_from AS c_valid_from, c.valid_to AS c_valid_to
+            FROM belief b
+            LEFT JOIN claim c ON c.id = b.claim_id
+            WHERE b.decided_at <= ?
+            ORDER BY b.claim_key ASC, b.version DESC
             """,
             [.real(instant.timeIntervalSince1970)]
-        ).map(Belief.init(row:))
+        )
+
+        struct VersionRow {
+            let belief: Belief
+            let claimRetractedAt: Date?
+            let claimValidFrom: Date?
+            let claimValidTo: Date?
+        }
+
+        var byKey: [String: [VersionRow]] = [:]
+        var orderedKeys: [String] = []
+        for row in rows {
+            let belief = Belief(row: row)
+            if byKey[belief.claimKey] == nil {
+                orderedKeys.append(belief.claimKey)
+            }
+            byKey[belief.claimKey, default: []].append(VersionRow(
+                belief: belief,
+                claimRetractedAt: row.date("c_retracted_at"),
+                claimValidFrom: row.date("c_valid_from"),
+                claimValidTo: row.date("c_valid_to")
+            ))
+        }
+
+        var selected: [Belief] = []
+        for key in orderedKeys {
+            guard let versions = byKey[key], let latest = versions.first else { continue }
+            if let world {
+                // Walk from newest version known at `instant` to oldest, bounding each
+                // superseded version's world ceiling by the successor version's start.
+                for (index, candidate) in versions.enumerated() {
+                    let start = candidate.claimValidFrom ?? candidate.belief.validity.validFrom
+                    let successorStart: Date? = index > 0
+                        ? (versions[index - 1].claimValidFrom ?? versions[index - 1].belief.validity.validFrom ?? versions[index - 1].belief.decidedAt)
+                        : candidate.claimRetractedAt
+                    let end = candidate.claimValidTo ?? candidate.belief.validity.validTo ?? successorStart
+                    if let start, world < start { continue }
+                    if let end, world >= end { continue }
+                    selected.append(candidate.belief)
+                    break
+                }
+            } else {
+                // Knowledge-time checkout: the latest version decided by `instant` stands
+                // unless its underlying claim was already retracted by `instant`.
+                if let retractedAt = latest.claimRetractedAt, retractedAt <= instant {
+                    continue
+                }
+                selected.append(latest.belief)
+            }
+        }
+        return selected
     }
 
     public func save(_ correction: Correction) async throws {
@@ -836,9 +1386,13 @@ extension Store {
         }
     }
 
-    public func events(from: Date, to: Date, domains: Set<Domain>? = nil, limit: Int = 200) async throws -> [CoreEvent] {
+    public func events(from: Date, to: Date, domains: Set<Domain>? = nil, subject: EntityID? = nil, limit: Int = 200) async throws -> [CoreEvent] {
         var sql = "SELECT * FROM event WHERE occurred_at >= ? AND occurred_at <= ?"
         var bindings: [SQLValue] = [.real(from.timeIntervalSince1970), .real(to.timeIntervalSince1970)]
+        if let subject {
+            sql += " AND subject = ?"
+            bindings.append(.text(subject.value))
+        }
         if let domains, !domains.isEmpty {
             let placeholders = Array(repeating: "?", count: domains.count).joined(separator: ", ")
             sql += " AND domain IN (\(placeholders))"

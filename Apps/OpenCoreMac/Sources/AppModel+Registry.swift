@@ -60,9 +60,9 @@ extension AppModel {
                 let value = (environment[variable] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                 let account = Keychain.mcpAccount(server: name, variable: variable)
                 if value.isEmpty {
-                    try Keychain.delete(account: account)
+                    try Keychain.delete(account: account, authentication: .allowInteraction)
                 } else {
-                    try Keychain.write(value, toAccount: account)
+                    try Keychain.write(value, toAccount: account, authentication: .allowInteraction)
                 }
             }
 

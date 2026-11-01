@@ -1,0 +1,24 @@
+{
+  "repositories": {
+    "project": ["example-tool", "example-tool-mobile"],
+    "medical": ["example-health-records"],
+    "personal": ["example-garden-journal"]
+  },
+  "operatorRepositories": [
+    { "name": "ExampleTool", "relativePath": "Documents/GitHub/ExampleTool", "summary": "What this repository is for" }
+  ],
+  "rolloutKeywords": {
+    "example-tool": ["example_tool", "exampletool"]
+  },
+  "peers": [
+    { "alias": "example-host", "role": "Always-on helper machine" }
+  ],
+  "nestedRepositories": [
+    { "name": "example-tool-mobile", "relativePath": "Documents/GitHub/example-tool/apps/example-tool-mobile" }
+  ],
+  "localAutomation": {
+    "hubRepositoryRelativePath": "Documents/GitHub/example-hub",
+    "hubIdentity": "example-hub",
+    "profilesRelativePath": "Documents/Projects/ExampleProfiles"
+  }
+}

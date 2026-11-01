@@ -1,0 +1,35 @@
+{
+  "schema": "codemap/1",
+  "id": "firewall",
+  "name": "Domain firewall",
+  "aliases": ["AdmissionPolicy", "domains", "admission", "blocked", "personal", "medical", "external caller", "isClaimAdmitted"],
+  "purpose": "Decides which domains a question may read, ahead of ranking, with MCP callers re-based and sensitive domains closed.",
+  "revision": "e801208",
+  "verified_on": "2026-10-31",
+  "entry_points": ["AdmissionPolicy"],
+  "files": [
+    {"path": "Sources/CoreSearch/AdmissionPolicy.swift", "role": "primary", "blob": "503f9bdb16fc108b773133197dcf8f7682a9bfdf"},
+    {"path": "Sources/CoreModel/Domain.swift", "role": "primary", "blob": "594ae34c757216236706d71b8579989e4add58dd"},
+    {"path": "Tests/CoreMCPTests/DomainFirewallMCPTests.swift", "role": "test", "blob": "c6c724c6a741ddfa772dfe7f987d98f94de86c80"},
+    {"path": "Tests/CoreSearchTests/RestrictedDomainTests.swift", "role": "test", "blob": "9ef59f84d7ec13ad25768eb3acc548c82ec8893a"}
+  ],
+  "nodes": [
+    {"id": "AdmissionPolicy", "kind": "service", "path": "Sources/CoreSearch/AdmissionPolicy.swift", "line": 10, "match": "public struct AdmissionPolicy: Sendable {", "status": "VERIFIED", "note": "Inference is not consent."},
+    {"id": "Domain.readableDomains", "kind": "model", "path": "Sources/CoreModel/Domain.swift", "line": 21, "match": "public var readableDomains: Set<Domain> {", "status": "VERIFIED", "note": ""},
+    {"id": "Domain.sensitive", "kind": "model", "path": "Sources/CoreModel/Domain.swift", "line": 35, "match": "public static let sensitive: Set<Domain> = [.medical, .financial, .relationship, .restricted]", "status": "VERIFIED", "note": "`personal` is not in it."}
+  ],
+  "edges": [],
+  "docs": [],
+  "unknowns": ["There are two isClaimAdmitted functions, in Reasoner and MCPServer. Unifying them is an open hardening item.", "`personal` is not sensitive, so 'journal' falls to project: opening it for the local owner is brief item 7."],
+  "related": ["answers", "mcp-server"],
+  "derived": {
+    "generated_by": "codemap 1.1.0 derive: declarations, type references and test mentions; edges are INFERRED",
+    "nodes": [
+      {"id": "Domain", "kind": "model", "path": "Sources/CoreModel/Domain.swift", "line": 8, "match": "public enum Domain: String, Sendable, Codable, CaseIterable {", "status": "VERIFIED"}
+    ],
+    "edges": [
+      {"from": "AdmissionPolicy", "type": "depends_on", "to": "Domain", "status": "INFERRED", "evidence": [{"path": "Sources/CoreSearch/AdmissionPolicy.swift", "line": 11, "match": "public let queryDomain: Domain"}]}
+    ],
+    "edges_omitted": 0
+  }
+}

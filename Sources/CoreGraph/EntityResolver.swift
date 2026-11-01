@@ -39,7 +39,7 @@ public struct EntityResolver: Sendable {
                     let technology = CoreEntity(
                         kind: .technology,
                         canonicalName: language,
-                        domain: .publicRecord,
+                        domain: ClaimExtractor.technologyDomain(for: object),
                         firstSeenAt: object.authoredAt ?? object.ingestedAt,
                         lastSeenAt: object.ingestedAt
                     )
@@ -53,7 +53,7 @@ public struct EntityResolver: Sendable {
                     let technology = CoreEntity(
                         kind: .technology,
                         canonicalName: language,
-                        domain: .publicRecord,
+                        domain: ClaimExtractor.technologyDomain(for: object),
                         firstSeenAt: object.authoredAt ?? object.ingestedAt,
                         lastSeenAt: object.ingestedAt
                     )
@@ -94,19 +94,67 @@ public struct EntityResolver: Sendable {
 
             case .note, .document, .file:
                 // The container, so a timeline groups by folder or list rather than scattering.
-                let container = object.metadata["folder"]
-                    ?? object.metadata["list"]
-                    ?? object.metadata["root"].map { ($0 as NSString).lastPathComponent }
-                    ?? object.kind.rawValue
-                let entity = CoreEntity(
-                    kind: .concept,
-                    canonicalName: container,
-                    domain: object.domain,
-                    firstSeenAt: object.authoredAt ?? object.ingestedAt,
-                    lastSeenAt: object.ingestedAt
-                )
-                merge(entity, into: &entities)
-                aliases.insert(EntityAlias(entityID: entity.id, surface: container, confidence: 0.9))
+                for presentation in ObjectPresentation.presentations(for: object) {
+                    let container = presentation.metadata["folder"]
+                        ?? presentation.metadata["list"]
+                        ?? presentation.metadata["root"].map { ($0 as NSString).lastPathComponent }
+                        ?? presentation.kind.rawValue
+                    let entity = CoreEntity(
+                        kind: .concept, canonicalName: container, domain: presentation.domain,
+                        firstSeenAt: presentation.authoredAt ?? presentation.ingestedAt,
+                        lastSeenAt: presentation.ingestedAt
+                    )
+                    merge(entity, into: &entities)
+                    aliases.insert(EntityAlias(entityID: entity.id, surface: container, confidence: 0.9))
+                }
+
+                if object.kind == .document, object.externalID.hasSuffix("#readme") {
+                    let repoFull = object.metadata["repo"] ?? String(object.externalID.dropLast("#readme".count))
+                    let bareName = repoFull.split(separator: "/").last.map(String.init) ?? repoFull
+                    let project = CoreEntity(
+                        kind: .project,
+                        canonicalName: bareName,
+                        domain: object.domain,
+                        firstSeenAt: object.authoredAt ?? object.ingestedAt,
+                        lastSeenAt: object.ingestedAt
+                    )
+                    merge(project, into: &entities)
+                    aliases.insert(EntityAlias(entityID: project.id, surface: bareName, confidence: 1.0))
+                    aliases.insert(EntityAlias(entityID: project.id, surface: repoFull, confidence: 1.0))
+
+                    for techName in ClaimExtractor.readmeTechnologies(in: object.text).map(\.canonicalName) {
+                        let technology = CoreEntity(
+                            kind: .technology,
+                            canonicalName: techName,
+                            domain: ClaimExtractor.technologyDomain(for: object),
+                            firstSeenAt: object.authoredAt ?? object.ingestedAt,
+                            lastSeenAt: object.ingestedAt
+                        )
+                        merge(technology, into: &entities)
+                        aliases.insert(EntityAlias(entityID: technology.id, surface: techName, confidence: 1.0))
+                    }
+                } else if let extracted = ClaimExtractor.structuredDocumentExtraction(from: object) {
+                    merge(extracted.subject, into: &entities)
+                    aliases.formUnion(extracted.aliases)
+
+                    if let primary = extracted.primaryLanguage {
+                        merge(primary.entity, into: &entities)
+                        aliases.insert(EntityAlias(entityID: primary.entity.id, surface: primary.entity.canonicalName, confidence: 1.0))
+                    }
+                    for tech in extracted.technologies {
+                        merge(tech.entity, into: &entities)
+                        aliases.insert(EntityAlias(entityID: tech.entity.id, surface: tech.entity.canonicalName, confidence: 1.0))
+                    }
+                    for contributor in extracted.contributors {
+                        merge(contributor.entity, into: &entities)
+                        aliases.insert(EntityAlias(entityID: contributor.entity.id, surface: contributor.entity.canonicalName, confidence: 1.0))
+                    }
+                }
+
+                for (reaEntity, reaAlias) in ClaimExtractor.reaEntities(from: object) {
+                    merge(reaEntity, into: &entities)
+                    aliases.insert(reaAlias)
+                }
 
             case .commit:
                 // A Conventional Commit scope names a component of the repository. The entity
@@ -136,6 +184,11 @@ public struct EntityResolver: Sendable {
 
             default:
                 break
+            }
+
+            for (proposedEntity, proposedAlias) in ClaimExtractor.modelProposedEntities(from: object) {
+                merge(proposedEntity, into: &entities)
+                aliases.insert(proposedAlias)
             }
         }
 
@@ -185,5 +238,3 @@ public struct EntityResolver: Sendable {
         }
     }
 }
-
-extension EntityAlias: Hashable {}

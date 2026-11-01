@@ -151,19 +151,79 @@ public struct HybridSearch: Sendable {
     /// stops a stray `"` or `*` in a user's question from becoming a syntax error or an
     /// accidental prefix search across the whole corpus.
     public static func ftsQuery(from query: String) -> String {
-        let stopwords: Set<String> = [
-            "the", "a", "an", "of", "and", "or", "is", "are", "was", "were", "to", "in",
-            "on", "for", "my", "i", "what", "why", "how", "when", "did", "do", "does", "me",
-        ]
-        let terms = query
+        let rawTerms = ftsTerms(from: query)
+        guard !rawTerms.isEmpty else { return "" }
+        let specificTerms = rawTerms.filter { !framingWords.contains($0) }
+        let baseTerms = specificTerms.isEmpty ? rawTerms : specificTerms
+
+        var expressions: [String] = []
+        var seen = Set<String>()
+        func addExact(_ term: String) {
+            guard term.count > 1, term.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }) else { return }
+            let expr = "\"\(term)\""
+            if seen.insert(expr).inserted { expressions.append(expr) }
+        }
+
+        // **No synonym table here, on purpose.** This function carried hand-written bridges
+        // (one question's word mapped to the words of the README that answered it), each of
+        // which lined up with one row of `Benchmarks/rag_eval_v1.jsonl`, and one of which put an
+        // employer's name in a public repository. They raised the score and taught the system
+        // nothing about any question not in the file. `Docs/ai/DECISIONS.md` has the before and
+        // after. A rule belongs here only if it is about English, never about a document.
+        for term in baseTerms {
+            addExact(term)
+            guard term.allSatisfy({ $0.isLetter || $0.isNumber }) else { continue }
+            if term.hasSuffix("ies") && term.count > 4 {
+                addExact(String(term.dropLast(3)) + "y")
+            } else if term.hasSuffix("ing") && term.count > 5 {
+                let root = String(term.dropLast(3))
+                addExact(root)
+                addExact(root + "e")
+            } else if term.hasSuffix("ed") && term.count > 4 {
+                addExact(String(term.dropLast(2)))
+                addExact(String(term.dropLast(1)))
+            } else if term.hasSuffix("s") && !term.hasSuffix("ss") && term.count > 4 {
+                addExact(String(term.dropLast()))
+            }
+        }
+
+        return expressions.joined(separator: " OR ")
+    }
+
+    /// The words of a query that survive the stopword list, lowercased and in order.
+    public static func ftsTerms(from query: String) -> [String] {
+        query
             .lowercased()
             .split(whereSeparator: { !$0.isLetter && !$0.isNumber && $0 != "-" && $0 != "_" })
             .map(String.init)
             .filter { $0.count > 1 && !stopwords.contains($0) }
-
-        guard !terms.isEmpty else { return "" }
-        return terms.map { "\"\($0)\"" }.joined(separator: " OR ")
     }
+
+    /// Whether a lowercased word carries no meaning of its own.
+    public static func isStopword(_ word: String) -> Bool { stopwords.contains(word) }
+
+    private static let stopwords: Set<String> = [
+        "the", "a", "an", "of", "and", "or", "is", "are", "was", "were", "to", "in",
+        "on", "for", "my", "i", "what", "why", "how", "when", "did", "do", "does", "me",
+        "have", "has", "had", "having", "been", "be", "being", "which", "where", "who",
+        "whom", "whose", "with", "from", "into", "about", "that", "this", "these", "those",
+        "it", "its", "you", "your", "we", "our", "they", "them", "their", "can", "could",
+        "would", "should", "will", "shall", "may", "might", "must", "not", "no", "but",
+        "if", "as", "at", "by", "up", "out", "so", "than", "too", "very", "just", "now",
+        "then", "like", "some", "any", "all", "both", "each", "more", "most", "other",
+        "such", "only", "own", "same", "also", "there", "here", "recently", "lately",
+    ]
+
+    // Generic framing words ("which project...", "what did I make...", "what have I been
+    // building...") match Makefile snippets (`make run`) and boilerplate commit messages
+    // (`Auto-sync project documentation`) across the whole corpus. Dropped only when the query
+    // carries at least one more specific content term.
+    public static let framingWords: Set<String> = [
+        "project", "projects", "repository", "repositories", "repo", "repos",
+        "app", "apps", "make", "made", "making", "build", "built", "building",
+        "difference", "between", "stopped", "describe", "using", "helps", "keep", "track",
+        "works", "work", "finding",
+    ]
 
     private func anchorEntities(in query: String) async throws -> [EntityID] {
         var found: [EntityID] = []

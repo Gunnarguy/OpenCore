@@ -28,19 +28,29 @@ public actor MCPServer {
     private let search: PassageSearch
     private let reasoner: Reasoner
     private let sensitiveDomainsUnlockable: Bool
+    private let currentDate: @Sendable () -> Date
+    private let currentCalendar: @Sendable () -> Calendar
     private var initialized = false
 
+    /// - Parameters:
+    ///   - now: read for each call, never kept. This process lives for days inside a client, so
+    ///     a stored date measures "recently" from when the server started.
+    ///   - calendar: read for each call too, so a change of time zone reaches an open session.
     public init(
         store: Store,
         embedder: (any EmbeddingProvider)? = nil,
-        sensitiveDomainsUnlockable: Bool = false
+        sensitiveDomainsUnlockable: Bool = false,
+        now: @autoclosure @escaping @Sendable () -> Date = Date(),
+        calendar: @autoclosure @escaping @Sendable () -> Calendar = .current
     ) {
         self.store = store
         self.search = PassageSearch(store: store, embedder: embedder)
         // Same passage-level engine the app and CLI use, so an MCP caller and a human
         // asking the same question get the same retrieval rather than two different ones.
-        self.reasoner = Reasoner(store: store, search: PassageSearch(store: store, embedder: embedder))
+        self.reasoner = Reasoner(store: store, search: PassageSearch(store: store, embedder: embedder), now: now(), calendar: calendar())
         self.sensitiveDomainsUnlockable = sensitiveDomainsUnlockable
+        self.currentDate = now
+        self.currentCalendar = calendar
     }
 
     // MARK: - Run loop
@@ -95,7 +105,7 @@ public actor MCPServer {
     /// Spans recorded here are held in memory and rendered only by `log`, which writes to
     /// stderr. Telemetry has no stdout sink at all, so instrumenting the server's own request
     /// path cannot corrupt the JSON-RPC stream.
-    private func handle(_ request: RPCRequest) async throws -> JSONValue {
+    public func handle(_ request: RPCRequest) async throws -> JSONValue {
         try await Telemetry.span("mcp \(request.method)", .mcp) { scope in
             scope.attribute("notification", String(request.isNotification))
             switch request.method {
@@ -127,7 +137,7 @@ public actor MCPServer {
     /// truthfully. `2026-07-28` is deliberately absent: that one removes the handshake and
     /// changes result shapes, and claiming it without implementing it is the half-migration
     /// `.claude/rules/mcp.md` forbids.
-    static let supportedProtocolVersions = ["2025-11-25", "2025-06-18", "2025-03-26"]
+    public static let supportedProtocolVersions = ["2025-11-25", "2025-06-18", "2025-03-26"]
 
     /// Reply with the client's requested version when it is one we can speak.
     ///
@@ -155,8 +165,9 @@ public actor MCPServer {
                 "version": .string(Self.serverVersion),
             ]),
             "instructions": .string("""
-            OpenCore is an evidence-native store of this user's own history: repositories, \
-            commits, documents, notes, calendar and reminders.
+            OpenCore is an evidence-native store of this user's own history. Through this \
+            server it answers from repositories, commits and documents. Notes, calendar and \
+            reminders are personal and are not reachable here.
 
             Every answer it returns is assembled from stored claims, each with evidence, an \
             authority tier, and both time axes. Prefer core_ask for questions and follow up \
@@ -171,11 +182,15 @@ public actor MCPServer {
 
     // MARK: - Tools
 
-    static let toolDefinitions: [JSONValue] = [
+    public static let toolDefinitions: [JSONValue] = [
         tool(
             "core_ask",
-            "Answer a question from the user's own history. Returns claims with their evidence, authority tier, and whether each was observed directly or inferred, plus a receipt id for tracing.",
-            ["query": ("string", "The question, in natural language.")],
+            "Answer a question from the user's own history. Returns claims with their evidence, authority tier, and whether each was observed directly or inferred, the passages that matched, and a receipt id for tracing. A time phrase such as 'recently', 'last week', 'in March' or 'since August' filters the answer to that window, reports what happened in it, and states the days read and how fresh the store is. Read a 'Stale:' line as missing data, not as a quiet period.",
+            [
+                "query": ("string", "The question, in natural language."),
+                "as_of": ("string", "Optional YYYY-MM-DD or ISO-8601 instant to evaluate what held and was believed at that time."),
+                "synthesize": ("boolean", "Optional. When true, also runs on-device /usr/bin/fm grounded synthesis over admitted passages with [1]..[N] citations."),
+            ],
             required: ["query"]
         ),
         tool(
@@ -190,7 +205,10 @@ public actor MCPServer {
         tool(
             "core_claims",
             "List what OpenCore currently believes about one entity: a project, person, technology, or organization.",
-            ["entity": ("string", "Name of the entity, e.g. a repository or project name.")],
+            [
+                "entity": ("string", "Name of the entity, e.g. a repository or project name."),
+                "as_of": ("string", "Optional YYYY-MM-DD or ISO-8601 instant to evaluate bitemporal validity."),
+            ],
             required: ["entity"]
         ),
         tool(
@@ -210,6 +228,21 @@ public actor MCPServer {
             "The exact evidence behind a previous answer, given its receipt code (e.g. oc_8f2a91).",
             ["receipt": ("string", "Receipt short code from a previous core_ask.")],
             required: ["receipt"]
+        ),
+        tool(
+            "core_dossier",
+            "Complete dossier for one entity (project, person, technology, or organization): aliases, current beliefs, contradictions, and timeline events.",
+            ["entity": ("string", "Name of the entity, e.g. a repository or project name.")],
+            required: ["entity"]
+        ),
+        tool(
+            "core_timeline",
+            "Chronological stream of events (commits, files, and whatever else the domain policy admits) over a recent window. Calendar entries and notes are personal, so this server does not return them.",
+            [
+                "days": ("number", "How far back to look in days. Default 30."),
+                "entity": ("string", "Optional entity name to filter events to a single subject."),
+            ],
+            required: []
         ),
     ]
 
@@ -233,7 +266,7 @@ public actor MCPServer {
             ]),
             // Every tool this server exposes is read-only: OpenCore answers questions and
             // never mutates on a caller's behalf. Declared because a client reviewing this
-            // server deserves the signal — while remembering that a client must not *trust*
+            // server deserves the signal, while remembering that a client must not *trust*
             // it. Our own client treats annotations as advisory and still requires an
             // explicit allowlist, which is the correct posture toward any server including
             // this one.
@@ -260,6 +293,8 @@ public actor MCPServer {
             case "core_contradictions": try await contradictions(arguments)
             case "core_changed": try await changed(arguments)
             case "core_trace": try await trace(arguments)
+            case "core_dossier": try await dossier(arguments)
+            case "core_timeline": try await timeline(arguments)
             default: throw RPCError.invalidParams("unknown tool: \(name)")
             }
             return Self.textResult(text)
@@ -281,10 +316,35 @@ public actor MCPServer {
 
     // MARK: - Tool bodies
 
+    private static func parseInstant(_ text: String?) -> Date? {
+        guard let text = text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return nil }
+        if let iso = ISO8601DateFormatter().date(from: text) { return iso }
+        let day = DateFormatter()
+        day.dateFormat = "yyyy-MM-dd"
+        day.timeZone = TimeZone(secondsFromGMT: 0)
+        return day.date(from: text)
+    }
+
+    /// A bad `as_of` is refused. Reading it as absent answered with today's data under a
+    /// question that asked about another date, and said nothing about it.
+    private static func requireInstant(_ text: String?) throws -> Date? {
+        guard let text = text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return nil }
+        guard let instant = parseInstant(text) else {
+            throw RPCError.invalidParams("as_of must be YYYY-MM-DD or ISO-8601, got '\(text.prefix(40))'")
+        }
+        return instant
+    }
+
     private func ask(_ arguments: JSONValue) async throws -> String {
         guard let query = arguments["query"]?.stringValue else { throw RPCError.invalidParams("query is required") }
+        let instant = try Self.requireInstant(arguments["as_of"]?.stringValue)
 
-        let answer = try await reasoner.answer(query, externalCaller: !sensitiveDomainsUnlockable)
+        let answer = try await reasoner.answer(
+            query,
+            externalCaller: !sensitiveDomainsUnlockable,
+            asOfWorld: instant,
+            asOfKnowledge: instant
+        )
         var lines: [String] = []
 
         if let counted = answer.counted {
@@ -310,8 +370,21 @@ public actor MCPServer {
             lines.append(insufficient)
         } else {
             lines.append(answer.summary)
-            lines.append("")
-            for point in answer.points.prefix(12) {
+            if let activity = answer.activity, activity.totalEvents > 0 {
+                lines.append("")
+                lines.append("Activity in this window (computed from the event log, not retrieved passages):")
+                for group in activity.groups {
+                    let upkeep = group.upkeep > 0 ? " and \(group.upkeep) upkeep" : ""
+                    lines.append("- \(group.subject.canonicalName): \(group.events) \(group.verb)\(upkeep), latest \(Self.day(group.lastAt))")
+                    for event in group.latest {
+                        lines.append("    \(Self.day(event.occurredAt))  \(event.detail.replacingOccurrences(of: "\n", with: " ").prefix(120))")
+                    }
+                }
+            }
+            if !answer.points.isEmpty {
+                lines.append("")
+            }
+            for point in answer.points.prefix(Self.pointsShown) {
                 lines.append("\(point.derivation == .observed ? "[observed]" : "[inferred]") \(point.statement)")
                 lines.append("  confidence \(String(format: "%.2f", point.confidence)) · authority: \(point.authority.label)")
                 for evidence in point.supporting.prefix(2) {
@@ -319,6 +392,22 @@ public actor MCPServer {
                 }
                 for evidence in point.counter.prefix(2) {
                     lines.append("  COUNTER-EVIDENCE: \(evidence.snippet.replacingOccurrences(of: "\n", with: " ").prefix(180))")
+                }
+            }
+            if answer.points.count > Self.pointsShown {
+                lines.append("(\(Self.pointsShown) of \(answer.points.count) claims shown, most relevant first.)")
+            }
+            // A claim says what the store concluded. A passage shows the text, including for
+            // sources that produce no claims at all. This list used to be dropped here, so
+            // the matched text never reached the caller and core_ask returned only whatever
+            // twelve claims survived the cut.
+            if !answer.passages.isEmpty {
+                lines.append("")
+                lines.append("Matching passages:")
+                for hit in answer.passages.prefix(Self.passagesShown) {
+                    let date = hit.object.authoredAt.map { " · \(Self.day($0))" } ?? ""
+                    lines.append("- \(hit.object.title) [\(hit.object.kind.rawValue)\(date)]")
+                    lines.append("    \(hit.chunk.text.replacingOccurrences(of: "\n", with: " ").prefix(240))")
                 }
             }
         }
@@ -331,9 +420,42 @@ public actor MCPServer {
             }
         }
 
+        if arguments["synthesize"]?.boolValue == true, answer.counted == nil {
+            let activePolicy = try await policy(for: query)
+            // The same text and the same window as the answer above it. Searching the whole
+            // question here summarised passages from any year under an answer about last week.
+            let passageOutcome = try await search.search(
+                query: answer.searchedText ?? query,
+                queryClass: answer.receipt.queryClass,
+                policy: activePolicy,
+                limit: 5,
+                window: answer.window?.interval
+            )
+            var sources: [GroundingSource] = []
+            for hit in passageOutcome.hits {
+                sources.append(GroundingSource(
+                    index: sources.count + 1,
+                    title: hit.object.title,
+                    text: hit.chunk.text,
+                    objectID: hit.object.id,
+                    authority: hit.object.authority,
+                    uri: hit.object.uri
+                ))
+            }
+            if let brief = await Conversation.synthesizeGroundedBrief(question: query, sources: sources) {
+                lines.append("")
+                lines.append("Supplemental passage summary (\(brief.modelName)); separate retrieval, no persisted receipt:")
+                lines.append("  \(brief.text)")
+                for src in brief.sources {
+                    lines.append("  [\(src.index)] \(src.title) (\(src.authority.label)); object: \(src.objectID.value); uri: \(src.uri ?? "none")")
+                }
+            }
+        }
+
         let receipt = answer.receipt
         lines.append("")
         lines.append("--- receipt \(receipt.shortCode) ---")
+        lines.append("Receipt scope: the deterministic claim answer; any supplemental summary has separate retrieval and no persisted receipt.")
         lines.append("objects searched: \(receipt.objectsSearched), retrieved: \(receipt.objectsRetrieved)")
         lines.append("claims consulted: \(receipt.claimsConsulted), evidence admitted: \(receipt.evidenceAdmitted)")
         lines.append("domains blocked: \(receipt.domainsBlocked.map(\.rawValue).joined(separator: ", "))")
@@ -342,23 +464,60 @@ public actor MCPServer {
         return lines.joined(separator: "\n")
     }
 
+    /// How many passages `core_ask` prints. **Chosen, not measured:** enough to show the text
+    /// behind an answer without repeating `core_search`.
+    private static let passagesShown = 5
+
+    /// How many claims `core_ask` prints. **Chosen, not measured.** The answer's ordering is
+    /// what makes a cut safe, so the question's own line is above it.
+    private static let pointsShown = 12
+
+    /// Tool arguments come from a model, so a limit is clamped rather than trusted. 50 is a
+    /// chosen ceiling on one reply's size.
+    private static func boundedLimit(_ value: JSONValue?, default fallback: Int) -> Int {
+        min(max(1, value?.intValue ?? fallback), 50)
+    }
+
+    private static func day(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: date)
+    }
+
     private func searchPassages(_ arguments: JSONValue) async throws -> String {
         guard let query = arguments["query"]?.stringValue else { throw RPCError.invalidParams("query is required") }
-        let limit = arguments["limit"]?.intValue ?? 8
+        let limit = Self.boundedLimit(arguments["limit"], default: 8)
 
         let policy = try await policy(for: query)
+        let calendar = currentCalendar()
+        let window = TemporalIntent.window(in: query, now: currentDate(), calendar: calendar)
+        let searchText = window?.searchText ?? query
         let outcome = try await search.search(
-            query: query,
+            query: searchText,
             queryClass: QueryClassifier().classify(query).queryClass,
             policy: policy,
-            limit: limit
+            limit: limit,
+            window: window?.interval,
+            // See `Reasoner.answer`: a blocked count is an existence oracle for a model.
+            reportBlocked: sensitiveDomainsUnlockable
         )
+        var report: String?
+        if let window {
+            report = try await store.windowReport(window, domains: policy.admitted, calendar: calendar).text
+        }
 
         guard !outcome.hits.isEmpty else {
-            return "No passages matched. \(outcome.chunksSearched) chunks searched, \(outcome.blockedByDomain) withheld by domain policy."
+            let withheld = sensitiveDomainsUnlockable ? ", \(outcome.blockedByDomain) withheld by domain policy" : ""
+            // Said, because "no passages" under a Window line reads as a quiet stretch.
+            let empty = window != nil && searchText.isEmpty
+                ? "Nothing to search for: this question names a span and no topic, so no passage was read. core_ask answers it from the event log."
+                : "No passages matched. \(outcome.chunksSearched) chunks searched\(withheld)."
+            return report.map { "\(empty)\n\($0)" } ?? empty
         }
 
         var lines = ["\(outcome.hits.count) passages from \(outcome.chunksSearched) chunks:"]
+        if let report { lines.append(report) }
         for (index, hit) in outcome.hits.enumerated() {
             lines.append("")
             lines.append("\(index + 1). \(hit.object.title)  [\(hit.object.kind.rawValue), \(hit.object.authority.label)]")
@@ -367,38 +526,95 @@ public actor MCPServer {
         }
         for (signal, reason) in outcome.unavailableSignals.sorted(by: { $0.key < $1.key }) {
             lines.append("")
-            lines.append("note — \(signal) unavailable: \(reason)")
+            lines.append("note: \(signal) unavailable: \(reason)")
         }
         return lines.joined(separator: "\n")
     }
 
     private func claims(_ arguments: JSONValue) async throws -> String {
         guard let name = arguments["entity"]?.stringValue else { throw RPCError.invalidParams("entity is required") }
-        guard let entity = try await store.resolve(surface: name).first?.0 else {
+        guard let entity = try await resolveEntityForCaller(name) else {
             return "No entity known as '\(name)'."
         }
-        guard try await policy(for: name).admits(entity.domain) else {
+        let activePolicy = try await policy(for: name)
+        guard activePolicy.admits(entity.domain) else {
             return "'\(name)' is in the \(entity.domain.rawValue) domain, which this server does not expose."
         }
 
-        let claims = try await store.claims(subject: entity.id)
+        let instant = try Self.requireInstant(arguments["as_of"]?.stringValue)
+        let rawClaims = try await store.claims(
+            subject: entity.id,
+            currentOnly: instant == nil,
+            asOfWorld: instant,
+            asOfKnowledge: instant
+        )
+        var claims: [CoreClaim] = []
+        for claim in rawClaims {
+            guard try await isClaimAdmitted(claim, policy: activePolicy) else { continue }
+            claims.append(claim)
+        }
         guard !claims.isEmpty else { return "\(entity.canonicalName) exists but has no current claims." }
 
-        var lines = ["\(entity.canonicalName) (\(entity.kind.rawValue)):"]
+        // One line per fact, as `core_ask` and `core_dossier` have. A push mints a new row for an
+        // unchanged value, so `status → active` printed once per push. The strongest row speaks
+        // for the group, and the count says how many there were.
+        var rows: [(claim: CoreClaim, value: String, occurrences: Int)] = []
+        var rowForFact: [String: Int] = [:]
         for claim in claims {
             let value: String = if let objectEntity = claim.objectEntity {
                 try await store.entity(objectEntity)?.canonicalName ?? "?"
             } else {
                 claim.literal ?? "?"
             }
-            lines.append("  [\(claim.derivation.rawValue)] \(claim.predicate) → \(value)  (confidence \(String(format: "%.2f", claim.confidence)), \(claim.authority.label))")
+            let fact = "\(claim.predicate)|\(value)"
+            guard let index = rowForFact[fact] else {
+                rowForFact[fact] = rows.count
+                rows.append((claim, value, 1))
+                continue
+            }
+            rows[index].occurrences += 1
+            if (claim.authority.rawValue, claim.confidence) > (rows[index].claim.authority.rawValue, rows[index].claim.confidence) {
+                rows[index].claim = claim
+            }
+        }
+
+        var lines = ["\(entity.canonicalName) (\(entity.kind.rawValue)):"]
+        var printedHistoryKeys: Set<String> = []
+        for (claim, value, occurrences) in rows {
+            let repeated = occurrences > 1 ? " ×\(occurrences)" : ""
+            lines.append("  [\(claim.derivation.rawValue)] \(claim.predicate) → \(value)\(repeated)  (confidence \(String(format: "%.2f", claim.confidence)), \(claim.authority.label))")
+            if printedHistoryKeys.insert(claim.claimKey).inserted {
+                let rawHistory = try await store.beliefHistory(key: claim.claimKey)
+                var history: [Belief] = []
+                for belief in rawHistory {
+                    guard let beliefClaim = try await store.claim(belief.claimID),
+                          try await isClaimAdmitted(beliefClaim, policy: activePolicy)
+                    else { continue }
+                    history.append(belief)
+                }
+                if history.count > 1 {
+                    for belief in history {
+                        lines.append("    v\(belief.version): \(try await admittedReason(belief, policy: activePolicy))")
+                    }
+                }
+            }
         }
         return lines.joined(separator: "\n")
     }
 
     private func contradictions(_ arguments: JSONValue) async throws -> String {
         let unresolvedOnly = arguments["unresolved_only"]?.boolValue ?? false
-        let items = try await store.contradictions(unresolvedOnly: unresolvedOnly)
+        let activePolicy = try await policy(for: "")
+        let rawItems = try await store.contradictions(unresolvedOnly: unresolvedOnly)
+        var items: [Contradiction] = []
+        for item in rawItems {
+            guard let claimA = try await store.claim(item.claimA),
+                  let claimB = try await store.claim(item.claimB),
+                  try await isClaimAdmitted(claimA, policy: activePolicy),
+                  try await isClaimAdmitted(claimB, policy: activePolicy)
+            else { continue }
+            items.append(item)
+        }
         guard !items.isEmpty else { return unresolvedOnly ? "No unresolved contradictions." : "No contradictions detected." }
 
         var lines: [String] = []
@@ -409,7 +625,8 @@ public actor MCPServer {
     }
 
     private func changed(_ arguments: JSONValue) async throws -> String {
-        let days = arguments["days"]?.intValue ?? 30
+        let days = min(max(1, arguments["days"]?.intValue ?? 30), 36_500)
+        let activePolicy = try await policy(for: "")
         let beliefs = try await store.beliefsDecided(since: Date().addingTimeInterval(-Double(days) * 86_400))
         guard !beliefs.isEmpty else { return "No belief changes in the last \(days) days." }
 
@@ -417,15 +634,18 @@ public actor MCPServer {
         formatter.dateFormat = "yyyy-MM-dd"
 
         var lines: [String] = []
-        for belief in beliefs.prefix(50) {
-            guard let claim = try await store.claim(belief.claimID) else { continue }
-            let subject = try await store.entity(claim.subject)?.canonicalName ?? "?"
+        for belief in beliefs {
+            guard lines.count < 50 else { break }
+            guard let claim = try await store.claim(belief.claimID),
+                  try await isClaimAdmitted(claim, policy: activePolicy),
+                  let subjectEntity = try await store.entity(claim.subject)
+            else { continue }
             let value: String = if let objectEntity = claim.objectEntity {
                 try await store.entity(objectEntity)?.canonicalName ?? "?"
             } else {
                 claim.literal ?? "?"
             }
-            lines.append("\(formatter.string(from: belief.decidedAt))  \(belief.version == 1 ? "LEARNED" : "UPDATED")  \(subject) \(claim.predicate) → \(value)  (\(belief.reason))")
+            lines.append("\(formatter.string(from: belief.decidedAt))  \(belief.version == 1 ? "LEARNED" : "UPDATED")  \(subjectEntity.canonicalName) \(claim.predicate) → \(value)  (\(try await admittedReason(belief, policy: activePolicy)))")
         }
         return lines.isEmpty ? "No belief changes in the last \(days) days." : lines.joined(separator: "\n")
     }
@@ -434,7 +654,13 @@ public actor MCPServer {
         guard let code = arguments["receipt"]?.stringValue else { throw RPCError.invalidParams("receipt is required") }
         guard let receipt = try await store.receipt(code: code) else { return "No receipt matching '\(code)'." }
 
+        let activePolicy = try await policy(for: receipt.query)
+        if let blockedDomain = receipt.domainsAdmitted.first(where: { !activePolicy.admits($0) }) {
+            return "Receipt \(receipt.shortCode) is in the \(blockedDomain.rawValue) domain, which this server does not expose."
+        }
+
         let rows = try await store.trace(receipt: receipt.id)
+            .filter { activePolicy.admits($0.1.domain) }
         guard !rows.isEmpty else {
             // A counted answer has no evidence rows BY CONSTRUCTION, and saying only "admitted
             // no evidence" reads as a failed lookup. The distinction is the whole point of
@@ -445,13 +671,25 @@ public actor MCPServer {
                     + "\(receipt.objectsSearched) admitted rows, so it cites no evidence and none "
                     + "was read. Its support is the count itself, not a set of passages."
             }
+            // Same reasoning for a time question, whose support is the event log.
+            if let stage = receipt.stages.first(where: { $0.name == "activity" }) {
+                return "Receipt \(receipt.shortCode) was answered from \(stage.counters["events_in_window"] ?? 0) "
+                    + "event(s) in the window (\(stage.note ?? "no window recorded")), so it cites no evidence rows. "
+                    + "Its support is the event log, not a set of passages."
+            }
+            // Chat answering from passages alone. "Admitted no evidence" beside a counter of six
+            // is the contradiction `Receipt.answeredFromClaims` exists to prevent.
+            if !receipt.answeredFromClaims, receipt.evidenceAdmitted > 0 {
+                return "Receipt \(receipt.shortCode) was answered from \(receipt.evidenceAdmitted) passage(s) "
+                    + "and read no claims, so it has no evidence rows to trace."
+            }
             return "Receipt \(receipt.shortCode) admitted no evidence."
         }
 
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd"
 
-        var lines = ["Evidence behind \(receipt.shortCode) — \"\(receipt.query)\":"]
+        var lines = ["Evidence behind \(receipt.shortCode) (\"\(receipt.query)\"):"]
         for (index, entry) in rows.enumerated() {
             let (evidence, object, score) = entry
             lines.append("")
@@ -463,12 +701,133 @@ public actor MCPServer {
         return lines.joined(separator: "\n")
     }
 
+    private func dossier(_ arguments: JSONValue) async throws -> String {
+        guard let name = arguments["entity"]?.stringValue else { throw RPCError.invalidParams("entity is required") }
+        guard let entity = try await resolveEntityForCaller(name) else {
+            return "No entity known as '\(name)'."
+        }
+        let activePolicy = try await policy(for: name)
+        guard activePolicy.admits(entity.domain) else {
+            return "'\(name)' is in the \(entity.domain.rawValue) domain, which this server does not expose."
+        }
+        guard let snapshot = try await store.dossier(for: entity.id) else {
+            return "No dossier available for '\(entity.canonicalName)'."
+        }
+
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+
+        var lines = [
+            "# \(snapshot.entity.canonicalName) (\(snapshot.entity.kind.rawValue) · \(snapshot.entity.domain.rawValue))",
+            "first seen: \(formatter.string(from: snapshot.entity.firstSeenAt))",
+        ]
+        let exposedAliases = sensitiveDomainsUnlockable ? snapshot.aliases : try await store.aliasesForExternalCaller(for: entity.id)
+        if !exposedAliases.isEmpty {
+            lines.append("aliases: \(exposedAliases.prefix(10).joined(separator: ", "))")
+        }
+
+        var admittedClaims: [DossierClaim] = []
+        for row in snapshot.claims {
+            guard try await isClaimAdmitted(row.claim, policy: activePolicy) else { continue }
+            admittedClaims.append(row)
+        }
+        lines.append("")
+        lines.append("## Believed now (\(admittedClaims.count))")
+        if admittedClaims.isEmpty {
+            lines.append("  none")
+        } else {
+            for row in admittedClaims.prefix(40) {
+                let mult = row.occurrences > 1 ? " ×\(row.occurrences)" : ""
+                lines.append("  [\(row.claim.derivation.rawValue)] \(row.claim.predicate) → \(row.value)\(mult)  (confidence \(String(format: "%.2f", row.claim.confidence)), \(row.claim.authority.label))")
+            }
+        }
+
+        var admittedContradictions: [Contradiction] = []
+        for item in snapshot.contradictions {
+            guard let claimA = try await store.claim(item.claimA),
+                  let claimB = try await store.claim(item.claimB),
+                  try await isClaimAdmitted(claimA, policy: activePolicy),
+                  try await isClaimAdmitted(claimB, policy: activePolicy)
+            else { continue }
+            admittedContradictions.append(item)
+        }
+        if !admittedContradictions.isEmpty {
+            lines.append("")
+            lines.append("## Contradictions (\(admittedContradictions.count))")
+            for item in admittedContradictions.prefix(20) {
+                lines.append("  \(item.kind.rawValue) → \(item.resolution.rawValue): \(item.reason)")
+            }
+        }
+
+        let admittedEvents = snapshot.events.filter { activePolicy.admits($0.domain) }
+        if !admittedEvents.isEmpty {
+            lines.append("")
+            lines.append("## Timeline (\(admittedEvents.count))")
+            for event in admittedEvents.prefix(25) {
+                lines.append("  \(formatter.string(from: event.occurredAt))  \(event.verb)  \(event.detail.replacingOccurrences(of: "\n", with: " ").prefix(180))")
+            }
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    private func timeline(_ arguments: JSONValue) async throws -> String {
+        let days = min(max(1, arguments["days"]?.intValue ?? 30), 36_500)
+        let entityFilter = arguments["entity"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let activePolicy = try await policy(for: entityFilter ?? "")
+
+        var targetEntityID: EntityID?
+        if let entityFilter, !entityFilter.isEmpty {
+            guard let resolved = try await resolveEntityForCaller(entityFilter) else {
+                return "No entity known as '\(entityFilter)'."
+            }
+            guard activePolicy.admits(resolved.domain) else {
+                return "'\(entityFilter)' is in the \(resolved.domain.rawValue) domain, which this server does not expose."
+            }
+            targetEntityID = resolved.id
+        }
+
+        let since = Date().addingTimeInterval(-Double(days) * 86_400)
+        // The subject filter runs in SQL. It used to run on the newest 200 rows of everything,
+        // so an entity whose events were older than that read as having none.
+        let rawEvents = try await store.events(
+            from: since,
+            to: Date().addingTimeInterval(365 * 86_400),
+            domains: activePolicy.admitted,
+            subject: targetEntityID,
+            limit: 200
+        )
+
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+
+        var lines: [String] = []
+        for event in rawEvents {
+            guard lines.count < 60 else { break }
+            guard activePolicy.admits(event.domain) else { continue }
+            guard let subject = try await store.entity(event.subject),
+                  activePolicy.admits(subject.domain)
+            else { continue }
+            let cleanDetail = event.detail.replacingOccurrences(of: "\n", with: " ").prefix(180)
+            lines.append("\(formatter.string(from: event.occurredAt))  [\(event.verb)]  \(subject.canonicalName): \(cleanDetail)")
+        }
+
+        return lines.isEmpty
+            ? "No timeline events in the last \(days) days."
+            : lines.joined(separator: "\n")
+    }
+
     // MARK: - Policy
+
+    private func resolveEntityForCaller(_ name: String) async throws -> CoreEntity? {
+        if sensitiveDomainsUnlockable { return try await store.resolve(surface: name).first?.0 }
+        return try await store.resolveForExternalCaller(surface: name).first?.0
+    }
 
     private func policy(for query: String) async throws -> AdmissionPolicy {
         let (domain, requested) = AdmissionPolicy.classifyDomain(
             query,
-            knownEntitySurfaces: try await store.aliasSurfaces()
+            knownEntitySurfaces: sensitiveDomainsUnlockable ? try await store.aliasSurfaces() : try await store.aliasSurfacesForExternalCaller()
         )
         // An external caller cannot unlock a sensitive domain by wording, and cannot land
         // in one either: a query that classifies as medical is re-based to project.
@@ -476,7 +835,51 @@ public actor MCPServer {
             let safeDomain = domain.isSensitive ? Domain.project : domain
             return AdmissionPolicy(queryDomain: safeDomain, explicitlyRequested: [])
         }
-        return AdmissionPolicy(queryDomain: domain, explicitlyRequested: requested)
+        return AdmissionPolicy(queryDomain: domain, explicitlyRequested: requested, allowRestricted: true)
+    }
+
+    /// A belief's reason, unless it quotes something this caller may not read.
+    ///
+    /// A version's reason is stored text that names the value it replaced, and a slot's subject
+    /// ignores domain, so a project-domain plan that follows a restricted one printed the restricted
+    /// sentence. Gating the version on its own claim can't catch that, because its own claim is
+    /// fine. Nothing here depends on the replaced row still being readable: if it can't be found
+    /// and admitted, the reason is withheld.
+    private func admittedReason(_ belief: Belief, policy: AdmissionPolicy) async throws -> String {
+        guard let replaced = belief.supersedes else { return belief.reason }
+        let history = try await store.beliefHistory(key: belief.claimKey)
+        guard let previous = history.first(where: { $0.id == replaced }),
+              let claim = try await store.claim(previous.claimID),
+              try await isClaimAdmitted(claim, policy: policy)
+        else { return "replaced a value this server does not expose" }
+        return belief.reason
+    }
+
+    private func isClaimAdmitted(_ claim: CoreClaim, policy: AdmissionPolicy) async throws -> Bool {
+        guard policy.admits(claim.domain),
+              let subject = try await store.entity(claim.subject),
+              policy.admits(subject.domain)
+        else { return false }
+        if let objectEntity = claim.objectEntity,
+           let target = try await store.entity(objectEntity),
+           !policy.admits(target.domain) {
+            return false
+        }
+        let supporting = try await store.evidence(for: claim.id, stance: .supports)
+        if !supporting.isEmpty {
+            var hasAdmittedSupport = false
+            for (evidence, _, _) in supporting {
+                if let object = try await store.object(evidence.objectID) {
+                    if policy.admits(object.domain) {
+                        hasAdmittedSupport = true
+                    }
+                } else {
+                    hasAdmittedSupport = true
+                }
+            }
+            guard hasAdmittedSupport else { return false }
+        }
+        return true
     }
 
     // MARK: - Transport

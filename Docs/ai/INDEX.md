@@ -15,9 +15,18 @@ where each belief came from, how confident it is, and what changed its mind.
 | [../CONNECTORS.md](../CONNECTORS.md) | You are adding or debugging a data source. |
 | [../MCP.md](../MCP.md) | You are touching `CoreMCP` or wiring an MCP client. |
 | [../ROADMAP.md](../ROADMAP.md) | Summary only. **Roadmap truth is the Notion database**, id in that file. |
+| [codemap/INDEX.md](codemap/INDEX.md) | You have a feature to change and need its files. `python3 script/codemap.py find <words>` searches it. Read this before grepping. |
+| [../private-names.example.json](../private-names.example.json) | You need the shape of the private names file. The real one lives beside the store and in the gitignored `Local/`. |
 
 There is deliberately no `Docs/ai/ARCHITECTURE.md`. `Docs/ARCHITECTURE.md` already exists and is
 good; duplicating it would create two documents that drift apart, which is the exact failure
 this project exists to make visible.
 
-Last context-system audit: 2026-08-08.
+Skills: `verify-release` to prove a change or get ready to install, `store-copy` to measure on real
+data, `safe-rebuild` for any rebuild, `publish-check` before a commit or push, `project-handoff` to
+update `STATE.md`.
+
+Rules load by path: `.claude/rules/app.md` for the app, `operator.md` for the operator console.
+
+Last context-system audit: 2026-10-31. It covered these documents, not the Runbook's dated operator
+sections, which record what was true on their dates.

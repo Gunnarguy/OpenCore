@@ -44,11 +44,11 @@ final class MCPSignIn: NSObject, ASWebAuthenticationPresentationContextProviding
         // Reuse a previous registration when there is one. Registering afresh on every sign-in
         // would litter the authorization server with abandoned clients.
         let client: MCPOAuth.Client
-        if let existing = MCPOAuth.storedClient(server: server) {
+        if let existing = MCPOAuth.storedClient(server: server, authentication: .allowInteraction) {
             client = existing
         } else {
             client = try await MCPOAuth.register(metadata, redirectURI: Self.redirectURI)
-            try MCPOAuth.store(client, server: server)
+            try MCPOAuth.store(client, server: server, authentication: .allowInteraction)
         }
 
         let pkce = MCPOAuth.PKCE()
@@ -74,13 +74,13 @@ final class MCPSignIn: NSObject, ASWebAuthenticationPresentationContextProviding
             code: code, metadata: metadata, client: client,
             pkce: pkce, redirectURI: Self.redirectURI, resource: endpoint
         )
-        try MCPOAuth.store(token, server: server)
+        try MCPOAuth.store(token, server: server, authentication: .allowInteraction)
     }
 
     /// Sign out by forgetting the token. The registration is kept, so signing back in does not
     /// create a second client on the authorization server.
-    static func signOut(server: String) {
-        try? Keychain.delete(account: MCPOAuth.keychainAccount(server: server))
+    static func signOut(server: String) throws {
+        try Keychain.delete(account: MCPOAuth.keychainAccount(server: server), authentication: .allowInteraction)
     }
 
     static func isSignedIn(server: String) -> Bool {

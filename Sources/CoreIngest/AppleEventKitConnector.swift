@@ -32,9 +32,12 @@ public struct AppleEventKitConnector: Connector {
     private let scope: Scope
     private let lookBack: TimeInterval
     private let lookAhead: TimeInterval
+    private let unattended: Bool
 
-    public init(scope: Scope, lookBackDays: Int = 730, lookAheadDays: Int = 180) {
+    /// - Parameter unattended: true for a sync nobody started. See `mustRequestAccess`.
+    public init(scope: Scope, lookBackDays: Int = 730, lookAheadDays: Int = 180, unattended: Bool = false) {
         self.scope = scope
+        self.unattended = unattended
         self.lookBack = TimeInterval(lookBackDays) * 86_400
         self.lookAhead = TimeInterval(lookAheadDays) * 86_400
         self.source = Source(
@@ -51,11 +54,19 @@ public struct AppleEventKitConnector: Connector {
     public enum AccessError: Error, CustomStringConvertible {
         case denied(Scope)
         case noInfoPlist
+        /// Nobody has answered the permission prompt yet, and nobody is here to answer it.
+        case needsFirstGrant(Scope)
+        /// EventKit answered with no list at all, which is a failed read and not an empty one.
+        case readFailed(Scope)
 
         public var description: String {
             switch self {
             case .denied(let scope):
                 "access to \(scope.rawValue) was denied. Grant it in System Settings › Privacy & Security."
+            case .needsFirstGrant(let scope):
+                "\(scope.rawValue) has not been allowed yet, and a scheduled sync will not raise a permission prompt with nobody watching. Sync it once from the Sources screen to answer the prompt."
+            case .readFailed(let scope):
+                "EventKit returned no list for \(scope.rawValue), so nothing was read and the sync date did not move. The next sync tries again."
             case .noInfoPlist:
                 """
                 EventKit needs usage strings in the calling binary's Info.plist, which a \
@@ -75,7 +86,7 @@ public struct AppleEventKitConnector: Connector {
         case .calendar:
             objects = try await calendarObjects(store: store, since: since, log: log)
         case .reminders:
-            objects = try await reminderObjects(store: store, log: log)
+            objects = try await reminderObjects(store: store, since: since, log: log)
         }
         return ConnectorBatch(objects: objects, cursor: ISO8601DateFormatter().string(from: Date()))
     }
@@ -88,6 +99,11 @@ public struct AppleEventKitConnector: Connector {
             throw AccessError.noInfoPlist
         }
 
+        let entity: EKEntityType = scope == .calendar ? .event : .reminder
+        guard try Self.mustRequestAccess(
+            status: EKEventStore.authorizationStatus(for: entity), scope: scope, unattended: unattended
+        ) else { return }
+
         let granted: Bool
         switch scope {
         case .calendar: granted = try await store.requestFullAccessToEvents()
@@ -96,9 +112,67 @@ public struct AppleEventKitConnector: Connector {
         guard granted else { throw AccessError.denied(scope) }
     }
 
+    /// Whether to ask the system for access, or throw why not. Returns false when access is held.
+    ///
+    /// **An unattended sync never asks.** The request does not return until someone answers the
+    /// prompt, so a prompt raised by a scheduled tick with nobody at the Mac held the whole sync
+    /// lane until they came back, and every other source went stale behind it.
+    static func mustRequestAccess(status: EKAuthorizationStatus, scope: Scope, unattended: Bool) throws -> Bool {
+        switch status {
+        case .fullAccess:
+            return false
+        case .denied, .restricted:
+            throw AccessError.denied(scope)
+        default:
+            // Not asked yet, or write-only, which reads nothing.
+            if unattended { throw AccessError.needsFirstGrant(scope) }
+            return true
+        }
+    }
+
+    /// What EventKit's reminder fetch answered. Its completion block is documented as "or
+    /// potentially nil", and `?? []` turned that into an empty list: a sync that read nothing
+    /// reported success and moved the date.
+    static func requireRead<Value>(_ read: Value?, scope: Scope) throws -> Value {
+        guard let read else { throw AccessError.readFailed(scope) }
+        return read
+    }
+
+    /// The stretch of calendar a sync reads. Always the whole look-back.
+    ///
+    /// `since` is when OpenCore last looked, and a calendar's predicate selects by when an event
+    /// *happens*. Using one as the other meant an event from before the last sync was never
+    /// looked at again: 450 of the 565 events on the real store have not been revisited since
+    /// 2026-08-14, so they never gained `attendees_accepted` and every comment promising that
+    /// a re-sync fills it in was false. `since` now filters by modification instead.
+    static func window(now: Date, lookBack: TimeInterval, lookAhead: TimeInterval) -> DateInterval {
+        DateInterval(start: now.addingTimeInterval(-lookBack), end: now.addingTimeInterval(lookAhead))
+    }
+
+    /// Whether an event needs re-reading. Unknown modification dates are re-read, because
+    /// skipping on a date nobody recorded would lose the change silently.
+    static func changed(lastModified: Date?, since: Date?) -> Bool {
+        guard let since, let lastModified else { return true }
+        return lastModified >= since
+    }
+
+    /// Whether a calendar event needs re-reading: it changed, or nobody has been able to see it.
+    ///
+    /// A modification date alone has a hole. An event made months ago that has just entered the
+    /// look-ahead was past the end of the window at the last sync, so it was never read, and its
+    /// old modification date would keep it from ever being read. So anything starting beyond the
+    /// last sync's window counts as new. A wider look-back or look-ahead setting reaches events
+    /// this cannot see, which is what Re-read Whole Calendar is for.
+    static func shouldRead(lastModified: Date?, start: Date?, since: Date?, lookAhead: TimeInterval) -> Bool {
+        if changed(lastModified: lastModified, since: since) { return true }
+        guard let since, let start else { return false }
+        return start >= since.addingTimeInterval(lookAhead)
+    }
+
     private func calendarObjects(store: EKEventStore, since: Date?, log: @Sendable (String) -> Void) async throws -> [CoreObject] {
-        let start = since ?? Date().addingTimeInterval(-lookBack)
-        let end = Date().addingTimeInterval(lookAhead)
+        let span = Self.window(now: Date(), lookBack: lookBack, lookAhead: lookAhead)
+        let start = span.start
+        let end = span.end
 
         // EventKit caps a single predicate at roughly four years, so long ranges are
         // fetched in yearly windows rather than silently truncated.
@@ -110,7 +184,8 @@ public struct AppleEventKitConnector: Connector {
             let windowEnd = min(end, windowStart.addingTimeInterval(365 * 86_400))
             let predicate = store.predicateForEvents(withStart: windowStart, end: windowEnd, calendars: nil)
 
-            for event in store.events(matching: predicate) {
+            for event in store.events(matching: predicate)
+            where Self.shouldRead(lastModified: event.lastModifiedDate, start: event.startDate, since: since, lookAhead: lookAhead) {
                 var text = event.title ?? "(untitled event)"
                 if let location = event.location, !location.isEmpty { text += "\nLocation: \(location)" }
                 if let notes = event.notes, !notes.isEmpty { text += "\n\(notes)" }
@@ -193,17 +268,31 @@ public struct AppleEventKitConnector: Connector {
         return objects
     }
 
-    private func reminderObjects(store: EKEventStore, log: @Sendable (String) -> Void) async throws -> [CoreObject] {
+    private struct RemindersRead: Sendable {
+        var objects: [CoreObject]
+        var total: Int
+    }
+
+    private func reminderObjects(store: EKEventStore, since: Date?, log: @Sendable (String) -> Void) async throws -> [CoreObject] {
         let predicate = store.predicateForReminders(in: nil)
         let sourceID = source.id
 
         // `EKReminder` is not Sendable, so the mapping to `CoreObject` happens *inside*
         // the callback. Returning the EKReminders and mapping afterwards would move
         // reference types across an isolation boundary, which Swift 6 correctly rejects.
-        let objects: [CoreObject] = await withCheckedContinuation { continuation in
+        //
+        // `since` filters by modification, as a calendar does. Without it every hourly sync
+        // handed all 5,371 reminders to `IngestPipeline.run`, which derives from everything it
+        // is given whether or not it changed.
+        let answer: RemindersRead? = await withCheckedContinuation { continuation in
             store.fetchReminders(matching: predicate) { reminders in
+                guard let reminders else {
+                    continuation.resume(returning: nil)
+                    return
+                }
                 let formatter = ISO8601DateFormatter()
-                let mapped = (reminders ?? []).map { reminder -> CoreObject in
+                let changed = reminders.filter { Self.changed(lastModified: $0.lastModifiedDate, since: since) }
+                let mapped = changed.map { reminder -> CoreObject in
                     var text = reminder.title ?? "(untitled reminder)"
                     if let notes = reminder.notes, !notes.isEmpty { text += "\n\(notes)" }
                     text += "\nStatus: \(reminder.isCompleted ? "completed" : "open")"
@@ -228,11 +317,12 @@ public struct AppleEventKitConnector: Connector {
                         ]
                     )
                 }
-                continuation.resume(returning: mapped)
+                continuation.resume(returning: RemindersRead(objects: mapped, total: reminders.count))
             }
         }
 
-        log("reminders: \(objects.count) items (\(objects.filter { $0.metadata["completed"] == "true" }.count) completed)")
-        return objects
+        let read = try Self.requireRead(answer, scope: .reminders)
+        log("reminders: \(read.objects.count) changed of \(read.total) (\(read.objects.filter { $0.metadata["completed"] == "true" }.count) completed)")
+        return read.objects
     }
 }

@@ -2,7 +2,7 @@ name: OpenCore
 options:
   bundleIdPrefix: com.gunndamental
   deploymentTarget:
-    macOS: "15.0"
+    macOS: "26.0"
   createIntermediateGroups: true
   # DerivedData must live outside ~/Documents: iCloud stamps extended attributes on
   # build inputs there and codesign rejects them. This repo is in ~/Documents/GitHub.
@@ -30,7 +30,7 @@ targets:
         CFBundleDisplayName: OpenCore
         CFBundleShortVersionString: "0.2.0"
         CFBundleVersion: "2"
-        LSMinimumSystemVersion: "15.0"
+        LSMinimumSystemVersion: "26.0"
         NSHumanReadableCopyright: "© 2026 Gunnar Hostetler"
         # EventKit reads these from the *calling binary's* Info.plist. Without them the
         # request is denied with no prompt, which looks exactly like an empty calendar.
@@ -41,6 +41,8 @@ targets:
         NSAppleEventsUsageDescription: "OpenCore reads Apple Notes through AppleScript, which is the only interface Notes provides. Notes stay on this device."
         # Notes has no public API; this is the bundle whose events we send.
         NSAppleEventsUsageDescriptionAppleScript: "Reading your notes."
+        NSSpeechRecognitionUsageDescription: "OpenCore uses on-device speech recognition in the J.A.R.V.I.S. HUD and Grounded Chat so you can dictate questions locally without sending audio off-device."
+        NSMicrophoneUsageDescription: "OpenCore uses the microphone when you click Voice Ask or Dictate in the J.A.R.V.I.S. HUD."
         # OAuth callback for hosted MCP servers. ASWebAuthenticationSession intercepts the
         # scheme itself, but registering it means a callback that arrives after the sheet has
         # closed reaches OpenCore rather than failing with "no application can open this URL".
@@ -65,6 +67,15 @@ targets:
         # tracked in Docs/ROADMAP.md rather than left as a surprise.
         com.apple.security.app-sandbox: false
         com.apple.security.network.client: true
+        com.apple.security.device.audio-input: true
+        # Hardened runtime needs this before Automation can even prompt. Notes is read through
+        # AppleScript, and Apple Notes has synced 0 objects since 2026-08-14.
+        com.apple.security.automation.apple-events: true
+        # Apple lists this under the Hardened Runtime's resource access for reading calendars
+        # (Security > Hardened Runtime, read 2026-10-31). The 2026-08-14 calendar sync worked
+        # without it on a development signature, so it is not the cure for anything observed:
+        # it is here so that a non-development signature does not find out the hard way.
+        com.apple.security.personal-information.calendars: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.gunndamental.OpenCore
@@ -74,4 +85,6 @@ targets:
         SWIFT_STRICT_CONCURRENCY: complete
         ENABLE_HARDENED_RUNTIME: YES
         CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: Z3E334EXZD
+        CODE_SIGN_IDENTITY: "Apple Development"
         GENERATE_INFOPLIST_FILE: NO

@@ -14,10 +14,13 @@ public struct AdmissionPolicy: Sendable {
 
     /// Sensitive domains open only when the query names them. Inference is not consent:
     /// a question that merely *sounds* medical does not unlock medical records.
-    public init(queryDomain: Domain, explicitlyRequested: Set<Domain> = []) {
+    public init(queryDomain: Domain, explicitlyRequested: Set<Domain> = [], allowRestricted: Bool = false) {
         self.queryDomain = queryDomain
         var allowed = queryDomain.readableDomains
-        allowed.formUnion(explicitlyRequested.filter { $0.isSensitive })
+        allowed.formUnion(explicitlyRequested.filter { $0.isSensitive && $0 != .restricted })
+        // A domain name in model-written query text is never permission to open mixed memory.
+        allowed.remove(.restricted)
+        if allowRestricted { allowed.insert(.restricted) }
         self.admitted = allowed
         self.blocked = Set(Domain.allCases).subtracting(allowed)
     }
@@ -30,6 +33,13 @@ public struct AdmissionPolicy: Sendable {
         (.relationship, ["girlfriend", "boyfriend", "partner", "spouse", "family", "friend", "friends"]),
         (.work, ["meeting", "manager", "colleague", "colleagues", "shift", "employer", "coworker"]),
         (.personal, ["diary", "journal"]),
+    ]
+
+    /// Words that explicitly frame the question as a repository or software project lookup,
+    /// even when the project's subject matter mentions a sensitive domain ("Which project helps
+    /// doctors keep track of patient records?").
+    static let projectContextMarkers: [String] = [
+        "project", "projects", "repository", "repositories", "repo", "repos",
     ]
 
     /// Classify a query into a domain from its wording.
@@ -60,6 +70,15 @@ public struct AdmissionPolicy: Sendable {
         var requested: Set<Domain> = []
         for (domain, keywords) in markers where keywords.contains(where: { containsWord($0, in: lowered) }) {
             requested.insert(domain)
+        }
+
+        // If the query explicitly asks about a project or repository ("Which project helps
+        // doctors keep track of patient records?"), the primary domain is `.project` while
+        // `requested` still unlocks the named sensitive domain for a local user (and is
+        // stripped for an external MCP caller). Without this, `.medical` replaced `.project`
+        // as the base domain and blocked the project corpus the question asked about.
+        if projectContextMarkers.contains(where: { containsWord($0, in: lowered) }) {
+            return (.project, requested)
         }
 
         // A sensitive domain named in the query is an explicit request and becomes the

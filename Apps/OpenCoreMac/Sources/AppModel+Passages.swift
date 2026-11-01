@@ -16,6 +16,10 @@ extension AppModel {
     struct PassageResult: Sendable {
         let query: String
         let queryClass: String
+        /// Set when the query named a stretch of time and the rows were filtered to it. A view
+        /// showing these rows has to show this too: a date filter is the one thing here that
+        /// removes evidence, and undated objects fall out with everything else.
+        let report: WindowReport?
         let outcome: PassageOutcome
         let rows: [PassageRow]
         /// Whether the dense leg actually executed. Without this, a dense candidate count
@@ -39,6 +43,7 @@ extension AppModel {
     /// pair of numbers is on screen, fusion is something you take on faith.
     struct PassageRow: Identifiable, Sendable {
         let id: ChunkID
+        let objectID: ObjectID
         let title: String
         let kind: String
         let authority: String
@@ -72,7 +77,10 @@ extension AppModel {
     /// Deliberately the same sequence, in the same order, with the same classifier and the
     /// same policy as `opencore passages`. The app and the CLI read one store and must not
     /// disagree about what it contains.
-    func searchPassages(_ query: String) async -> PassageResult? {
+    ///
+    /// - Parameter readingTime: false when `query` is a name and not a question. A project called
+    ///   "Last Week" is not a filter on its own dossier.
+    func searchPassages(_ query: String, readingTime: Bool = true) async -> PassageResult? {
         guard let store, !query.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
         state = .working("retrieving passages")
         do {
@@ -94,8 +102,20 @@ extension AppModel {
                 providerFailure = "\(error)"
             }
 
-            var outcome = try await PassageSearch(store: store, embedder: provider).search(
-                query: query,
+            // Home and Quick Jump hand this the question they just sent to `ask`, then write a
+            // model summary over whatever comes back. Searching all of time here put a passage
+            // from any year under an answer that said it read one week. The Passages screen
+            // reads the same way, as `core_search` and `opencore passages` do, so every caller
+            // gets the report with the rows.
+            let window = readingTime ? TemporalIntent.window(in: query) : nil
+            let searchText = window?.searchText ?? query
+            var report: WindowReport?
+            if let window {
+                report = try await store.windowReport(window, domains: policy.admitted, calendar: .current)
+            }
+
+            var outcome = try await PassageSearch(store: store, embedder: provider, tuning: settings.tuning).search(
+                query: searchText,
                 queryClass: classification.queryClass,
                 policy: policy,
                 // Both were hardcoded here while Settings offered controls for them. "Results"
@@ -108,7 +128,8 @@ extension AppModel {
                 // The default remains 8, matching `opencore passages`, chosen to fit a reading
                 // column rather than measured against any recall target.
                 limit: settings.passageLimit,
-                expandContext: settings.expandContext
+                expandContext: settings.expandContext,
+                window: window?.interval
             )
             if let providerFailure {
                 // Folded into the engine's own channel so the view has one place to render
@@ -120,6 +141,7 @@ extension AppModel {
             return PassageResult(
                 query: query,
                 queryClass: classification.queryClass.rawValue,
+                report: report,
                 outcome: outcome,
                 rows: Self.passageRows(from: outcome),
                 denseLegRan: outcome.denseLegRan,
@@ -136,6 +158,7 @@ extension AppModel {
         return outcome.hits.map { hit in
             PassageRow(
                 id: hit.chunk.id,
+                objectID: hit.object.id,
                 title: hit.object.title,
                 kind: hit.object.kind.rawValue,
                 authority: hit.object.authority.label,

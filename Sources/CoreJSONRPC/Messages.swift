@@ -42,8 +42,14 @@ public enum JSONValue: Sendable, Codable, Hashable {
     // MARK: - Accessors
 
     public var stringValue: String? { if case .string(let value) = self { return value }; return nil }
-    public var intValue: Int? { if case .number(let value) = self { return Int(value) }; return nil }
+    /// nil unless the number is a whole value an `Int` can hold.
+    ///
+    /// `Int(value)` traps on anything else, and this reads numbers from outside the process:
+    /// `limit: 1e300` from an MCP caller, or `id: 1e300` from a server during a sync, ended the
+    /// whole process rather than failing the one request.
+    public var intValue: Int? { if case .number(let value) = self { return Int(exactly: value) }; return nil }
     public var boolValue: Bool? { if case .bool(let value) = self { return value }; return nil }
+    public var arrayValue: [JSONValue]? { if case .array(let value) = self { return value }; return nil }
     public var objectValue: [String: JSONValue]? { if case .object(let value) = self { return value }; return nil }
 
     public subscript(key: String) -> JSONValue? { objectValue?[key] }

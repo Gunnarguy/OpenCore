@@ -1,0 +1,55 @@
+{
+  "schema": "codemap/1",
+  "id": "time-windows",
+  "name": "Time-aware questions",
+  "aliases": ["recently", "last week", "since", "TemporalIntent", "QueryTimeWindow", "WindowReport", "freshness", "stale", "activity", "as_of"],
+  "purpose": "Reads a time phrase into a window, answers what happened from the event log, and states the days read and how fresh each source is.",
+  "revision": "e801208",
+  "verified_on": "2026-10-31",
+  "entry_points": ["TemporalIntent.window"],
+  "files": [
+    {"path": "Sources/CoreSearch/TemporalIntent.swift", "role": "primary", "blob": "78aae1c5751dcc88db66051bd7da082c01b84270"},
+    {"path": "Sources/CoreReason/WindowReport.swift", "role": "primary", "blob": "1ced245c15c9fdcba60a4f6fe852da6e7e72e770"},
+    {"path": "Sources/CoreStore/Activity.swift", "role": "primary", "blob": "267825c67b9b2238c0fcfa21df830cb68789c8c3"},
+    {"path": "Tests/CoreSearchTests/TemporalIntentTests.swift", "role": "test", "blob": "4e5401c03169db322be5f4d68fb40d9f9a979911"},
+    {"path": "Tests/CoreMCPTests/TimeAwareAnswerTests.swift", "role": "test", "blob": "cb679892238e1302c61ae1c7ff09cd205e129555"}
+  ],
+  "nodes": [
+    {"id": "TemporalIntent.window", "kind": "function", "path": "Sources/CoreSearch/TemporalIntent.swift", "line": 106, "match": "public static func window(", "status": "VERIFIED", "note": "Clock and calendar are injected."},
+    {"id": "QueryTimeWindow", "kind": "model", "path": "Sources/CoreSearch/TemporalIntent.swift", "line": 4, "match": "public struct QueryTimeWindow: Sendable, Hashable, Codable {", "status": "VERIFIED", "note": ""},
+    {"id": "WindowReport", "kind": "model", "path": "Sources/CoreReason/WindowReport.swift", "line": 19, "match": "public struct WindowReport: Sendable {", "status": "VERIFIED", "note": "Inside the summary, so a surface can't drop it."},
+    {"id": "Store.activity", "kind": "persistence", "path": "Sources/CoreStore/Activity.swift", "line": 157, "match": "public func activity(", "status": "VERIFIED", "note": "Event log, grouped by subject, upkeep apart."},
+    {"id": "Store.freshness", "kind": "persistence", "path": "Sources/CoreStore/Activity.swift", "line": 89, "match": "public func freshness(domains: Set<Domain>, notAfter: Date) async throws -> StoreFreshness {", "status": "VERIFIED", "note": "Only sources the caller may read."}
+  ],
+  "edges": [
+    {"from": "feature:answers", "type": "calls", "to": "TemporalIntent.window", "status": "VERIFIED", "evidence": [{"path": "Sources/CoreReason/Reasoner.swift", "line": 173, "match": "let window = TemporalIntent.window(in: query, now: asOfWorld ?? asOfKnowledge ?? currentDate(), calendar: calendar)"}], "note": ""},
+    {"from": "feature:answers", "type": "reads", "to": "Store.activity", "status": "VERIFIED", "evidence": [{"path": "Sources/CoreReason/Reasoner.swift", "line": 263, "match": "let summary = try await store.activity("}], "note": ""}
+  ],
+  "docs": [],
+  "unknowns": ["No test covers the window through core_ask synthesize, the CLI's fm summary, the App Intent or AppModel.searchPassages, because each needs a model or the app."],
+  "related": ["answers", "retrieval"],
+  "derived": {
+    "generated_by": "codemap 1.1.0 derive: declarations, type references and test mentions; edges are INFERRED",
+    "nodes": [
+      {"id": "TemporalIntent", "kind": "model", "path": "Sources/CoreSearch/TemporalIntent.swift", "line": 74, "match": "public enum TemporalIntent {", "status": "VERIFIED"},
+      {"id": "ActivityGroup", "kind": "model", "path": "Sources/CoreStore/Activity.swift", "line": 5, "match": "public struct ActivityGroup: Sendable, Identifiable {", "status": "VERIFIED"},
+      {"id": "SourceFreshness", "kind": "model", "path": "Sources/CoreStore/Activity.swift", "line": 35, "match": "public struct SourceFreshness: Sendable, Hashable {", "status": "VERIFIED"},
+      {"id": "StoreFreshness", "kind": "model", "path": "Sources/CoreStore/Activity.swift", "line": 54, "match": "public struct StoreFreshness: Sendable, Hashable {", "status": "VERIFIED"}
+    ],
+    "edges": [
+      {"from": "WindowReport", "type": "depends_on", "to": "QueryTimeWindow", "status": "INFERRED", "evidence": [{"path": "Sources/CoreReason/WindowReport.swift", "line": 20, "match": "public var window: QueryTimeWindow"}]},
+      {"from": "WindowReport", "type": "depends_on", "to": "StoreFreshness", "status": "INFERRED", "evidence": [{"path": "Sources/CoreReason/WindowReport.swift", "line": 21, "match": "public var freshness: StoreFreshness"}]},
+      {"from": "WindowReport", "type": "depends_on", "to": "SourceFreshness", "status": "INFERRED", "evidence": [{"path": "Sources/CoreReason/WindowReport.swift", "line": 39, "match": "public var behind: [SourceFreshness] {"}]},
+      {"from": "WindowReport", "type": "depends_on", "to": "TemporalIntent", "status": "INFERRED", "evidence": [{"path": "Sources/CoreReason/WindowReport.swift", "line": 47, "match": "source.lastSyncedAt.map { \"\\(source.label) \\(TemporalIntent.day($0, in: calendar))\" }"}]},
+      {"from": "store-floor#Store", "type": "depends_on", "to": "QueryTimeWindow", "status": "INFERRED", "evidence": [{"path": "Sources/CoreReason/WindowReport.swift", "line": 93, "match": "_ window: QueryTimeWindow,"}]},
+      {"from": "TemporalIntent", "type": "depends_on", "to": "feature:retrieval", "status": "INFERRED", "evidence": [{"path": "Sources/CoreSearch/TemporalIntent.swift", "line": 134, "match": "HybridSearch.ftsTerms(from: residualQuery).filter { !framingTerms.contains($0) && !names.contains($0) }"}], "note": "via HybridSearch"},
+      {"from": "TemporalIntent", "type": "depends_on", "to": "feature:firewall", "status": "INFERRED", "evidence": [{"path": "Sources/CoreSearch/TemporalIntent.swift", "line": 268, "match": "for phrase in rule.phrases where AdmissionPolicy.containsWord(phrase, in: lowered) {"}], "note": "via AdmissionPolicy"},
+      {"from": "store-floor#Store", "type": "depends_on", "to": "feature:firewall", "status": "INFERRED", "evidence": [{"path": "Sources/CoreReason/WindowReport.swift", "line": 94, "match": "domains: Set<Domain>,"}], "note": "via Domain"},
+      {"from": "ActivityGroup", "type": "depends_on", "to": "feature:store-floor", "status": "INFERRED", "evidence": [{"path": "Sources/CoreStore/Activity.swift", "line": 7, "match": "public var subject: CoreEntity"}], "note": "via CoreEntity, CoreEvent"},
+      {"from": "SourceFreshness", "type": "depends_on", "to": "feature:store-floor", "status": "INFERRED", "evidence": [{"path": "Sources/CoreStore/Activity.swift", "line": 36, "match": "public var kind: SourceKind"}], "note": "via SourceKind"},
+      {"from": "store-floor#Store", "type": "depends_on", "to": "feature:store-floor", "status": "INFERRED", "evidence": [{"path": "Sources/CoreStore/Activity.swift", "line": 106, "match": "guard let kind = SourceKind(rawValue: row.requireString(\"kind\")) else { continue }"}], "note": "via SourceKind, SQLValue, CoreEvent"},
+      {"from": "store-floor#Store", "type": "depends_on", "to": "feature:beliefs", "status": "INFERRED", "evidence": [{"path": "Sources/CoreStore/Activity.swift", "line": 201, "match": "let isUpkeep = { (event: CoreEvent) in event.verb == \"committed\" && CommitNature.isUpkeep(title: event.detail) }"}], "note": "via CommitNature"}
+    ],
+    "edges_omitted": 0
+  }
+}

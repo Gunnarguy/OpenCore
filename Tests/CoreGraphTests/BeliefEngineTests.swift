@@ -179,6 +179,22 @@ func beliefHistoryIsAppendOnly() async throws {
 
     let asOfNow = try await store.beliefs(asOfKnowledge: now)
     #expect(asOfNow.first?.version == 2)
+
+    let claimsInApril = try await store.claims(
+        subject: project().id,
+        asOfWorld: april,
+        asOfKnowledge: april
+    )
+    #expect(claimsInApril.count == 1)
+    #expect(claimsInApril.first?.literal == "prototype")
+
+    let claimsNow = try await store.claims(
+        subject: project().id,
+        asOfWorld: now,
+        asOfKnowledge: now
+    )
+    #expect(claimsNow.count == 1)
+    #expect(claimsNow.first?.literal == "production")
 }
 
 private func policy(for query: String, knownEntities: Set<String> = []) -> AdmissionPolicy {
@@ -316,4 +332,119 @@ func authorityChangeStillVersions() async throws {
 
     #expect(history.count == 2)
     #expect(history.last?.authority == .directStatement)
+    #expect(history.last?.reason.contains("re-asserted 'active'") == true)
+    #expect(history.last?.reason.contains("changed from 'active' to 'active'") == false)
+}
+
+// Regression, 2026-10-22. `BeliefEngine.recordBelief` formatted `Belief.reason` using
+// `value(of:)`, which returns `claim.objectEntity?.value` (the raw 16-character SHA-256 hex
+// hash) when a claim points at an entity rather than a literal string. On the Beliefs,
+// Entity history, and Time Travel screens, a language or entity-valued supersession rendered
+// as `changed from '6230ffec402a2238' to '9a1b4c02d1ef8812'` instead of `'Python' to 'Swift'`.
+@Test("belief supersession reason resolves entity names instead of printing raw entity IDs")
+func beliefReasonResolvesEntityNames() async throws {
+    let store = try await temporaryStore()
+    let subject = project()
+    let python = CoreEntity(kind: .technology, canonicalName: "Python", domain: .publicRecord)
+    let swift = CoreEntity(kind: .technology, canonicalName: "Swift", domain: .publicRecord)
+    try await store.upsert([subject, python, swift])
+
+    let earlier = CoreClaim(
+        subject: subject.id,
+        predicate: Predicate.primaryLanguage,
+        objectEntity: python.id,
+        confidence: 0.85,
+        authority: .authoredArtifact,
+        derivation: .observed,
+        validity: Validity(validFrom: march, observedAt: march),
+        domain: .project
+    )
+    try await store.save([earlier])
+    _ = try await BeliefEngine(store: store, now: march).reconcile()
+
+    let later = CoreClaim(
+        subject: subject.id,
+        predicate: Predicate.primaryLanguage,
+        objectEntity: swift.id,
+        confidence: 0.95,
+        authority: .authoredArtifact,
+        derivation: .observed,
+        validity: Validity(validFrom: june, observedAt: june),
+        domain: .project
+    )
+    try await store.save([later])
+    _ = try await BeliefEngine(store: store, now: june).reconcile()
+
+    let current = try #require(try await store.currentBelief(key: later.claimKey))
+    #expect(current.version == 2)
+    #expect(current.reason == "changed from 'Python' to 'Swift'")
+    #expect(!current.reason.contains(python.id.value))
+    #expect(!current.reason.contains(swift.id.value))
+}
+
+@Test("correcting one side of an unresolved contradiction settles the original contradiction row")
+func correctingOpenContradictionSettlesOriginalRow() async throws {
+    let store = try await temporaryStore()
+    try await store.upsert([project()])
+
+    let claimA = statusClaim("active", from: march)
+    let claimB = statusClaim("archived", from: march)
+    try await store.save([claimA, claimB])
+
+    let engine = BeliefEngine(store: store, now: now)
+    let outcome = try await engine.reconcile()
+    #expect(outcome.unresolved == 1)
+    #expect(try await store.contradictions(unresolvedOnly: true).count == 1)
+
+    try await engine.correct(
+        supersedingClaim: claimA.id,
+        with: claimB,
+        reason: "Resolved in app by keeping archived",
+        priorFailure: "unresolved directConflict"
+    )
+
+    let remainingOpen = try await store.contradictions(unresolvedOnly: true)
+    #expect(remainingOpen.isEmpty)
+}
+
+@Test("world-time checkout recovers an earlier belief version after a later supersession")
+func worldTimeCheckoutRecoversSupersededVersion() async throws {
+    let store = try await temporaryStore()
+    try await store.upsert([project()])
+
+    let v1Claim = statusClaim("active", from: march)
+    try await store.save([v1Claim])
+    _ = try await BeliefEngine(store: store, now: march).reconcile()
+
+    let v2Claim = statusClaim("archived", from: june)
+    try await store.save([v2Claim])
+    _ = try await BeliefEngine(store: store, now: june).reconcile()
+
+    let april = Date(timeIntervalSince1970: 1_745_000_000)
+    let inApril = try await store.beliefs(asOfKnowledge: now, asOfWorld: april)
+    #expect(inApril.count == 1)
+    #expect(inApril.first?.claimID == v1Claim.id)
+    #expect(inApril.first?.version == 1)
+
+    let inJuly = try await store.beliefs(asOfKnowledge: now, asOfWorld: now)
+    #expect(inJuly.count == 1)
+    #expect(inJuly.first?.claimID == v2Claim.id)
+    #expect(inJuly.first?.version == 2)
+}
+
+// Original bug: the chosen 5,000-row fetch cap silently left older functional slots undecided.
+@Test("reconcile covers uncontested functional slots beyond the former 5000 claim cap")
+func reconcileDoesNotTruncateTheCorpus() async throws {
+    let store = try await temporaryStore()
+    let subjects = (0..<5001).map { CoreEntity(kind: .project, canonicalName: "slot-\($0)", domain: .project) }
+    try await store.upsert(subjects)
+    let claims = subjects.enumerated().map { index, entity in
+        CoreClaim(subject: entity.id, predicate: Predicate.status, literal: "active", confidence: 0.8,
+                  authority: .authoredArtifact, derivation: .observed,
+                  validity: Validity(observedAt: march.addingTimeInterval(Double(index))), domain: .project)
+    }
+    try await store.save(claims)
+    _ = try await BeliefEngine(store: store, now: now).reconcile()
+    #expect(try await store.currentBelief(key: claims[0].claimKey)?.claimID == claims[0].id)
+    #expect(try await store.currentBelief(key: claims[5000].claimKey)?.claimID == claims[5000].id)
 }

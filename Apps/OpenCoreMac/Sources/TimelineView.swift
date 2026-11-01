@@ -12,6 +12,7 @@ import SwiftUI
 extension AppModel {
     struct TimelineEntry: Identifiable, Sendable {
         let id: EventID
+        let subjectID: EntityID
         let subject: String
         let verb: String
         let detail: String
@@ -24,11 +25,11 @@ extension AppModel {
         guard let store else { return [] }
         do {
             let since = Date().addingTimeInterval(-Double(days) * 86_400)
-            // Look ahead as well as back: calendar events are the one source with entries in
-            // the future, and a timeline that silently stops at today would hide them.
+            // The lookback picker ends at now. Future calendar entries remain in their source.
+            // The chosen 500-row display cap is disclosed beside the picker.
             let events = try await store.events(
                 from: since,
-                to: Date().addingTimeInterval(365 * 86_400),
+                to: Date(),
                 domains: domains,
                 limit: 500
             )
@@ -36,6 +37,7 @@ extension AppModel {
             for event in events {
                 entries.append(TimelineEntry(
                     id: event.id,
+                    subjectID: event.subject,
                     subject: try await store.entity(event.subject)?.canonicalName ?? "?",
                     verb: event.verb,
                     detail: event.detail,
@@ -53,11 +55,37 @@ extension AppModel {
 }
 
 struct TimelineView: View {
-    @Environment(AppModel.self) private var model
+    @Environment(\.appModel) private var model
     @State private var entries: [AppModel.TimelineEntry] = []
     @State private var days = 90
     @State private var domainFilter: Domain?
     @State private var loading = false
+    @State private var mode: Mode = .events
+
+    enum Mode: String, CaseIterable, Identifiable {
+        case events = "Chronological Event Stream"
+        case timeTravel = "Bitemporal Time Machine"
+
+        var id: String { rawValue }
+
+        var humanSummary: String {
+            switch self {
+            case .events:
+                "What happened and when across all your sources (commits, calendar meetings, notes, and file edits)"
+            case .timeTravel:
+                "Rewind OpenCore's memory to any date to compare what it knew then vs what was true in real life"
+            }
+        }
+
+        var engineJargon: String {
+            switch self {
+            case .events:
+                "CoreEvent · Point-in-time actions (occurredAt) distinct from persistent state facts (CoreClaim)"
+            case .timeTravel:
+                "Bitemporal Query · Knowledge Time (observedAt / decidedAt) vs World Time (validFrom / validTo)"
+            }
+        }
+    }
 
     private var grouped: [(day: Date, entries: [AppModel.TimelineEntry])] {
         let calendar = Calendar.current
@@ -67,16 +95,50 @@ struct TimelineView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            controls
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Picker("Mode", selection: $mode) {
+                        ForEach(Mode.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .fixedSize(horizontal: true, vertical: false)
+                    Spacer()
+                }
+
+                HStack(spacing: 8) {
+                    Text(mode.humanSummary)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.secondary)
+                    Text("·")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                    Text(mode.engineJargon)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
+            }
+            .padding(.vertical, 10)
+            .padding(.horizontal, 20)
+
             Divider()
-            if entries.isEmpty && !loading {
-                EmptyState(message: "No events in this window.\n\nEvents come from commits, calendar entries, notes and files.")
-            } else {
-                list
+
+            switch mode {
+            case .events:
+                controls
+                Divider()
+                if entries.isEmpty && !loading {
+                    EmptyState(message: "No events in this window.\n\nEvents come from commits, calendar entries, notes and files.")
+                } else {
+                    list
+                }
+            case .timeTravel:
+                TimeTravelView()
             }
         }
-        .navigationTitle("Timeline")
-        .task { await reload() }
+        .navigationTitle("Timeline & Time Travel")
+        .task(id: model.dataGeneration) { await reload() }
     }
 
     private var controls: some View {
@@ -88,19 +150,19 @@ struct TimelineView: View {
                 Text("1 year").tag(365)
                 Text("All").tag(36_500)
             }
-            .frame(width: 130)
+            .fixedSize(horizontal: true, vertical: false)
             .onChange(of: days) { Task { await reload() } }
 
             Picker("Domain", selection: $domainFilter) {
                 Text("All domains").tag(Domain?.none)
                 ForEach(Domain.allCases, id: \.self) { Text($0.rawValue).tag(Domain?.some($0)) }
             }
-            .frame(width: 150)
+            .fixedSize(horizontal: true, vertical: false)
             .onChange(of: domainFilter) { Task { await reload() } }
 
             if loading { ProgressView().controlSize(.small) }
             Spacer()
-            Text("\(entries.count) events").font(.caption).foregroundStyle(.secondary)
+            Text(entries.count == 500 ? "Showing latest 500 events" : "\(entries.count) events").font(.caption).foregroundStyle(.secondary)
         }
         .padding(12)
     }
@@ -153,11 +215,10 @@ private struct TimelineRow: View {
             Text(entry.verb)
                 .font(.caption.monospaced())
                 .foregroundStyle(verbColor)
-                .frame(width: 74, alignment: .leading)
-            Text(entry.subject)
-                .font(.caption.weight(.medium))
-                .frame(width: 150, alignment: .leading)
-                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+                .frame(minWidth: 82, alignment: .leading)
+            EntityLinkChip(name: entry.subject, entityID: entry.subjectID)
+                .fixedSize(horizontal: true, vertical: false)
             Text(entry.detail.replacingOccurrences(of: "\n", with: " "))
                 .font(.caption)
                 .foregroundStyle(.secondary)

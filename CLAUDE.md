@@ -26,8 +26,7 @@ macOS app. Zero external dependencies, deliberately.
    - Nonsensical duplicate-symbol errors usually mean iCloud wrote `Foo 2.swift`. Look for it
      before debugging the code.
 
-2. **Xcode is at `/Applications/Xcode-beta.app`.** Prefix builds with
-   `DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer`.
+2. **Xcode 27.0 is at `/Applications/Xcode.app` (`27A266a`, Swift 6.4, `MacOSX27.0.sdk`).** It is already selected via `xcode-select`. Do not prefix commands with `DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer` (`/Applications/Xcode-beta.app` was removed).
 
 ## Non-negotiables
 
@@ -35,6 +34,12 @@ These are the project's whole thesis. A change that breaks one is wrong even if 
 
 - **Objects are the floor.** Nothing derived may be the only copy of anything. If a change
   makes `opencore rebuild` unable to reconstruct a layer, the change is wrong.
+- **A rebuild is rehearsed, and only the owner applies one.** `opencore rebuild` works on a copy
+  and changes nothing. `--apply-rehearsal` is the owner's decision, and an agent never applies to
+  the live store. See the `safe-rebuild` skill.
+- **This repository is public.** No employer, private repository, machine or serial in a
+  tracked file. See `.claude/rules/sensitive.md`, and run `script/check_sensitive.sh` before
+  committing.
 - **Never delete to record a change of mind.** Retraction and supersession are columns.
 - **Authority never multiplies.** It is an ordinal tier. If you find yourself writing
   `confidence * authority`, stop — that is the exact mistake the type prevents.
@@ -98,15 +103,23 @@ The two needed every session. Everything else, including app builds and recovery
 is in `Docs/ai/RUNBOOK.md` with its verification status.
 
 ```bash
-DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer swift build --scratch-path /private/tmp/opencore-build
+swift build --scratch-path /private/tmp/opencore-build
 ```
 
 ```bash
-DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer swift test --scratch-path /private/tmp/opencore-build
+swift test --scratch-path /private/tmp/opencore-build
 ```
 
 The built CLI lands at `/private/tmp/opencore-build/out/Products/Debug/opencore`, not
 `.build/debug/`, when using `--scratch-path`.
+
+## Verify
+
+```bash
+swift build --scratch-path /private/tmp/opencore-build && swift test --scratch-path /private/tmp/opencore-build
+```
+
+App changes also need `./script/build_and_run.sh --build-only`.
 
 ## Verification and handoff
 

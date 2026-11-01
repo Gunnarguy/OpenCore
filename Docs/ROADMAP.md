@@ -11,6 +11,13 @@ Ordered by what unblocks what, not by what sounds best.
 
 Status: `todo` · `doing` · `done` · `dropped`
 
+## Now  ·  2026-10-31
+
+Five items were built and reviewed: private names, focused answers, time windows, fresh store and
+honest beliefs. Four are open: **rebuild** and **Home** have unreviewed code in the tree, **hardening**
+is partly in the tree and unreviewed, and the **WWDC26 currency** pass was not done. The owner's next
+step is to start building. The versions below are the original plan, and Notion has moved past them.
+
 ## The two force multipliers
 
 Out of everything unbuilt, exactly two items collapse large parts of the rest. Build these
@@ -40,7 +47,7 @@ PCC, Core AI, MLX, Claude and Gemini become one conformance instead of six integ
 - [x] Receipts with measured counters and nullable confidence
 - [x] CLI: `doctor` `sync` `search` `ask` `claims` `contradictions` `memory` `trace` `rebuild`
 - [x] macOS app over the same store
-- [x] 13 tests
+- [x] 13 tests at the time
 
 ---
 
@@ -57,20 +64,20 @@ PCC, Core AI, MLX, Claude and Gemini become one conformance instead of six integ
 - [x] `IngestPipeline` so CLI, app, and rebuild cannot drift apart
 - [x] MCP server over stdio, hand-rolled, protocol 2025-11-25
 - [x] External-caller policy: sensitive domains unreachable through MCP regardless of wording
-- [x] 24 tests
+- [x] 24 tests at the time
 
 Measured `[measured]`: 691 objects → 966 chunks; embedding 966 passages took 25s on device;
 a passage query runs dense in ~190ms and lexical in ~8ms over 966 chunks.
 
 ---
 
-## v0.3 — make the central claim falsifiable  ·  todo
+## v0.3 — make the central claim falsifiable  ·  doing
 
-**This is the priority, and it is deliberately before more features.** Everything below it is
-unfalsifiable without it, and every number this project might quote is currently unmeasured.
+Everything below it is unfalsifiable without it. `opencore eval` exists and measured MMR's λ and the
+dense weight. Benchmark v1 turned out to be fitted, and v2 is not built.
 
-1. **Eval harness.** A fixture corpus with external ground truth, plus recall@k, MRR and nDCG
-   per retrieval stage. Run it in CI on every push.
+1. **Eval harness.** Exists, over 20 hand-written cases. Not yet: a fixture corpus with external
+   ground truth, cases for status, time, personal data and follow-ups, or CI, which does not exist.
 2. **Calibrate `Receipt.confidence`.** It is `nil` today, on purpose. Fill it only once a
    measurement exists that means something. Until then it renders as "not measured".
 3. **Publish the results, including the bad ones.** A report saying a signal did not help is
@@ -79,21 +86,17 @@ unfalsifiable without it, and every number this project might quote is currently
 4. **Fix the BM25 clustering** found in the first run, and prove the fix with (1) rather than
    by eye.
 
-## v0.4 — the second sync  ·  todo
+## v0.4 — the second sync  ·  doing
 
-Contradiction detection is test-verified but has never fired on real data, because a first sync
-has nothing to disagree with. Incremental sync landed in v0.2, so the machinery is in place and
-what remains is the extraction that makes conflicts appear.
+Contradiction detection fired on real data: 14 rows, and most of them were document churn rather than
+disagreement, which is what the honest-beliefs work fixed.
 
-4b. **Claim extraction for non-GitHub sources.** Files, notes, calendar and reminders are
-   ingested, chunked and retrievable but produce zero claims, because `ClaimExtractor` only
-   understands GitHub object shapes. They are half-citizens until this lands: searchable,
-   but invisible to `claims`, `contradictions`, and `memory log`.
-
-5. **README claim extraction.** A README asserting something the code contradicts is the
-   flagship demo, and it is a real problem: a documented capability that no longer exists gets
-   retrieved and cited back as fact.
-6. **Belief-change notifications** when a sync changes what the system thinks.
+4b. **Claim extraction beyond GitHub.** Structured documents and some prose now produce claims.
+   Reminders still produce none. Calendar events are read with attendees, and the
+   stored ones need Re-read Whole Calendar.
+5. **README claim extraction.** Partly in: a README can argue with a repository's metadata.
+6. **Belief-change notifications.** Built, firing once per new pair of values. Delivery has never
+   been observed, because the app has not run with it.
 
 ## v0.5 — retrieval, measured  ·  todo
 
@@ -105,9 +108,9 @@ what remains is the extraction that makes conflicts appear.
 
 ## v0.6 — more of your history  ·  todo
 
-9. **PDF and Office extraction.** Currently skipped rather than half-read.
+9. **Office extraction.** Skipped rather than half-read. PDF text and on-device OCR are in.
 10. **Mail connector**, tagged by folder the way Notes is.
-11. **Model-proposed claims**, entering at `modelInference` and outranked by every rule.
+11. **Model-proposed claims.** Built, entering at `modelInference`.
 12. **Cross-source contradiction.** The flagship case: a README claiming something a
     calendar or a commit contradicts.
 
@@ -126,20 +129,20 @@ what remains is the extraction that makes conflicts appear.
   named as one.
 - **Entity resolution is conservative by design.** A wrong merge contaminates every claim on
   the entity with no record of the seam; a missed merge can be joined later with history intact.
-- **`opencore rebuild` loads all objects into memory** in 500-row pages. Fine at 691 objects,
-  not fine at 100k.
+- **`opencore rebuild` loads all objects into memory** in 500-row pages. It ran in 21 s at 9,537
+  objects `[measured]`, and that is not 100k.
 - **Dense search is brute-force cosine** over every stored vector. Deliberate at this scale;
   see v0.5 item 7 for when that stops being true.
-- **Retrieval constants are all chosen, none measured**: RRF k=60, MMR λ=0.7, the 0.02
-  scaling on authority and recency, the 1200-character chunk target, the 5% language-share
-  floor, `dormantAfter` at 180 days. Each is labelled as chosen where it appears. The eval
-  harness exists to replace them with numbers.
+- **Most retrieval constants are chosen**: RRF k=60, the 0.02 scaling on authority and recency, the
+  1200-character chunk target, the 5% language-share floor, `dormantAfter` at 180 days. MMR's λ and
+  the dense weight were set by the 2026-08-09 eval, over a benchmark since found to be fitted. Each
+  is labelled where it appears.
 
 ## Explicitly not doing
 
 Recorded so they stop being reconsidered:
 
-- A chatbot UI. The interesting surface is the receipt, not the conversation.
-- Autonomous agents that act on your data.
 - Cloud sync. The store is one file; back it up.
-- Multiple model providers before there is a single measured number.
+
+Two items once listed here were reversed: chat was built, and autonomous agents were reopened.
+`Docs/ai/PROJECT.md` has the reasoning.

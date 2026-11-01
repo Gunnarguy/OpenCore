@@ -1,0 +1,51 @@
+{
+  "schema": "codemap/1",
+  "id": "source-sync",
+  "name": "Fresh store and scheduled sync",
+  "aliases": ["sync", "SourceSync", "SyncSchedule", "SyncLane", "SyncCoordinator", "last_synced", "since", "Sync All", "scheduler", "daemon", "re-read"],
+  "purpose": "Decides where a read starts and when the sync date moves, and in the app schedules reads and allows one at a time.",
+  "revision": "e801208",
+  "verified_on": "2026-10-31",
+  "entry_points": ["SourceSync.run", "AppModel.runDueSyncs"],
+  "files": [
+    {"path": "Sources/CoreGraph/SourceSync.swift", "role": "primary", "blob": "43ba2df3ac0ddfbcc8970abe93ebc80cdf66170a"},
+    {"path": "Sources/CoreIngest/SyncSchedule.swift", "role": "primary", "blob": "d186be57864e83f3614ca4985ee53ec2328f13a9"},
+    {"path": "Sources/CoreIngest/SyncLane.swift", "role": "primary", "blob": "47fceb15bffe0ab846e62b76329899862851d07b"},
+    {"path": "Apps/OpenCoreMac/Sources/AppModel+Schedule.swift", "role": "primary", "blob": "2805501a0879233fd38f776368c57d43bedf304f"},
+    {"path": "Apps/OpenCoreMac/Sources/AppModel.swift", "role": "shared", "blob": "0839735b05a66afee2983055082c3503a2ccbb22"},
+    {"path": "Sources/opencore/main.swift", "role": "shared", "blob": "5d9af58b71f74ba974302909702f58a5aea12f35"},
+    {"path": "Tests/CoreGraphTests/SourceSyncTests.swift", "role": "test", "blob": "4fadd55ea93192d6b3d428019ebd7d7a9f795f33"},
+    {"path": "Tests/CoreGraphTests/SyncLaneTests.swift", "role": "test", "blob": "49529cb6046fa630d8c5b8fc38aa0c31ae65a578"}
+  ],
+  "nodes": [
+    {"id": "SourceSync.run", "kind": "function", "path": "Sources/CoreGraph/SourceSync.swift", "line": 86, "match": "public func run(", "status": "VERIFIED", "note": "The app, the CLI and both MCP sync paths come through here."},
+    {"id": "SyncSchedule.due", "kind": "function", "path": "Sources/CoreIngest/SyncSchedule.swift", "line": 143, "match": "public static func due(", "status": "VERIFIED", "note": "What a tick runs."},
+    {"id": "SyncSchedule.runnable", "kind": "function", "path": "Sources/CoreIngest/SyncSchedule.swift", "line": 137, "match": "public static func runnable(_ jobs: [Job], records: [Job: Record], includeNotes: Bool) -> [Job] {", "status": "VERIFIED", "note": "Keeps Notes off the schedule until a person's read worked."},
+    {"id": "SyncCoordinator", "kind": "service", "path": "Sources/CoreIngest/SyncLane.swift", "line": 53, "match": "public final class SyncCoordinator {", "status": "VERIFIED", "note": "One sync per app process. A CLI sync can still overlap."},
+    {"id": "AppModel.runDueSyncs", "kind": "function", "path": "Apps/OpenCoreMac/Sources/AppModel+Schedule.swift", "line": 125, "match": "func runDueSyncs(mayDefer: Bool = false) async -> Bool {", "status": "VERIFIED", "note": ""}
+  ],
+  "edges": [
+    {"from": "SourceSync.run", "type": "writes", "to": "store-floor#Database", "status": "VERIFIED", "evidence": [{"path": "Sources/CoreGraph/SourceSync.swift", "line": 109, "match": "try await store.markSynced(sourceID, at: startedAt, cursor: fetched.cursor)"}], "note": "Moves only when the read reached everything."},
+    {"from": "SourceSync.run", "type": "calls", "to": "ingest#IngestPipeline.run", "status": "VERIFIED", "evidence": [{"path": "Sources/CoreGraph/SourceSync.swift", "line": 115, "match": "let derived = try await pipeline.run(objects: fetched.objects, log: log)"}], "note": ""},
+    {"from": "AppModel.runDueSyncs", "type": "calls", "to": "SyncSchedule.due", "status": "VERIFIED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/AppModel+Schedule.swift", "line": 138, "match": "for job in SyncSchedule.due(scheduledJobs, records: scheduleRecords) {"}], "note": ""}
+  ],
+  "docs": [],
+  "unknowns": ["AppModel+Schedule and any real NSBackgroundActivityScheduler tick have never run. RUNBOOK has the manual check.", "Whether .utility fires often enough on a Mac in use."],
+  "related": ["connectors", "ingest"],
+  "derived": {
+    "generated_by": "codemap 1.1.0 derive: declarations, type references and test mentions; edges are INFERRED",
+    "nodes": [
+      {"id": "SourceSync", "kind": "model", "path": "Sources/CoreGraph/SourceSync.swift", "line": 14, "match": "public struct SourceSync: Sendable {", "status": "VERIFIED"},
+      {"id": "SyncSchedule", "kind": "model", "path": "Sources/CoreIngest/SyncSchedule.swift", "line": 9, "match": "public enum SyncSchedule {", "status": "VERIFIED"}
+    ],
+    "edges": [
+      {"from": "app-shell#AppModel", "type": "depends_on", "to": "SyncSchedule", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/AppModel+Schedule.swift", "line": 25, "match": "var scheduledJobs: [SyncSchedule.Job] {"}]},
+      {"from": "SourceSync", "type": "depends_on", "to": "feature:connectors", "status": "INFERRED", "evidence": [{"path": "Sources/CoreGraph/SourceSync.swift", "line": 28, "match": "public typealias Fetched = ConnectorBatch"}], "note": "via ConnectorBatch"},
+      {"from": "SourceSync", "type": "depends_on", "to": "feature:ingest", "status": "INFERRED", "evidence": [{"path": "Sources/CoreGraph/SourceSync.swift", "line": 37, "match": "public let derived: IngestPipeline.Outcome?"}], "note": "via IngestPipeline"},
+      {"from": "SourceSync", "type": "depends_on", "to": "feature:store-floor", "status": "INFERRED", "evidence": [{"path": "Sources/CoreGraph/SourceSync.swift", "line": 59, "match": "private let store: Store"}], "note": "via Store, Source"},
+      {"from": "app-shell#AppModel", "type": "depends_on", "to": "feature:connectors", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/AppModel+Schedule.swift", "line": 65, "match": "let available = await Task.detached { GitHubConnector.resolveToken() != nil }.value"}], "note": "via GitHubConnector"},
+      {"from": "app-shell#AppModel", "type": "depends_on", "to": "feature:app-shell", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/AppModel+Schedule.swift", "line": 82, "match": "ActionFeedbackCenter.shared.record(button: label, command: \"SyncCoordinator.exclusively\", outcome: message, status: .noOpExplained)"}], "note": "via ActionFeedbackCenter"}
+    ],
+    "edges_omitted": 0
+  }
+}

@@ -1,0 +1,76 @@
+{
+  "schema": "codemap/1",
+  "id": "ingest",
+  "name": "Ingest pipeline and claim extraction",
+  "aliases": ["IngestPipeline", "ClaimExtractor", "EntityResolver", "derive", "rederive", "chunker", "extraction", "model proposals"],
+  "purpose": "Turns objects into chunks, entities, claims and beliefs through one pipeline, so the CLI, the app and rebuild cannot drift apart.",
+  "revision": "e801208",
+  "verified_on": "2026-10-31",
+  "entry_points": ["IngestPipeline.run"],
+  "files": [
+    {"path": "Sources/CoreGraph/IngestPipeline.swift", "role": "primary", "blob": "81f5e02c02aa32943c8a11a94fdb842b57e43a3e"},
+    {"path": "Sources/CoreGraph/ClaimExtractor.swift", "role": "primary", "blob": "23e48d1ef6a6f6993c1d7ed3a705b2f42663350c"},
+    {"path": "Sources/CoreGraph/EntityResolver.swift", "role": "primary", "blob": "fa3b80f730ffc97e0bedbfa93c06dac591abf362"},
+    {"path": "Sources/CoreModel/Chunker.swift", "role": "primary", "blob": "561599be1d2069a61184fc853ed916f939f0e172"},
+    {"path": "Sources/CoreModel/Chunk.swift", "role": "primary", "blob": "bfb8d9f6151dd95317d6ceac1079ef180a52b5c3"},
+    {"path": "Sources/CoreReason/ModelClaimProposer.swift", "role": "primary", "blob": "0a4728de6b7829c465d74bbf14d4c3a0ea83e077"},
+    {"path": "Tests/CoreGraphTests/ClaimExtractorTests.swift", "role": "test", "blob": "e4088f4d1c32856cd34106c38670659df76ddaa6"},
+    {"path": "Tests/CoreGraphTests/CalendarAttendanceTests.swift", "role": "test", "blob": "81268c0ff50d14db04d1bbe311a658ac3d139d0c"},
+    {"path": "Tests/CoreReasonTests/ModelClaimProposerTests.swift", "role": "test", "blob": "d956d8dcde8d2305044679cc16084fd0f2c9e91e"}
+  ],
+  "nodes": [
+    {"id": "IngestPipeline.run", "kind": "function", "path": "Sources/CoreGraph/IngestPipeline.swift", "line": 45, "match": "public func run(objects: [CoreObject], storeObjects: Bool = true, log: @Sendable (String) -> Void = { _ in }) async throws -> Outcome {", "status": "VERIFIED", "note": "Store, chunk, resolve, extract, reconcile."},
+    {"id": "IngestPipeline.rederive", "kind": "function", "path": "Sources/CoreGraph/IngestPipeline.swift", "line": 151, "match": "public func rederive(log: @Sendable (String) -> Void = { _ in }) async throws -> Outcome {", "status": "VERIFIED", "note": "Replays object versions in stages, each with its own now."},
+    {"id": "ClaimExtractor.extract", "kind": "function", "path": "Sources/CoreGraph/ClaimExtractor.swift", "line": 55, "match": "public func extract(from objects: [CoreObject]) async throws -> Outcome {", "status": "VERIFIED", "note": "Rules by object shape."},
+    {"id": "EntityResolver.resolve", "kind": "function", "path": "Sources/CoreGraph/EntityResolver.swift", "line": 24, "match": "public func resolve(objects: [CoreObject]) async throws -> Outcome {", "status": "VERIFIED", "note": "Conservative merges."}
+  ],
+  "edges": [
+    {"from": "IngestPipeline.run", "type": "writes", "to": "store-floor#Store.ingest", "status": "VERIFIED", "evidence": [{"path": "Sources/CoreGraph/IngestPipeline.swift", "line": 53, "match": "let ingested = try await store.ingest(objects)"}], "note": ""},
+    {"from": "IngestPipeline.run", "type": "calls", "to": "EntityResolver.resolve", "status": "VERIFIED", "evidence": [{"path": "Sources/CoreGraph/IngestPipeline.swift", "line": 86, "match": "let resolved = try await EntityResolver(store: store).resolve(objects: effectiveObjects)"}], "note": ""},
+    {"from": "IngestPipeline.run", "type": "calls", "to": "ClaimExtractor.extract", "status": "VERIFIED", "evidence": [{"path": "Sources/CoreGraph/IngestPipeline.swift", "line": 96, "match": "let extracted = try await ClaimExtractor(store: store, now: now).extract(from: effectiveObjects)"}], "note": ""},
+    {"from": "IngestPipeline.run", "type": "calls", "to": "beliefs#BeliefEngine.reconcile", "status": "VERIFIED", "evidence": [{"path": "Sources/CoreGraph/IngestPipeline.swift", "line": 108, "match": "let reconciled = try await BeliefEngine(store: store, now: now).reconcile()"}], "note": ""}
+  ],
+  "docs": [],
+  "unknowns": [],
+  "related": ["store-floor", "beliefs", "rebuild"],
+  "derived": {
+    "generated_by": "codemap 1.1.0 derive: declarations, type references and test mentions; edges are INFERRED",
+    "nodes": [
+      {"id": "IngestPipeline", "kind": "service", "path": "Sources/CoreGraph/IngestPipeline.swift", "line": 11, "match": "public struct IngestPipeline: Sendable {", "status": "VERIFIED"},
+      {"id": "EmbeddingIndexer", "kind": "model", "path": "Sources/CoreGraph/IngestPipeline.swift", "line": 173, "match": "public struct EmbeddingIndexer: Sendable {", "status": "VERIFIED"},
+      {"id": "ClaimExtractor", "kind": "model", "path": "Sources/CoreGraph/ClaimExtractor.swift", "line": 15, "match": "public struct ClaimExtractor: Sendable {", "status": "VERIFIED"},
+      {"id": "EntityResolver", "kind": "model", "path": "Sources/CoreGraph/EntityResolver.swift", "line": 11, "match": "public struct EntityResolver: Sendable {", "status": "VERIFIED"},
+      {"id": "Chunker", "kind": "model", "path": "Sources/CoreModel/Chunker.swift", "line": 10, "match": "public struct Chunker: Sendable {", "status": "VERIFIED"},
+      {"id": "CoreChunk", "kind": "model", "path": "Sources/CoreModel/Chunk.swift", "line": 10, "match": "public struct CoreChunk: Hashable, Sendable, Codable, Identifiable {", "status": "VERIFIED"},
+      {"id": "StoredVector", "kind": "model", "path": "Sources/CoreModel/Chunk.swift", "line": 35, "match": "public struct StoredVector: Sendable {", "status": "VERIFIED"},
+      {"id": "EmbeddingProvider", "kind": "model", "path": "Sources/CoreModel/Chunk.swift", "line": 52, "match": "public protocol EmbeddingProvider: Sendable {", "status": "VERIFIED"},
+      {"id": "ModelClaimProposer", "kind": "model", "path": "Sources/CoreReason/ModelClaimProposer.swift", "line": 19, "match": "public struct ModelClaimProposer: Sendable {", "status": "VERIFIED"}
+    ],
+    "edges": [
+      {"from": "IngestPipeline", "type": "depends_on", "to": "Chunker", "status": "INFERRED", "evidence": [{"path": "Sources/CoreGraph/IngestPipeline.swift", "line": 13, "match": "private let chunker: Chunker"}]},
+      {"from": "IngestPipeline", "type": "depends_on", "to": "CoreChunk", "status": "INFERRED", "evidence": [{"path": "Sources/CoreGraph/IngestPipeline.swift", "line": 68, "match": "var chunks: [CoreChunk] = []"}]},
+      {"from": "IngestPipeline", "type": "depends_on", "to": "EntityResolver", "status": "INFERRED", "evidence": [{"path": "Sources/CoreGraph/IngestPipeline.swift", "line": 86, "match": "let resolved = try await EntityResolver(store: store).resolve(objects: effectiveObjects)"}]},
+      {"from": "IngestPipeline", "type": "depends_on", "to": "ClaimExtractor", "status": "INFERRED", "evidence": [{"path": "Sources/CoreGraph/IngestPipeline.swift", "line": 96, "match": "let extracted = try await ClaimExtractor(store: store, now: now).extract(from: effectiveObjects)"}]},
+      {"from": "EmbeddingIndexer", "type": "depends_on", "to": "EmbeddingProvider", "status": "INFERRED", "evidence": [{"path": "Sources/CoreGraph/IngestPipeline.swift", "line": 175, "match": "private let provider: any EmbeddingProvider"}]},
+      {"from": "EmbeddingIndexer", "type": "depends_on", "to": "StoredVector", "status": "INFERRED", "evidence": [{"path": "Sources/CoreGraph/IngestPipeline.swift", "line": 202, "match": "var stored: [StoredVector] = []"}]},
+      {"from": "EntityResolver", "type": "depends_on", "to": "ClaimExtractor", "status": "INFERRED", "evidence": [{"path": "Sources/CoreGraph/EntityResolver.swift", "line": 42, "match": "domain: ClaimExtractor.technologyDomain(for: object),"}]},
+      {"from": "Chunker", "type": "depends_on", "to": "CoreChunk", "status": "INFERRED", "evidence": [{"path": "Sources/CoreModel/Chunker.swift", "line": 27, "match": "public func chunks(for object: CoreObject) -> [CoreChunk] {"}]},
+      {"from": "ModelClaimProposer", "type": "depends_on", "to": "ClaimExtractor", "status": "INFERRED", "evidence": [{"path": "Sources/CoreReason/ModelClaimProposer.swift", "line": 177, "match": "var verified: [ProposedClaimRecord] = ClaimExtractor.decodedModelProposals(from: object)"}]},
+      {"from": "ModelClaimProposer", "type": "depends_on", "to": "IngestPipeline", "status": "INFERRED", "evidence": [{"path": "Sources/CoreReason/ModelClaimProposer.swift", "line": 246, "match": "let pipelineOutcome = try await IngestPipeline(store: store)"}]},
+      {"from": "IngestPipeline", "type": "depends_on", "to": "feature:store-floor", "status": "INFERRED", "evidence": [{"path": "Sources/CoreGraph/IngestPipeline.swift", "line": 12, "match": "private let store: Store"}], "note": "via Store, IngestOutcome, CoreObject"},
+      {"from": "IngestPipeline", "type": "depends_on", "to": "feature:hardware", "status": "INFERRED", "evidence": [{"path": "Sources/CoreGraph/IngestPipeline.swift", "line": 46, "match": "try await Telemetry.span(\"pipeline.run\", .graph, attributes: [\"storeObjects\": String(storeObjects)]) { pipeline in"}], "note": "via Telemetry"},
+      {"from": "IngestPipeline", "type": "depends_on", "to": "feature:beliefs", "status": "INFERRED", "evidence": [{"path": "Sources/CoreGraph/IngestPipeline.swift", "line": 108, "match": "let reconciled = try await BeliefEngine(store: store, now: now).reconcile()"}], "note": "via BeliefEngine"},
+      {"from": "EmbeddingIndexer", "type": "depends_on", "to": "feature:store-floor", "status": "INFERRED", "evidence": [{"path": "Sources/CoreGraph/IngestPipeline.swift", "line": 174, "match": "private let store: Store"}], "note": "via Store"},
+      {"from": "EmbeddingIndexer", "type": "depends_on", "to": "feature:hardware", "status": "INFERRED", "evidence": [{"path": "Sources/CoreGraph/IngestPipeline.swift", "line": 184, "match": "try await Telemetry.span("}], "note": "via Telemetry"},
+      {"from": "ClaimExtractor", "type": "depends_on", "to": "feature:store-floor", "status": "INFERRED", "evidence": [{"path": "Sources/CoreGraph/ClaimExtractor.swift", "line": 16, "match": "private let store: Store"}], "note": "via Store, CoreObject, CoreClaim, CoreEvent"},
+      {"from": "ClaimExtractor", "type": "depends_on", "to": "feature:firewall", "status": "INFERRED", "evidence": [{"path": "Sources/CoreGraph/ClaimExtractor.swift", "line": 50, "match": "static func technologyDomain(for object: CoreObject) -> Domain {"}], "note": "via Domain"},
+      {"from": "ClaimExtractor", "type": "depends_on", "to": "feature:beliefs", "status": "INFERRED", "evidence": [{"path": "Sources/CoreGraph/ClaimExtractor.swift", "line": 279, "match": "return commits.first { !CommitNature.isUpkeep(title: $0.title, author: $0.author) }?.authoredAt ?? oldest.authoredAt"}], "note": "via CommitNature"},
+      {"from": "EntityResolver", "type": "depends_on", "to": "feature:store-floor", "status": "INFERRED", "evidence": [{"path": "Sources/CoreGraph/EntityResolver.swift", "line": 12, "match": "private let store: Store"}], "note": "via Store, CoreObject, CoreEntity, EntityAlias"},
+      {"from": "Chunker", "type": "depends_on", "to": "feature:store-floor", "status": "INFERRED", "evidence": [{"path": "Sources/CoreModel/Chunker.swift", "line": 27, "match": "public func chunks(for object: CoreObject) -> [CoreChunk] {"}], "note": "via CoreObject"},
+      {"from": "ModelClaimProposer", "type": "depends_on", "to": "feature:store-floor", "status": "INFERRED", "evidence": [{"path": "Sources/CoreReason/ModelClaimProposer.swift", "line": 20, "match": "private let store: Store"}], "note": "via Store, ProposedClaimRecord, CoreObject, Predicate"},
+      {"from": "ModelClaimProposer", "type": "depends_on", "to": "feature:hardware", "status": "INFERRED", "evidence": [{"path": "Sources/CoreReason/ModelClaimProposer.swift", "line": 157, "match": "try await Telemetry.span(\"propose.claims\", .reason, attributes: [\"object\": object.id.value]) { span in"}], "note": "via Telemetry, BoundedProcess"},
+      {"from": "ModelClaimProposer", "type": "depends_on", "to": "feature:chat", "status": "INFERRED", "evidence": [{"path": "Sources/CoreReason/ModelClaimProposer.swift", "line": 169, "match": "usedModel = Conversation.fmCLIModelIdentity"}], "note": "via Conversation"}
+    ],
+    "edges_omitted": 0
+  }
+}

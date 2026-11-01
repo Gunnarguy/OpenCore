@@ -17,6 +17,12 @@ public struct PassageHit: Sendable {
 
 public struct PassageOutcome: Sendable {
     public var hits: [PassageHit]
+    /// The chunks a leg actually looked through. The whole store with no window, the admitted
+    /// chunks dated inside one with a window, and 0 when there was no text for any leg to search.
+    ///
+    /// **Not always the corpus.** It was, so an answer read from the event log, which searched
+    /// nothing, persisted `objects_searched` of every chunk there is, and "N passages searched"
+    /// stood behind a window that read a fraction of them.
     public var chunksSearched: Int
     public var lexicalCandidates: Int
     public var denseCandidates: Int
@@ -177,7 +183,7 @@ public struct RetrievalTuning: Sendable, Hashable, Codable {
         candidatesPerLeg = try container.decode(Int.self, forKey: .candidatesPerLeg)
         signalScale = try container.decode(Double.self, forKey: .signalScale)
         lexicalWeight = try container.decodeIfPresent(Double.self, forKey: .lexicalWeight) ?? 1.0
-        denseWeight = try container.decodeIfPresent(Double.self, forKey: .denseWeight) ?? 1.0
+        denseWeight = try container.decodeIfPresent(Double.self, forKey: .denseWeight) ?? 0.0
     }
 
     /// True when every value still matches the shipped default, so a UI can say whether what
@@ -202,9 +208,15 @@ public struct PassageSearch: Sendable {
         policy: AdmissionPolicy,
         limit: Int = 12,
         candidatesPerLeg: Int? = nil,
-        expandContext: Bool = true
+        expandContext: Bool = true,
+        window: DateInterval? = nil,
+        reportBlocked: Bool = true
     ) async throws -> PassageOutcome {
-        try await Telemetry.span(
+        // A caller-supplied limit reaches `hits.prefix(limit * 2)`, and a negative one traps
+        // there. Over MCP that limit is written by a model, so one bad argument ended the
+        // server process for every client using it.
+        let limit = max(0, limit)
+        return try await Telemetry.span(
             "search.passages",
             .search,
             attributes: ["queryClass": queryClass.rawValue, "limit": String(limit)]
@@ -212,8 +224,7 @@ public struct PassageSearch: Sendable {
         var unavailable: [String: String] = [:]
         var timings: [String: Int] = [:]
 
-        let chunksSearched = try await store.chunkCount()
-        search.set("chunks.searched", chunksSearched)
+        let corpusChunks = try await store.chunkCount()
 
         // ---- Leg 1: lexical ----
         let lexicalStart = DispatchTime.now().uptimeNanoseconds
@@ -221,17 +232,25 @@ public struct PassageSearch: Sendable {
         let perLeg = candidatesPerLeg ?? tuning.candidatesPerLeg
         let lexical = try await Telemetry.span("leg.lexical", .search, attributes: ["match": String(match.prefix(120))]) { leg in
             leg.attribute("weight", String(tuning.lexicalWeight))
-            let hits = try await store.lexicalChunks(match: match, limit: perLeg)
-            leg.set("candidates", hits.count)
+            let hits = try await store.lexicalChunks(
+                match: match,
+                limit: perLeg,
+                admittedDomains: policy.admitted,
+                includeBlockedTopWindowForTelemetry: reportBlocked,
+                authoredIn: window
+            )
+            let admittedCount = hits.filter { policy.admits($0.object.domain) }.count
+            leg.set("candidates", admittedCount)
             // Hitting the cap means the leg was truncated, so a better candidate may exist
             // just past it. That is invisible from the result set alone.
-            leg.attribute("sawLimit", String(hits.count >= perLeg))
+            leg.attribute("sawLimit", String(admittedCount >= perLeg))
             return hits
         }
         timings["lexical"] = elapsed(since: lexicalStart)
 
         // ---- Leg 2: dense ----
         var dense: [ChunkCandidate] = []
+        var denseLegRan = false
         let denseStart = DispatchTime.now().uptimeNanoseconds
         // A leg switched off by tuning must be as visible as one that failed. Silently
         // running half a retriever is the failure `rebuild` dropping every vector already
@@ -246,7 +265,11 @@ public struct PassageSearch: Sendable {
         // `rankings(...)` deliberately does *not* get this guard. The eval harness measures
         // the dense leg through it, and that measurement is the whole reason this weight is 0.
         if tuning.denseWeight == 0 {
-            unavailable[PassageOutcome.Signal.semanticDisabled] = "dense leg weighted to 0, so it was not run; measured 2026-08-09 as net-harmful on this corpus (fused nDCG 0.073 at weight 1.0 against 0.422 at 0)"
+            unavailable[PassageOutcome.Signal.semanticDisabled] = "dense leg weighted to 0, so it was not run; `opencore eval` on 2026-10-30 still scored it 0.000 on this corpus"
+        } else if query.allSatisfy(\.isWhitespace) {
+            // An answer from the event log passes no text. Embedding "" would rank the whole
+            // store by its distance from nothing.
+            unavailable[PassageOutcome.Signal.semantic] = "no text to search for, so the leg was not run"
         } else if let embedder {
             let embedded = try await store.embeddedChunkCount(model: embedder.modelIdentifier)
             if embedded == 0 {
@@ -266,16 +289,25 @@ public struct PassageSearch: Sendable {
                     dense = try await Telemetry.span("leg.dense", .search, attributes: ["model": embedder.modelIdentifier]) { leg in
                         leg.attribute("weight", String(tuning.denseWeight))
                         leg.set("chunks.embedded", embedded)
-                        let hits = try await store.denseChunks(query: vector, model: embedder.modelIdentifier, limit: perLeg)
-                        leg.set("candidates", hits.count)
+                        let hits = try await store.denseChunks(
+                            query: vector,
+                            model: embedder.modelIdentifier,
+                            limit: perLeg,
+                            admittedDomains: policy.admitted,
+                            includeBlockedTopWindowForTelemetry: reportBlocked,
+                            authoredIn: window
+                        )
+                        let admittedCount = hits.filter { policy.admits($0.object.domain) }.count
+                        leg.set("candidates", admittedCount)
                         return hits
                     }
-                    if embedded < chunksSearched {
+                    denseLegRan = true
+                    if embedded < corpusChunks {
                         // Partial coverage is a correctness problem masquerading as a
                         // performance one: the dense leg silently cannot see the
                         // un-embedded remainder. Say so rather than returning a
                         // confident answer over a fraction of the corpus.
-                        unavailable[PassageOutcome.Signal.semanticCoverage] = "\(embedded) of \(chunksSearched) chunks embedded; the dense leg cannot see the rest"
+                        unavailable[PassageOutcome.Signal.semanticCoverage] = "\(embedded) of \(corpusChunks) chunks embedded; the dense leg cannot see the rest"
                     }
                 }
             }
@@ -283,6 +315,28 @@ public struct PassageSearch: Sendable {
             unavailable[PassageOutcome.Signal.semantic] = "no embedding provider configured; lexical carries this query alone"
         }
         timings["dense"] = elapsed(since: denseStart)
+
+        var chunksSearched = 0
+        if !match.isEmpty || denseLegRan {
+            chunksSearched = if let window {
+                try await store.chunkCount(authoredIn: window, domains: policy.admitted)
+            } else {
+                corpusChunks
+            }
+        }
+        search.set("chunks.searched", chunksSearched)
+
+        // ---- Domain admission, ahead of RRF ranking ----
+        var blockedChunkIDs = Set<ChunkID>()
+        for candidate in lexical where !policy.admits(candidate.object.domain) {
+            blockedChunkIDs.insert(candidate.chunk.id)
+        }
+        for candidate in dense where !policy.admits(candidate.object.domain) {
+            blockedChunkIDs.insert(candidate.chunk.id)
+        }
+        let lexicalAdmitted = lexical.filter { policy.admits($0.object.domain) }
+        let denseAdmitted = dense.filter { policy.admits($0.object.domain) }
+        let blocked = blockedChunkIDs.count
 
         // ---- Fuse by rank ----
         let fuseStart = DispatchTime.now().uptimeNanoseconds
@@ -311,8 +365,8 @@ public struct PassageSearch: Sendable {
             }
         }
 
-        absorb(lexical, leg: "lexical", weight: tuning.lexicalWeight)
-        absorb(dense, leg: "dense", weight: tuning.denseWeight)
+        absorb(lexicalAdmitted, leg: "lexical", weight: tuning.lexicalWeight)
+        absorb(denseAdmitted, leg: "dense", weight: tuning.denseWeight)
         timings["fuse"] = elapsed(since: fuseStart)
 
         Telemetry.event("fuse", .search, attributes: [
@@ -321,12 +375,10 @@ public struct PassageSearch: Sendable {
             // Overlap is the one number that says whether the two legs are actually finding
             // different things. Equal to neither leg means genuine diversity; equal to the
             // smaller leg means one is a subset and the fusion is doing nothing.
-            "overlap": String(lexical.count + dense.count - fused.count),
+            "overlap": String(lexicalAdmitted.count + denseAdmitted.count - fused.count),
         ])
 
-        // ---- Domain admission, before any further ranking ----
-        let admitted = fused.values.filter { policy.admits($0.object.domain) }
-        let blocked = fused.count - admitted.count
+        let admitted = Array(fused.values)
         // The firewall is the security-relevant stage, so what it blocked is recorded even
         // when it blocked nothing. An absent counter and a zero would otherwise be the same.
         Telemetry.event("admission", .search, attributes: [
@@ -337,6 +389,11 @@ public struct PassageSearch: Sendable {
         // ---- Non-relevance signals fold in after fusion ----
         let now = Date()
         let weights = queryClass.weights
+        // RRF scores sit around 0.01...0.04, so non-relevance signals are scaled down by
+        // `tuning.signalScale / tuning.rrfK` so they break ties rather than overriding
+        // relevance. `tuning.signalScale` (0.02) is a chosen constant, not a measured one,
+        // and is the first target for the eval harness to replace.
+        let effectiveSignalScale = tuning.signalScale / max(1.0, tuning.rrfK)
         var scored = admitted.map { hit -> PassageHit in
             var hit = hit
             let authority = Double(hit.object.authority.rawValue) / Double(Authority.directStatement.rawValue)
@@ -348,14 +405,12 @@ public struct PassageSearch: Sendable {
             }
             hit.signals["authority"] = authority
             hit.signals["temporal"] = temporal
-            // RRF output is small (~0.03 max), so the additive terms are scaled to match
-            // rather than swamping it. This scaling is arbitrary and is flagged as such
-            // in Docs/RETRIEVAL.md; it is exactly the kind of constant the eval harness
-            // exists to replace.
-            hit.score += (weights.authority * authority + weights.temporal * temporal) * tuning.signalScale
+            // RRF rank steps are ~1/(k+1) - 1/(k+2) (~0.00026 at k=60), so the additive terms
+            // are scaled by `1/rrfK` to act as a tie-breaker rather than jumping 15 ranks.
+            hit.score += (weights.authority * authority + weights.temporal * temporal) * effectiveSignalScale
             return hit
         }
-        scored.sort { $0.score > $1.score }
+        scored = Self.byScore(scored)
 
         // ---- MMR ----
         let mmrStart = DispatchTime.now().uptimeNanoseconds
@@ -371,7 +426,7 @@ public struct PassageSearch: Sendable {
         // ---- Expand back into context ----
         var final = diversified
         if expandContext {
-            try await Telemetry.span("expand.context", .search) { scope in
+            await Telemetry.span("expand.context", .search) { scope in
                 for index in final.indices {
                     final[index].context = (try? await store.neighbours(of: final[index].chunk, window: 1)) ?? []
                     scope.count("neighbours", final[index].context.count)
@@ -392,8 +447,8 @@ public struct PassageSearch: Sendable {
         return PassageOutcome(
             hits: final,
             chunksSearched: chunksSearched,
-            lexicalCandidates: lexical.count,
-            denseCandidates: dense.count,
+            lexicalCandidates: lexicalAdmitted.count,
+            denseCandidates: denseAdmitted.count,
             afterFusion: fused.count,
             blockedByDomain: blocked,
             droppedByDiversity: max(0, dropped),
@@ -401,6 +456,15 @@ public struct PassageSearch: Sendable {
             stageTimings: timings
         )
         }
+    }
+
+    /// Highest score first, and a total order. `fused` is a `Dictionary`, so its values arrive
+    /// in an order that changes with each process's hash seed, and with both legs running a
+    /// chunk at ranks (1, 2) ties one at (2, 1) exactly. Sorting on score alone left that tie to
+    /// the seed. MMR then keeps whichever came first, so it changed the passages, not just their
+    /// order.
+    static func byScore(_ hits: [PassageHit]) -> [PassageHit] {
+        hits.sorted { ($0.score, $1.chunk.id.value) > ($1.score, $0.chunk.id.value) }
     }
 
     // MARK: - Per-leg rankings, for evaluation
@@ -432,7 +496,7 @@ public struct PassageSearch: Sendable {
     ) async throws -> LegRankings {
         let perLeg = tuning.candidatesPerLeg
         let match = HybridSearch.ftsQuery(from: query)
-        let lexical = try await store.lexicalChunks(match: match, limit: perLeg)
+        let lexical = try await store.lexicalChunks(match: match, limit: perLeg, admittedDomains: policy.admitted)
 
         var dense: [ChunkCandidate] = []
         var denseUnavailable: String?
@@ -445,7 +509,12 @@ public struct PassageSearch: Sendable {
                 if vector.isEmpty {
                     denseUnavailable = "query produced no embedding"
                 } else {
-                    dense = try await store.denseChunks(query: vector, model: embedder.modelIdentifier, limit: perLeg)
+                    dense = try await store.denseChunks(
+                        query: vector,
+                        model: embedder.modelIdentifier,
+                        limit: perLeg,
+                        admittedDomains: policy.admitted
+                    )
                     let total = try await store.chunkCount()
                     if embedded < total {
                         denseUnavailable = "\(embedded) of \(total) chunks embedded"
@@ -499,7 +568,7 @@ public struct PassageSearch: Sendable {
     /// the dense leg did not run. That is a weaker signal than vector similarity and is
     /// documented as such.
     private func diversify(_ hits: [PassageHit], limit: Int) -> [PassageHit] {
-        guard hits.count > 1 else { return hits }
+        guard hits.count > 1 else { return Array(hits.prefix(limit)) }
 
         let pool = Array(hits.prefix(limit * 2))
         var selected: [PassageHit] = []
@@ -515,8 +584,22 @@ public struct PassageSearch: Sendable {
             for index in available {
                 let relevance = pool[index].score
                 var maximumSimilarity = 0.0
-                for tokens in selectedTokens {
-                    maximumSimilarity = max(maximumSimilarity, Self.jaccard(tokenSets[index], tokens))
+                for (chosenPosition, tokens) in selectedTokens.enumerated() {
+                    let rawSim = Self.jaccard(tokenSets[index], tokens)
+                    let effectiveSim: Double
+                    if pool[index].object.id == selected[chosenPosition].object.id {
+                        // Multiple chunks from the same object should yield to distinct objects first.
+                        // 0.75 and 0.50 below are chosen constants, not measured ones.
+                        effectiveSim = max(rawSim, 0.75)
+                    } else if rawSim >= 0.50 {
+                        // Near-duplicate passages across different objects get the full MMR penalty.
+                        effectiveSim = rawSim
+                    } else {
+                        // Ordinary topical vocabulary overlap between distinct objects (such as a
+                        // repository overview and its README) is corroboration, not redundancy.
+                        effectiveSim = 0.0
+                    }
+                    maximumSimilarity = max(maximumSimilarity, effectiveSim)
                 }
                 let value = tuning.mmrLambda * relevance - (1 - tuning.mmrLambda) * maximumSimilarity * relevanceScale(pool)
                 if value > bestValue {

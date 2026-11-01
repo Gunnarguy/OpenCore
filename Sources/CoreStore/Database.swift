@@ -1,6 +1,11 @@
 import CoreTelemetry
 import Foundation
 import SQLite3
+#if canImport(Darwin)
+import Darwin
+#else
+import Glibc
+#endif
 
 private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
@@ -304,6 +309,81 @@ public actor Database {
         return base.appendingPathComponent("OpenCore", isDirectory: true).appendingPathComponent("opencore.sqlite3")
     }
 
+    /// A consistent SQLite snapshot, including committed WAL pages, into a reserved private
+    /// file. No unlink/recreate gap and no trust in a caller-supplied preexisting backup.
+    public func createPolicyRepairBackup(at url: URL) throws {
+        let requested = url.standardizedFileURL
+        // NSTemporaryDirectory can begin with /var (a symlink to /private/var on macOS).
+        // Resolve only the parent; the destination itself must still pass exclusive/no-follow creation.
+        let requestedParent = requested.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: requestedParent, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        guard let resolvedParent = realpath(requestedParent.path, nil) else { throw StoreError.open("could not resolve backup parent") }
+        defer { free(resolvedParent) }
+        let destinationPath = String(cString: resolvedParent) + "/" + requested.lastPathComponent
+        let destination = URL(fileURLWithPath: destinationPath)
+        guard destination != path.standardizedFileURL.resolvingSymlinksInPath() else {
+            throw StoreError.open("backup destination must be new and separate from the active database")
+        }
+        try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        #if canImport(Darwin)
+        let descriptor = Darwin.open(destinationPath, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, mode_t(0o600))
+        #else
+        let descriptor = Glibc.open(destinationPath, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, mode_t(0o600))
+        #endif
+        guard descriptor >= 0 else { throw StoreError.open("backup destination must be a new writable file; existing files and links are refused") }
+        defer { _ = close(descriptor) }
+        var reserved = stat()
+        guard fstat(descriptor, &reserved) == 0 else { throw StoreError.open("could not identify reserved backup file") }
+        func identityIsUnchanged() -> Bool {
+            var current = stat()
+            return lstat(destinationPath, &current) == 0
+                && current.st_dev == reserved.st_dev && current.st_ino == reserved.st_ino
+                && current.st_nlink == 1 && (current.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG)
+        }
+        var backupHandle: OpaquePointer?
+        var completed = false
+        defer {
+            if let backupHandle { sqlite3_close_v2(backupHandle) }
+            if !completed, identityIsUnchanged() { try? FileManager.default.removeItem(at: destination) }
+        }
+        guard identityIsUnchanged() else { throw StoreError.open("reserved backup identity changed before SQLite opened it") }
+        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_NOFOLLOW
+        let openStatus = sqlite3_open_v2(destinationPath, &backupHandle, flags, nil)
+        guard openStatus == SQLITE_OK, let target = backupHandle else {
+            let message = backupHandle.map { String(cString: sqlite3_errmsg($0)) } ?? "no SQLite error handle"
+            throw StoreError.open("could not open reserved backup database at \(destinationPath) (SQLite \(openStatus), extended \(backupHandle.map { sqlite3_extended_errcode($0) } ?? 0)): \(message)")
+        }
+        guard identityIsUnchanged() else { throw StoreError.open("reserved backup identity changed while opening it") }
+        sqlite3_busy_timeout(target, 5_000)
+        guard let snapshot = sqlite3_backup_init(target, "main", connection.handle, "main") else {
+            throw StoreError.open("could not initialise SQLite backup")
+        }
+        // One atomic backup operation on this actor's source connection. Retry only ordinary
+        // lock contention, bounded by a chosen five-second wall-clock deadline.
+        let deadline = Date().addingTimeInterval(5)
+        var status: Int32
+        repeat {
+            status = sqlite3_backup_step(snapshot, -1)
+            if (status == SQLITE_BUSY || status == SQLITE_LOCKED), Date() < deadline {
+                sqlite3_sleep(25)
+            } else { break }
+        } while true
+        let finished = sqlite3_backup_finish(snapshot)
+        guard status == SQLITE_DONE, finished == SQLITE_OK else {
+            throw StoreError.open("SQLite backup did not complete (step \(status), finish \(finished), extended \(sqlite3_extended_errcode(target))): \(String(cString: sqlite3_errmsg(target))); no policy changes were applied")
+        }
+        guard identityIsUnchanged() else { throw StoreError.open("reserved backup identity changed during snapshot") }
+        let backupConnection = Connection(handle: target)
+        let integrity = try backupConnection.query("PRAGMA integrity_check")
+        guard integrity.count == 1, integrity.first?.string("integrity_check") == "ok" else {
+            throw StoreError.open("backup integrity check failed; no policy changes were applied")
+        }
+        guard identityIsUnchanged(), fchmod(descriptor, mode_t(0o600)) == 0, fsync(descriptor) == 0, identityIsUnchanged() else {
+            throw StoreError.open("could not confirm and flush the private backup")
+        }
+        completed = true
+    }
+
     /// Apply every migration this build knows about that the store has not seen.
     ///
     /// Migration 1 creates `schema_migration` itself, so it always runs; its statements
@@ -348,6 +428,22 @@ public actor Database {
             try? connection.executeScript("ROLLBACK")
             throw error
         }
+    }
+
+    /// Run `body` in one transaction with another database attached under `alias`.
+    ///
+    /// ATTACH cannot happen inside a transaction, and this actor has no suspension point between
+    /// the three steps, so nothing else can use the connection while the attachment exists.
+    /// `alias` is a fixed name from this module, never caller text.
+    public func withAttached<T: Sendable>(_ url: URL, as alias: String, _ body: (Connection) throws -> T) throws -> T {
+        try connection.execute("ATTACH DATABASE ? AS \(alias)", [.text(url.path)])
+        defer { _ = try? connection.execute("DETACH DATABASE \(alias)") }
+        return try write(body)
+    }
+
+    /// Fold the write-ahead log into the main file, so the file alone is the whole database.
+    public func checkpoint() throws {
+        _ = try connection.query("PRAGMA wal_checkpoint(TRUNCATE)")
     }
 
     /// Convenience for one-off statements outside a transaction.

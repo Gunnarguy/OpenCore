@@ -84,10 +84,10 @@ struct ReceiptIdentityTests {
 //
 // `evidenceAdmitted` counts two different things. `Reasoner` assembles from the claim graph and
 // writes `receipt_evidence` rows, so its counter is claim evidence and a trace resolves it.
-// Chat answers from passages, sets `evidenceAdmitted: sources.count`, and deliberately never
-// reads the claim table (`claimsConsulted: 0`, with a comment saying it is genuinely zero and
-// not a placeholder). So a chat receipt has a non-zero counter and nothing to trace, and the
-// screen whose whole job is showing where an answer came from contradicted itself.
+// Chat, on a question naming no subject, answers from passages, sets `evidenceAdmitted` to their
+// count, and does not read the claim table (`claimsConsulted: 0`, genuinely zero and not a
+// placeholder). So that receipt has a non-zero counter and nothing to trace, and the screen whose
+// whole job is showing where an answer came from contradicted itself.
 //
 // The discriminator lives on the type rather than as a `claimsConsulted > 0` comparison in a
 // view, so the two surfaces cannot disagree about it.
@@ -112,7 +112,8 @@ private func receipt(claimsConsulted: Int, evidenceAdmitted: Int) -> Receipt {
 
 @Test("a passage-answered receipt reports no claim evidence to trace, however many passages it admitted")
 func passageAnsweredReceiptHasNothingToTrace() {
-    // The exact shape chat writes: six passages admitted, claim table never read.
+    // The exact shape chat writes for a question naming no subject: six passages admitted, claim
+    // table never read.
     let chat = receipt(claimsConsulted: 0, evidenceAdmitted: 6)
 
     #expect(!chat.answeredFromClaims)

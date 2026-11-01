@@ -53,6 +53,8 @@ public struct DossierClaim: Sendable, Identifiable {
 
     /// The belief now standing in this slot.
     public var belief: Belief?
+    /// Whether any claim in this collapsed statement is the standing belief.
+    public var isBelieved: Bool = false
 }
 
 extension Store {
@@ -89,10 +91,13 @@ extension Store {
             let key = "\(claim.predicate)\u{1F}\(value)"
             if var existing = grouped[key] {
                 existing.occurrences += 1
-                // Keep the most confident instance as the representative, so the row's
-                // confidence is the best evidence for the statement rather than whichever
-                // copy happened to sort first.
-                if claim.confidence > existing.claim.confidence { existing.claim = claim }
+                existing.isBelieved = existing.isBelieved || existing.belief?.claimID == claim.id
+                // Match the belief engine: ordinal authority, then world/observation time,
+                // then heuristic confidence. Repetition never promotes source authority.
+                let proposed = (claim.authority.rawValue, (claim.validity.validFrom ?? claim.validity.observedAt).timeIntervalSince1970, claim.confidence)
+                let held = existing.claim
+                let retained = (held.authority.rawValue, (held.validity.validFrom ?? held.validity.observedAt).timeIntervalSince1970, held.confidence)
+                if proposed > retained { existing.claim = claim }
                 grouped[key] = existing
             } else {
                 order.append(key)
@@ -102,7 +107,8 @@ extension Store {
                     value: value,
                     occurrences: 1,
                     revisions: (summary?.versions ?? 0) > 1 ? summary?.versions : nil,
-                    belief: summary?.current
+                    belief: summary?.current,
+                    isBelieved: summary?.current.claimID == claim.id
                 )
             }
         }
@@ -110,6 +116,9 @@ extension Store {
         // the type checker looking for a generic tuple operator and it does not come back
         // quickly; the same shape stalled a build for the better part of an hour.
         let claims = order.compactMap { grouped[$0] }.sorted { first, second in
+            if first.claim.authority != second.claim.authority {
+                return first.claim.authority > second.claim.authority
+            }
             if first.claim.confidence != second.claim.confidence {
                 return first.claim.confidence > second.claim.confidence
             }

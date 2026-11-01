@@ -47,6 +47,10 @@ final class MCPSourcesModel {
     var lockedArguments: [String: [String: String]] = [:]
 
     var sources: [SourceRow] = []
+    var detectedOnMac: [DetectedServer] = []
+    var curatedPresets: [DetectedServer] = []
+    var registeredOpenCoreClients: [String] = []
+    var pendingDiscoveredConfig: MCPServerConfig?
     /// The one line of outcome text the CLI would have printed.
     var notice: String?
 
@@ -59,9 +63,33 @@ final class MCPSourcesModel {
         let missingEnvironment: [String]
     }
 
+    struct DetectedServer: Identifiable, Sendable, Hashable {
+        var id: String { name }
+        let name: String
+        let displayTitle: String
+        let summary: String
+        let symbol: String
+        let sourceBadge: String
+        let config: MCPServerConfig
+        let isInstalledOnMac: Bool
+    }
+
     var allowedCount: Int { allowed.count }
 
     func isAllowed(_ tool: String) -> Bool { allowed.contains(tool) }
+
+    /// Convenience button in the human review sheet: ticks all ready tools whose advisory is
+    /// `.likelyRead`. Nothing is saved or called until the user reviews the selection and
+    /// clicks Save / Add Source.
+    func selectAllLikelyReadOnly() {
+        for tool in discoveredTools where MCPToolRisk(tool) == .likelyRead && isReady(tool) {
+            allowed.insert(tool.name)
+        }
+    }
+
+    func clearAllowed() {
+        allowed.removeAll()
+    }
 
     /// A tool whose required arguments are unfilled cannot be ticked. Calling it anyway
     /// would fail inside the server, and the user would read that as the server being broken
@@ -109,6 +137,7 @@ final class MCPSourcesModel {
         toolArguments = [:]
         lockedArguments = [:]
         editing = nil
+        pendingDiscoveredConfig = nil
     }
 
     /// Point the discovery panel at a source that already exists, pre-filled with what it
@@ -311,33 +340,39 @@ extension AppModel {
             return
         }
 
-        state = .working("connecting to mcp:\(row.name)")
-        do {
-            let connector = MCPClientConnector(config: config)
-            let batch = try await connector.fetch(since: row.source.lastSyncedAt, cursor: nil) { [weak self] message in
-                Task { @MainActor in self?.state = .working(message) }
-            }
+        await exclusively("mcp:\(row.name)", refused: { _ in }) {
+            state = .working("connecting to mcp:\(row.name)")
+            do {
+                let connector = MCPClientConnector(config: config)
+                let report = try await SourceSync(store: store, pipeline: pipeline(for: store)).run(
+                    row.id,
+                    phase: { [weak self] phase in
+                        guard case .deriving(let objects) = phase else { return }
+                        await self?.showDerivingFromMCP(objects)
+                    },
+                    fetch: { [weak self] since in
+                        try await connector.fetch(since: since, cursor: nil) { message in
+                            Task { @MainActor in self?.state = .working(message) }
+                        }
+                    }
+                )
 
-            guard !batch.objects.isEmpty else {
-                try await store.markSynced(row.id, at: Date(), cursor: batch.cursor)
-                mcp.notice = "\(row.name) returned nothing."
+                if let outcome = report.derived {
+                    mcp.notice = "\(row.name): \(outcome.ingest.inserted) new, \(outcome.ingest.updated) changed, \(outcome.ingest.unchanged) unchanged."
+                } else {
+                    mcp.notice = "\(row.name): \(report.heldBecause ?? "nothing new.")"
+                }
                 await loadMCPSources(into: mcp)
                 await refresh()
                 state = .idle
-                return
+            } catch {
+                state = .failed("mcp:\(row.name): \(error)")
             }
-
-            state = .working("deriving from \(batch.objects.count) objects")
-            let outcome = try await pipeline(for: store).run(objects: batch.objects)
-            try await store.markSynced(row.id, at: Date(), cursor: batch.cursor)
-
-            mcp.notice = "\(row.name): \(outcome.ingest.inserted) new, \(outcome.ingest.updated) changed, \(outcome.ingest.unchanged) unchanged."
-            await loadMCPSources(into: mcp)
-            await refresh()
-            state = .idle
-        } catch {
-            state = .failed("mcp:\(row.name): \(error)")
         }
+    }
+
+    private func showDerivingFromMCP(_ objects: Int) {
+        state = .working("deriving from \(objects) objects")
     }
 
     /// Mirrors `mcp-source remove`, which takes the objects with it. That is legitimate:
@@ -347,6 +382,10 @@ extension AppModel {
         guard let store else { return }
         state = .working("removing mcp:\(row.name)")
         do {
+            var dismissed = Set(UserDefaults.standard.stringArray(forKey: "mcp.dismissedLocalServers") ?? [])
+            dismissed.insert(row.name)
+            UserDefaults.standard.set(Array(dismissed).sorted(), forKey: "mcp.dismissedLocalServers")
+
             let removed = try await store.removeSource(row.id)
             mcp.notice = "Removed \(row.name) and \(removed) object(s) derived from it."
             await loadMCPSources(into: mcp)
@@ -357,12 +396,105 @@ extension AppModel {
         }
     }
 
-    /// Read-only, so it leaves `state` alone unless it fails, like the other loaders.
+    /// Connect and list tools for a detected or preset server.
+    func discoverDetectedServer(_ server: MCPSourcesModel.DetectedServer, into mcp: MCPSourcesModel) async {
+        await discoverMCP(config: server.config, into: mcp)
+        if !mcp.discoveredTools.isEmpty {
+            mcp.pendingDiscoveredConfig = server.config
+        }
+    }
+
+    /// Register a detected or preset server in `store` with an empty allowlist (`allowedTools: []`),
+    /// preserving default-deny until a human chooses which tools may run.
+    func registerDetectedServer(_ server: MCPSourcesModel.DetectedServer, into mcp: MCPSourcesModel) async {
+        guard let store else { return }
+        var dismissed = Set(UserDefaults.standard.stringArray(forKey: "mcp.dismissedLocalServers") ?? [])
+        dismissed.remove(server.name)
+        UserDefaults.standard.set(Array(dismissed).sorted(), forKey: "mcp.dismissedLocalServers")
+
+        state = .working("adding mcp:\(server.name)")
+        do {
+            var config = server.config
+            config.allowedTools = []
+            var source = MCPClientConnector(config: config).source
+            source.config = try Self.encodeMCPConfig(config)
+            try await store.upsert(source)
+            mcp.notice = "Added \(server.displayTitle). Click Choose tools on its card to select which read-only tools may run."
+            await loadMCPSources(into: mcp)
+            await refresh()
+            state = .idle
+        } catch {
+            state = .failed("mcp add: \(error)")
+        }
+    }
+
+    /// Register all detected Mac MCP servers at once with `allowedTools: []`.
+    func registerAllDetectedServers(into mcp: MCPSourcesModel) async {
+        guard let store, !mcp.detectedOnMac.isEmpty else { return }
+        var dismissed = Set(UserDefaults.standard.stringArray(forKey: "mcp.dismissedLocalServers") ?? [])
+        let servers = mcp.detectedOnMac
+        state = .working("importing \(servers.count) detected MCP servers")
+        do {
+            for server in servers {
+                dismissed.remove(server.name)
+                var config = server.config
+                config.allowedTools = []
+                var source = MCPClientConnector(config: config).source
+                source.config = try Self.encodeMCPConfig(config)
+                try await store.upsert(source)
+            }
+            UserDefaults.standard.set(Array(dismissed).sorted(), forKey: "mcp.dismissedLocalServers")
+            mcp.notice = "Imported \(servers.count) MCP server(s) detected on this Mac. Click Choose tools on any card to enable read tools."
+            await loadMCPSources(into: mcp)
+            await refresh()
+            state = .idle
+        } catch {
+            state = .failed("mcp import: \(error)")
+        }
+    }
+
+    /// Read-only loader that also scans the Mac's installed MCP configurations (`~/.gemini/config/mcp_config.json`,
+    /// `~/.claude.json`, Claude Desktop, Cursor) and seeds newly discovered local servers into `store`
+    /// with `allowedTools: []` (strict default-deny preserved).
     func loadMCPSources(into mcp: MCPSourcesModel) async {
         guard let store else { return }
         do {
-            let all = try await store.sources()
-            mcp.sources = all
+            let scanResult = Self.scanLocalMCPConfigs()
+            mcp.registeredOpenCoreClients = scanResult.openCoreClients
+
+            var all = try await store.sources()
+            var existingNames = Set(
+                all.filter { $0.handle.hasPrefix("mcp:") }
+                    .map { String($0.handle.dropFirst("mcp:".count)).lowercased() }
+            )
+            let dismissed = Set(
+                (UserDefaults.standard.stringArray(forKey: "mcp.dismissedLocalServers") ?? [])
+                    .map { $0.lowercased() }
+            )
+
+            // Seed newly discovered local MCP servers into `store` with `allowedTools: []` so the
+            // user immediately sees every MCP server already installed on their Mac without
+            // breaking the default-deny tool allowlist gate.
+            var didSeedAny = false
+            for detected in scanResult.servers {
+                let lowered = detected.name.lowercased()
+                let normalized = lowered.replacingOccurrences(of: "-mcp-server", with: "")
+                if existingNames.contains(lowered) || existingNames.contains(normalized) || dismissed.contains(lowered) {
+                    continue
+                }
+                var config = detected.config
+                config.allowedTools = []
+                var source = MCPClientConnector(config: config).source
+                source.config = try Self.encodeMCPConfig(config)
+                try await store.upsert(source)
+                existingNames.insert(lowered)
+                didSeedAny = true
+            }
+            if didSeedAny {
+                all = try await store.sources()
+            }
+
+            let configuredRows = all
                 .filter { $0.handle.hasPrefix("mcp:") }
                 .map { source -> MCPSourcesModel.SourceRow in
                     let config = source.config.flatMap { Self.decodeMCPConfig($0) }
@@ -374,9 +506,343 @@ extension AppModel {
                         missingEnvironment: config?.missingEnvironment ?? []
                     )
                 }
+            mcp.sources = configuredRows
+
+            let activeNames = Set(configuredRows.map { $0.name.lowercased() })
+            mcp.detectedOnMac = scanResult.servers.filter { !activeNames.contains($0.name.lowercased()) }
+            mcp.curatedPresets = Self.builtInPresets().filter { preset in
+                let low = preset.name.lowercased()
+                return !activeNames.contains(low)
+                    && !activeNames.contains("\(low)-mcp-server")
+                    && !mcp.detectedOnMac.contains(where: { $0.name.lowercased() == low })
+            }
         } catch {
             state = .failed("\(error)")
         }
+    }
+
+    // MARK: - Local Mac MCP Discovery & Presets
+
+    private struct LocalScanResult {
+        var servers: [MCPSourcesModel.DetectedServer]
+        var openCoreClients: [String]
+    }
+
+    /// Scans local AI client MCP configuration files (`~/.gemini/config/mcp_config.json`,
+    /// `~/.claude.json`, Claude Desktop, Cursor).
+    ///
+    /// Security invariant: `MCPServerConfig` only ever stores environment variable **names**
+    /// (`environmentNames`), never values. Any non-empty credential value present in a local
+    /// config file is bridged directly into the macOS Keychain (`Keychain.mcpAccount`) so
+    /// subprocesses can authenticate without a single secret ever touching SQLite, logs, or UI.
+    private static func scanLocalMCPConfigs() -> LocalScanResult {
+        let home = NSHomeDirectory()
+        let candidates: [(badge: String, path: String)] = [
+            ("Antigravity / Gemini", "\(home)/.gemini/config/mcp_config.json"),
+            ("Antigravity IDE", "\(home)/.gemini/antigravity/mcp_config.json"),
+            ("Claude Code", "\(home)/.claude.json"),
+            ("Claude Desktop", "\(home)/Library/Application Support/Claude/claude_desktop_config.json"),
+            ("Cursor", "\(home)/.cursor/mcp.json"),
+        ]
+
+        var seenNames = Set<String>()
+        var discovered: [MCPSourcesModel.DetectedServer] = []
+        var openCoreClients: [String] = []
+
+        for candidate in candidates {
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: candidate.path)),
+                  let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let mcpServers = root["mcpServers"] as? [String: Any]
+            else { continue }
+
+            for (rawName, rawEntry) in mcpServers.sorted(by: { $0.key < $1.key }) {
+                guard let entry = rawEntry as? [String: Any] else { continue }
+                let trimmedName = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmedName.isEmpty else { continue }
+
+                if trimmedName.lowercased() == "opencore" {
+                    if !openCoreClients.contains(candidate.badge) {
+                        openCoreClients.append(candidate.badge)
+                    }
+                    continue
+                }
+
+                let dedupeKey = trimmedName.lowercased()
+                guard !seenNames.contains(dedupeKey) else { continue }
+
+                let command = (entry["command"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let args = (entry["args"] as? [String]) ?? (entry["arguments"] as? [String]) ?? []
+                let url = ((entry["url"] as? String) ?? (entry["serverUrl"] as? String) ?? (entry["httpUrl"] as? String))?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+
+                guard !command.isEmpty || (url != nil && !(url?.isEmpty ?? true)) else { continue }
+
+                var envKeys: [String] = []
+                if let envDict = entry["env"] as? [String: Any] {
+                    for (key, rawVal) in envDict.sorted(by: { $0.key < $1.key }) {
+                        envKeys.append(key)
+                        if let strVal = rawVal as? String, !strVal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            let account = Keychain.mcpAccount(server: trimmedName, variable: key)
+                            if Keychain.read(account: account) == nil {
+                                try? Keychain.write(strVal, toAccount: account)
+                            }
+                        }
+                    }
+                }
+
+                let meta = metadata(forServerNamed: trimmedName, command: command, args: args, url: url)
+                let config = MCPServerConfig(
+                    name: trimmedName,
+                    url: (url?.isEmpty == false) ? url : nil,
+                    command: command,
+                    arguments: args,
+                    environmentNames: envKeys,
+                    allowedTools: [],
+                    domain: meta.domain
+                )
+                seenNames.insert(dedupeKey)
+                discovered.append(
+                    MCPSourcesModel.DetectedServer(
+                        name: trimmedName,
+                        displayTitle: meta.title,
+                        summary: meta.summary,
+                        symbol: meta.symbol,
+                        sourceBadge: candidate.badge,
+                        config: config,
+                        isInstalledOnMac: true
+                    )
+                )
+            }
+        }
+
+        return LocalScanResult(servers: discovered, openCoreClients: openCoreClients)
+    }
+
+    private static func metadata(
+        forServerNamed name: String,
+        command: String,
+        args: [String],
+        url: String?
+    ) -> (title: String, summary: String, symbol: String, domain: Domain) {
+        let low = name.lowercased()
+        if low.contains("github") {
+            return (
+                "GitHub MCP Server",
+                "Repositories, pull requests, issues, code search, and commit history via GitHub API.",
+                "chevron.left.forwardslash.chevron.right",
+                .project
+            )
+        }
+        if low == "rea" || low.contains("reverse") {
+            return (
+                "REA (Reverse Engineer Anything)",
+                "Native Mach-O, Swift/ObjC symbols, Ghidra/Rizin decompilation, Frida runtime & binary analysis.",
+                "cpu.fill",
+                .project
+            )
+        }
+        if low.contains("notion") {
+            return (
+                "Notion Workspace",
+                "Pages, databases, data sources, blocks, and workspace search.",
+                "doc.richtext",
+                .project
+            )
+        }
+        if low.contains("context7") {
+            return (
+                "Context7 Live SDK Docs",
+                "Up-to-date framework and package documentation indexed for coding agents.",
+                "book.pages",
+                .project
+            )
+        }
+        if low.contains("geminidocs") || low.contains("gemini") {
+            return (
+                "Gemini API & SDK Docs",
+                "Official Gemini API specifications, live docs search, and code guides.",
+                "sparkles",
+                .project
+            )
+        }
+        if low.contains("google-developer-knowledge") || low.contains("developer-knowledge") {
+            return (
+                "Google Developer Knowledge",
+                "Search and query official developer documentation and reference articles.",
+                "books.vertical.fill",
+                .project
+            )
+        }
+        if low.contains("google-home") {
+            return (
+                "Google Home Developer",
+                "Smart home device feedback, anomaly distribution, and developer docs.",
+                "house.and.flag.fill",
+                .project
+            )
+        }
+        if low.contains("knowledge-catalog") || low.contains("dataplex") {
+            return (
+                "Knowledge Catalog (Dataplex)",
+                "Enterprise data catalog entries, schema context, and governance lookup.",
+                "cylinder.split.1x2.fill",
+                .project
+            )
+        }
+        if low.contains("sequential") {
+            return (
+                "Sequential Thinking",
+                "Structured multi-step reasoning and hypothesis revision protocol.",
+                "brain.head.profile",
+                .project
+            )
+        }
+        if low.contains("data-agent") {
+            return (
+                "Data Cloud Agent Kit",
+                "Google Cloud data pipeline and BigQuery asset discovery bridge.",
+                "cloud.fill",
+                .project
+            )
+        }
+        if low.contains("notebook") {
+            return (
+                "Jupyter Notebooks Bridge",
+                "Notebook execution, cell inspection, and data science runtime tools.",
+                "menucard.fill",
+                .project
+            )
+        }
+        if low.contains("visual") {
+            return (
+                "Visualization Sidecar",
+                "Interactive scientific and data visualization rendering server.",
+                "chart.xyaxis.line",
+                .project
+            )
+        }
+        let fallbackSummary = url ?? ([command] + args).joined(separator: " ")
+        return (name, fallbackSummary, "powerplug.fill", .project)
+    }
+
+    private static func builtInPresets() -> [MCPSourcesModel.DetectedServer] {
+        [
+            MCPSourcesModel.DetectedServer(
+                name: "github",
+                displayTitle: "GitHub",
+                summary: "Issues, PRs, commits, and repository files. Uses your existing `gh auth` login automatically.",
+                symbol: "chevron.left.forwardslash.chevron.right",
+                sourceBadge: "Official Preset",
+                config: MCPServerConfig(
+                    name: "github",
+                    command: "npx",
+                    arguments: ["-y", "@modelcontextprotocol/server-github"],
+                    environmentNames: ["GITHUB_PERSONAL_ACCESS_TOKEN"],
+                    domain: .project
+                ),
+                isInstalledOnMac: false
+            ),
+            MCPSourcesModel.DetectedServer(
+                name: "linear",
+                displayTitle: "Linear",
+                summary: "Issues, cycles, projects, and engineering roadmaps over hosted OAuth HTTP.",
+                symbol: "line.3.horizontal.decrease.circle",
+                sourceBadge: "Hosted OAuth",
+                config: MCPServerConfig(
+                    name: "linear",
+                    url: "https://mcp.linear.app/mcp",
+                    command: "",
+                    domain: .project
+                ),
+                isInstalledOnMac: false
+            ),
+            MCPSourcesModel.DetectedServer(
+                name: "sentry",
+                displayTitle: "Sentry",
+                summary: "Production crash reports, stack traces, and release health over hosted OAuth HTTP.",
+                symbol: "ladybug.fill",
+                sourceBadge: "Hosted OAuth",
+                config: MCPServerConfig(
+                    name: "sentry",
+                    url: "https://mcp.sentry.dev/mcp",
+                    command: "",
+                    domain: .project
+                ),
+                isInstalledOnMac: false
+            ),
+            MCPSourcesModel.DetectedServer(
+                name: "slack",
+                displayTitle: "Slack",
+                summary: "Channel history, threads, and workspace search via `SLACK_BOT_TOKEN`.",
+                symbol: "bubble.left.and.text.bubble.right.fill",
+                sourceBadge: "Official Preset",
+                config: MCPServerConfig(
+                    name: "slack",
+                    command: "npx",
+                    arguments: ["-y", "@modelcontextprotocol/server-slack"],
+                    environmentNames: ["SLACK_BOT_TOKEN", "SLACK_TEAM_ID"],
+                    domain: .personal
+                ),
+                isInstalledOnMac: false
+            ),
+            MCPSourcesModel.DetectedServer(
+                name: "brave-search",
+                displayTitle: "Brave Web Search",
+                summary: "Live web and local search results via `BRAVE_API_KEY`.",
+                symbol: "globe",
+                sourceBadge: "Official Preset",
+                config: MCPServerConfig(
+                    name: "brave-search",
+                    command: "npx",
+                    arguments: ["-y", "@modelcontextprotocol/server-brave-search"],
+                    environmentNames: ["BRAVE_API_KEY"],
+                    domain: .project
+                ),
+                isInstalledOnMac: false
+            ),
+            MCPSourcesModel.DetectedServer(
+                name: "postgres",
+                displayTitle: "PostgreSQL Inspector",
+                summary: "Read-only schema inspection and SQL queries against a PostgreSQL database.",
+                symbol: "cylinder.fill",
+                sourceBadge: "Official Preset",
+                config: MCPServerConfig(
+                    name: "postgres",
+                    command: "npx",
+                    arguments: ["-y", "@modelcontextprotocol/server-postgres"],
+                    domain: .project
+                ),
+                isInstalledOnMac: false
+            ),
+            MCPSourcesModel.DetectedServer(
+                name: "memory",
+                displayTitle: "MCP Knowledge Memory",
+                summary: "Reference local JSON graph memory server from the Model Context Protocol suite.",
+                symbol: "memorychip",
+                sourceBadge: "Official Preset",
+                config: MCPServerConfig(
+                    name: "memory",
+                    command: "npx",
+                    arguments: ["-y", "@modelcontextprotocol/server-memory"],
+                    domain: .personal
+                ),
+                isInstalledOnMac: false
+            ),
+            MCPSourcesModel.DetectedServer(
+                name: "fetch",
+                displayTitle: "Web Page Fetch & Markdown",
+                summary: "Fetches web URLs and converts HTML documentation into clean Markdown passages.",
+                symbol: "arrow.down.doc.fill",
+                sourceBadge: "Official Preset",
+                config: MCPServerConfig(
+                    name: "fetch",
+                    command: "uvx",
+                    arguments: ["mcp-server-fetch"],
+                    domain: .project
+                ),
+                isInstalledOnMac: false
+            ),
+        ]
     }
 
     // MARK: - Coding

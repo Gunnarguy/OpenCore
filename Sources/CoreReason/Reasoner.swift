@@ -14,6 +14,15 @@ public struct AnswerPoint: Sendable {
     public var authority: Authority
     public var derivation: Derivation
     public var claimID: ClaimID?
+    /// Carried so an answer can be ordered by what the question named.
+    public var subject: EntityID
+    public var predicate: String
+    /// The entity in the value position, when there is one. A line that joins two things the
+    /// question named, such as "OpenCore is built with Swift", is the most direct answer it has.
+    public var object: EntityID? = nil
+    /// Every claim row behind this line. `claimID` is only the strongest of them: one fact
+    /// re-observed five times is one line and five rows, and a receipt counts rows.
+    public var claimRows: [ClaimID] = []
 }
 
 public struct Answer: Sendable {
@@ -39,6 +48,51 @@ public struct Answer: Sendable {
     /// found". This is the same reason the counted receipt is a distinct shape instead of a
     /// retrieval receipt with zeroes in it.
     public var counted: AggregateAnswer?
+
+    /// The stretch of time the question named, when it named one. Everything else in this
+    /// answer has been filtered to it.
+    public var window: QueryTimeWindow?
+
+    /// What happened in `window`, busiest subject first. A question about a stretch of time
+    /// is answered from the event log: "what was I working on" is a question about what
+    /// happened, and no passage says that.
+    public var activity: ActivitySummary?
+
+    /// Which days this answer read and how fresh the store was. Also at the end of `summary` and
+    /// `insufficientEvidence`, so a surface printing either one cannot leave it out.
+    public var report: WindowReport?
+
+    /// The text retrieval searched, when that was not the question. It is the question without
+    /// its time phrase, or empty when the answer is the event log and there was nothing to look
+    /// for. A caller running its own retrieval for this answer must use this and `window`, or it
+    /// searches all of time beneath an answer that says it did not.
+    public var searchedText: String?
+}
+
+extension Answer {
+    /// This answer as a Shortcut or Siri prints it, with `brief` if a model wrote one.
+    ///
+    /// Here rather than in the app, which has no test target. The window lines sit inside
+    /// `summary` and `insufficientEvidence`, and a brief replaces both, so "what did I decide
+    /// about retrieval this month" came back filtered to the month with nothing saying so, on a
+    /// store that might have stopped syncing.
+    public func shortcutText(brief: String?) -> String {
+        let code = "[receipt \(receipt.shortCode)]"
+        if let counted { return "\(counted.sentence) \(code)" }
+
+        if let brief {
+            var parts = [brief]
+            if !points.isEmpty {
+                parts.append("Believed claims:\n• \(points.prefix(4).map(\.statement).joined(separator: "\n• "))")
+            }
+            if let report { parts.append(report.text) }
+            return parts.joined(separator: "\n\n") + "\n\(code)"
+        }
+        if let insufficientEvidence { return "Not enough evidence: \(insufficientEvidence) \(code)" }
+
+        let statements = points.prefix(5).map(\.statement).joined(separator: "\n• ")
+        return statements.isEmpty ? "\(summary) \(code)" : "\(summary)\n• \(statements)\n\(code)"
+    }
 }
 
 /// Plans a query, gathers evidence, and assembles an answer.
@@ -55,6 +109,11 @@ public struct Reasoner: Sendable {
     private let store: Store
     private let search: PassageSearch
     private let classifier = QueryClassifier()
+    /// Read once per answer, not once per `Reasoner`. `MCPServer` holds one of these for the life
+    /// of a process, and clients keep that process for days, so a captured date meant "last
+    /// week" was the week before the server started.
+    private let currentDate: @Sendable () -> Date
+    private let currentCalendar: @Sendable () -> Calendar
 
     /// Below this blended score a hit is noise. Named rather than inlined, because a silent
     /// relevance floor is how a system ends up answering confidently from nothing.
@@ -64,25 +123,54 @@ public struct Reasoner: Sendable {
     /// produced 0...1 scores and used 0.15, which would have rejected everything here.
     public static let relevanceFloor = 0.005
 
-    public init(store: Store, search: PassageSearch) {
+    public init(
+        store: Store,
+        search: PassageSearch,
+        now: @autoclosure @escaping @Sendable () -> Date = Date(),
+        calendar: @autoclosure @escaping @Sendable () -> Calendar = .current
+    ) {
         self.store = store
         self.search = search
+        self.currentDate = now
+        self.currentCalendar = calendar
     }
 
     /// Convenience for callers that have not built a `PassageSearch` themselves.
-    public init(store: Store, embedder: (any EmbeddingProvider)? = nil, tuning: RetrievalTuning = .default) {
-        self.init(store: store, search: PassageSearch(store: store, embedder: embedder, tuning: tuning))
+    public init(
+        store: Store,
+        embedder: (any EmbeddingProvider)? = nil,
+        tuning: RetrievalTuning = .default,
+        now: @autoclosure @escaping @Sendable () -> Date = Date(),
+        calendar: @autoclosure @escaping @Sendable () -> Calendar = .current
+    ) {
+        self.init(
+            store: store,
+            search: PassageSearch(store: store, embedder: embedder, tuning: tuning),
+            now: now(),
+            calendar: calendar()
+        )
     }
 
     /// - Parameter externalCaller: `true` when the query text was written by something other
     ///   than the user. Naming a sensitive domain is consent when a person types it and
     ///   nothing at all when a model generates it, so an external caller can neither unlock a
     ///   sensitive domain nor be classified into one.
-    public func answer(_ query: String, limit: Int = 12, externalCaller: Bool = false) async throws -> Answer {
+    public func answer(
+        _ query: String,
+        limit: Int = 12,
+        externalCaller: Bool = false,
+        asOfWorld: Date? = nil,
+        asOfKnowledge: Date? = nil,
+        persistReceipt: Bool = true
+    ) async throws -> Answer {
         try await Telemetry.span("answer", .reason, attributes: ["externalCaller": String(externalCaller)]) { answer in
         let recorder = ReceiptRecorder()
 
         let classification = classifier.classify(query)
+        // "As of" moves the clock, so "last week" in a past checkout means the week before that
+        // checkout rather than the week before today.
+        let calendar = currentCalendar()
+        let window = TemporalIntent.window(in: query, now: asOfWorld ?? asOfKnowledge ?? currentDate(), calendar: calendar)
         let (rawDomain, requested) = AdmissionPolicy.classifyDomain(
             query,
             knownEntitySurfaces: try await store.aliasSurfaces()
@@ -108,9 +196,19 @@ public struct Reasoner: Sendable {
         // here than in chat: `externalCaller` has already re-based a sensitive query to
         // `.project`, and a count that ignored `policy` would hand an MCP caller a figure
         // derived from rows the same caller is forbidden to retrieve.
-        if classification.queryClass == .aggregate,
+        //
+        // Not with a window. `AggregateAnswering` counts every row there has ever been. It
+        // declines a bare "how many commits last week", because those words are a qualifier it
+        // cannot place, but a question that also matches a facet gets through: "how many
+        // repositories are archived this month" returned the all-time figure, stated flat,
+        // under a question that named a month. The event log is what can be cut by date.
+        //
+        // "These days" names no span. It asks how things stand, which is what this counts, and
+        // sending it to the event log lost a correct figure.
+        let countable: String? = if let window { window.meansNow ? window.residualQuery : nil } else { query }
+        if classification.queryClass == .aggregate, let countable,
            let counted = try await AggregateAnswering(store: store)
-               .answer(query, admitting: policy.admitted) {
+               .answer(countable, admitting: policy.admitted) {
             _ = await recorder.record("count") {
                 (counted, ["objects_counted": counted.breakdown.total, "groups": counted.breakdown.counts.count])
             }
@@ -120,7 +218,9 @@ public struct Reasoner: Sendable {
                 domainsBlocked: policy.blocked.sorted { $0.rawValue < $1.rawValue },
                 milliseconds: await recorder.allStages().reduce(0) { $0 + $1.milliseconds }
             )
-            try await store.save(receipt)
+            if persistReceipt {
+                try await store.save(receipt)
+            }
             answer.attribute("counted", counted.matchedOn)
             answer.set("objectsCounted", counted.breakdown.total)
             return Answer(
@@ -134,15 +234,61 @@ public struct Reasoner: Sendable {
             )
         }
 
+        // What the question is about, read before retrieval so a name in the question can pull
+        // its entity in even when no retrieved passage happens to mention it.
+        let residual = window?.residualQuery ?? query
+        let focus = try await QueryFocus.read(from: residual, store: store, policy: policy, externalCaller: externalCaller)
+
+        let report = if let window {
+            try await store.windowReport(window, domains: policy.admitted, calendar: calendar)
+        } else {
+            WindowReport?.none
+        }
+
+        // A time question with no subject has nothing to search *for*: the words left over are
+        // "what was I working on". Its answer is the activity below, and searching for
+        // "working" would only attach unrelated passages that happen to fall in the window.
+        let asksCount = classification.queryClass == .aggregate
+        let hasTopic = window == nil || (!asksCount && (!TemporalIntent.isSubjectless(residual) || !focus.entities.isEmpty))
+        // The event log answers a question about a subject or about nothing in particular. A
+        // question about a topic is answered by passages from the window, and listing every
+        // repository's week above "what did I decide about retrieval" answers something else.
+        let readsActivity = window != nil && (!hasTopic || !focus.entities.isEmpty)
+        // What the question wanted counted and the event log cannot pick out.
+        let uncounted = asksCount ? TemporalIntent.unplacedTerms(in: residual, naming: focus.namedWords) : []
+
+        var activity: ActivitySummary?
+        if let window, let report, readsActivity {
+            activity = try await recorder.record("activity", note: report.stageNote) {
+                let summary = try await store.activity(
+                    from: window.start,
+                    to: window.end,
+                    domains: policy.admitted,
+                    subjects: focus.entities.isEmpty ? nil : Set(focus.entities)
+                )
+                return (summary, ["events_in_window": summary.totalEvents, "subjects": summary.totalSubjects])
+            }
+        } else if let report {
+            // Recorded here too, so a topical answer's trace still shows the days it read.
+            await recorder.record("window", note: report.stageNote) {
+                ((), ["sources_reported": report.freshness.sources.count, "sources_behind": report.behind.count])
+            }
+        }
+
         let outcome = try await recorder.record(
             "retrieve",
             note: "\(classification.queryClass.rawValue) via \(classification.matchedOn)"
         ) {
             let result = try await search.search(
-                query: query,
+                query: hasTopic ? residual : "",
                 queryClass: classification.queryClass,
                 policy: policy,
-                limit: limit
+                limit: limit,
+                window: window?.interval,
+                // A blocked count answers "does this exist" for a term the caller cannot
+                // read. A model writing the query can use that as an oracle, one rare word
+                // at a time, so only the user sees it.
+                reportBlocked: !externalCaller
             )
             return (result, [
                 "chunks_searched": result.chunksSearched,
@@ -154,20 +300,30 @@ public struct Reasoner: Sendable {
             ])
         }
 
-        let relevant = outcome.hits.filter { $0.score >= Self.relevanceFloor }
+        let relevant = try await aboutNamedFirst(
+            outcome.hits.filter { $0.score >= Self.relevanceFloor },
+            focus: hasTopic ? focus : .none,
+            policy: policy
+        )
 
         let (points, claimIDs) = try await recorder.record("assemble-claims") {
-            let assembled = try await assemble(hits: relevant, policy: policy)
+            let assembled = try await assemble(
+                hits: relevant,
+                focus: hasTopic ? focus : .none,
+                window: window,
+                policy: policy,
+                asOfWorld: asOfWorld,
+                asOfKnowledge: asOfKnowledge
+            )
             return (assembled, ["claims_consulted": assembled.1.count, "points": assembled.0.count])
         }
 
         let contradictions = try await recorder.record("check-contradictions") {
-            let all = try await store.contradictions()
-            let touching = all.filter { claimIDs.contains($0.claimA) || claimIDs.contains($0.claimB) }
+            let touching = try await contradictions(touching: claimIDs, policy: policy)
             return (touching, ["surfaced": touching.count, "unresolved": touching.filter { $0.resolution == .unresolved }.count])
         }
 
-        let evidenceCount = points.reduce(0) { $0 + $1.supporting.count + $1.counter.count }
+        let rankedEvidence = Self.rankedEvidence(points)
 
         let receipt = Receipt(
             query: query,
@@ -175,9 +331,10 @@ public struct Reasoner: Sendable {
             domainsAdmitted: policy.admitted.sorted { $0.rawValue < $1.rawValue },
             domainsBlocked: policy.blocked.sorted { $0.rawValue < $1.rawValue },
             stages: await recorder.allStages(),
-            objectsSearched: outcome.chunksSearched,
+            // With no topic the rows read were events, in the units chat writes for this case.
+            objectsSearched: hasTopic ? outcome.chunksSearched : (activity?.totalEvents ?? 0),
             objectsRetrieved: relevant.count,
-            evidenceAdmitted: evidenceCount,
+            evidenceAdmitted: rankedEvidence.count,
             claimsConsulted: claimIDs.count,
             contradictionsSurfaced: contradictions.count,
             // No model ran. Recorded as absent rather than as a plausible name.
@@ -188,18 +345,20 @@ public struct Reasoner: Sendable {
             confidence: nil
         )
 
-        let rankedEvidence = points
-            .flatMap(\.supporting)
-            .enumerated()
-            .map { ($0.element.id, 1.0 - Double($0.offset) / Double(max(1, points.count * 3))) }
-
-        try await store.save(receipt, evidence: rankedEvidence, claims: Array(claimIDs))
+        if persistReceipt {
+            try await store.save(receipt, evidence: rankedEvidence, claims: claimIDs.sorted { $0.value < $1.value })
+        }
 
         var insufficient: String?
-        if relevant.isEmpty && points.isEmpty {
-            insufficient = outcome.hits.isEmpty
-                ? "Nothing matched. \(outcome.chunksSearched) passages searched."
-                : "\(outcome.hits.count) passages matched but none cleared the relevance floor of \(Self.relevanceFloor)."
+        if relevant.isEmpty && points.isEmpty && (activity?.totalEvents ?? 0) == 0 {
+            if let window, let report {
+                // A quiet stretch and a store nobody has synced look identical otherwise.
+                insufficient = "Nothing recorded from \(window.span(in: calendar)).\n\(report.text)"
+            } else {
+                insufficient = outcome.hits.isEmpty
+                    ? "Nothing matched. \(outcome.chunksSearched) passages searched."
+                    : "\(outcome.hits.count) passages matched but none cleared the relevance floor of \(Self.relevanceFloor)."
+            }
             if outcome.blockedByDomain > 0 {
                 insufficient! += " \(outcome.blockedByDomain) were withheld by domain policy."
             }
@@ -221,58 +380,291 @@ public struct Reasoner: Sendable {
             ])
         }
 
+        let summary = summarise(
+            points: points, passages: relevant, outcome: outcome, window: window, activity: activity,
+            uncounted: uncounted, calendar: calendar
+        )
         return Answer(
-            summary: summarise(points: points, passages: relevant, outcome: outcome),
+            summary: report.map { "\(summary)\n\($0.text)" } ?? summary,
             points: points,
             passages: relevant,
             contradictions: contradictions,
             receipt: receipt,
-            insufficientEvidence: insufficient
+            insufficientEvidence: insufficient,
+            window: window,
+            activity: activity,
+            report: report,
+            searchedText: window == nil ? nil : (hasTopic ? residual : "")
         )
         }
     }
 
     // MARK: - Assembly
 
-    private func assemble(hits: [PassageHit], policy: AdmissionPolicy) async throws -> ([AnswerPoint], Set<ClaimID>) {
-        // Entities the retrieved passages are about. Repo metadata first, then the object's
-        // own external id, then the title, so a calendar event or a note resolves too rather
-        // than only a GitHub object.
-        var subjects: Set<EntityID> = []
-        for hit in hits {
-            for surface in Self.candidateSurfaces(for: hit.object) {
-                for (entity, _) in try await store.resolve(surface: surface) where policy.admits(entity.domain) {
-                    subjects.insert(entity.id)
-                }
+    private func assemble(
+        hits: [PassageHit],
+        focus: QueryFocus,
+        window: QueryTimeWindow?,
+        policy: AdmissionPolicy,
+        asOfWorld: Date? = nil,
+        asOfKnowledge: Date? = nil
+    ) async throws -> ([AnswerPoint], Set<ClaimID>) {
+        // A question that names a subject is about that subject. Pooling every entity that any
+        // passage touched is what buried "OpenClinic is active" under a page of other
+        // repositories' languages.
+        var subjects = Set(focus.entities)
+        if focus.entities.isEmpty {
+            for hit in hits {
+                subjects.formUnion(try await entities(in: hit.object, policy: policy))
+            }
+        }
+
+        let currentOnly = asOfWorld == nil && asOfKnowledge == nil
+        var rows: [(claim: CoreClaim, subject: CoreEntity)] = []
+        var namedWithClaims = Set<EntityID>()
+        for subject in subjects.sorted(by: { $0.value < $1.value }) {
+            guard let entity = try await store.entity(subject), policy.admits(entity.domain) else { continue }
+            for claim in try await store.claims(subject: subject, currentOnly: currentOnly, asOfWorld: asOfWorld, asOfKnowledge: asOfKnowledge) {
+                guard try await isClaimAdmitted(claim, policy: policy) else { continue }
+                rows.append((claim, entity))
+                if focus.names(subject) { namedWithClaims.insert(subject) }
+            }
+        }
+
+        // A named thing can be what a claim points at rather than what it is about: every fact
+        // about Swift reads "OpenClinic is built with Swift", and Swift is the subject of
+        // nothing. Reading only subjects answered "which projects use Swift" with no claims at
+        // all, on a store with 53 of them.
+        //
+        // Skipped when another named entity has claims of its own. "Does OpenCore use Swift" is
+        // about OpenCore, and every other Swift repository is not part of the answer.
+        for named in focus.entities where namedWithClaims.subtracting([named]).isEmpty {
+            for claim in try await store.claims(pointingAt: named, currentOnly: currentOnly, asOfWorld: asOfWorld, asOfKnowledge: asOfKnowledge) {
+                guard try await isClaimAdmitted(claim, policy: policy),
+                      let entity = try await store.entity(claim.subject)
+                else { continue }
+                rows.append((claim, entity))
             }
         }
 
         var points: [AnswerPoint] = []
+        var bySlotValue: [String: Int] = [:]
         var claimIDs: Set<ClaimID> = []
+        let retrieved = Set(hits.map(\.object.id))
 
-        for subject in subjects {
-            guard let entity = try await store.entity(subject), policy.admits(entity.domain) else { continue }
-
-            for claim in try await store.claims(subject: subject, currentOnly: true) {
-                let supporting = try await store.evidence(for: claim.id, stance: .supports).map(\.0)
-                let counter = try await store.evidence(for: claim.id, stance: .refutes).map(\.0)
-                guard !supporting.isEmpty else { continue }
-
-                claimIDs.insert(claim.id)
-                points.append(AnswerPoint(
-                    statement: await phrase(claim: claim, subject: entity),
-                    supporting: supporting,
-                    counter: counter,
-                    confidence: claim.confidence,
-                    authority: claim.authority,
-                    derivation: claim.derivation,
-                    claimID: claim.id
-                ))
+        for (claim, entity) in rows {
+            var supporting: [Evidence] = []
+            var insideWindow = window == nil
+            for (evidence, _, _) in try await store.evidence(for: claim.id, stance: .supports) {
+                if let object = try await store.object(evidence.objectID) {
+                    guard policy.admits(object.domain) else { continue }
+                    // With no named subject, the date alone is not enough. Subjects were pooled
+                    // from the passages, so every claim those repositories had this month came
+                    // along: "what did I decide about retrieval this month" opened with a
+                    // project's language, from 41 claims, measured 2026-10-31. A claim counts
+                    // when a passage this answer retrieved is what supports it.
+                    if let window, let authored = object.authoredAt, window.contains(authored),
+                       !focus.entities.isEmpty || retrieved.contains(object.id) {
+                        insideWindow = true
+                    }
+                }
+                supporting.append(evidence)
             }
+            var counter: [Evidence] = []
+            for (evidence, _, _) in try await store.evidence(for: claim.id, stance: .refutes) {
+                if let object = try await store.object(evidence.objectID), !policy.admits(object.domain) {
+                    continue
+                }
+                counter.append(evidence)
+            }
+            // A claim is about a window only if something inside it says so. All the claims
+            // a repository has ever had are not an answer to what happened last week.
+            guard !supporting.isEmpty, insideWindow else { continue }
+
+            claimIDs.insert(claim.id)
+
+            // One line per fact. A push mints a new claim row for an unchanged value,
+            // because `ClaimID` includes `validFrom`, so the same sentence arrived several
+            // times and filled the list. Measured 2026-10-30: 175 rows in 80 value groups.
+            // The rows stay; they are corroboration, so their evidence joins the one line.
+            let value = claim.objectEntity?.value ?? claim.literal ?? ""
+            let key = "\(claim.subject.value)|\(claim.predicate)|\(value)"
+            if let index = bySlotValue[key] {
+                let known = Set(points[index].supporting.map(\.id))
+                points[index].supporting += supporting.filter { !known.contains($0.id) }
+                let knownCounter = Set(points[index].counter.map(\.id))
+                points[index].counter += counter.filter { !knownCounter.contains($0.id) }
+                points[index].claimRows.append(claim.id)
+                if (claim.authority.rawValue, claim.confidence) > (points[index].authority.rawValue, points[index].confidence) {
+                    points[index].authority = claim.authority
+                    points[index].confidence = claim.confidence
+                    points[index].derivation = claim.derivation
+                    points[index].claimID = claim.id
+                }
+                continue
+            }
+            bySlotValue[key] = points.count
+            points.append(AnswerPoint(
+                statement: await phrase(claim: claim, subject: entity),
+                supporting: supporting,
+                counter: counter,
+                confidence: claim.confidence,
+                authority: claim.authority,
+                derivation: claim.derivation,
+                claimID: claim.id,
+                subject: claim.subject,
+                predicate: claim.predicate,
+                object: claim.objectEntity,
+                claimRows: [claim.id]
+            ))
         }
 
-        points.sort { ($0.authority.rawValue, $0.confidence) > ($1.authority.rawValue, $1.confidence) }
-        return (points, claimIDs)
+        return (Self.ranked(points, focus: focus), claimIDs)
+    }
+
+    /// Entities a retrieved object is about. Repo metadata first, then the object's own external
+    /// id, then the title, so a calendar event or a note resolves too rather than only a GitHub
+    /// object.
+    private func entities(in object: CoreObject, policy: AdmissionPolicy) async throws -> Set<EntityID> {
+        var found = Set(try await store.claimSubjects(forObject: object.id))
+        for surface in Self.candidateSurfaces(for: object) {
+            for (entity, _) in try await store.resolve(surface: surface) where policy.admits(entity.domain) {
+                found.insert(entity.id)
+            }
+        }
+        return found
+    }
+
+    /// Passages about what the question named come first, and the rest keep their order. Only
+    /// reorders: it can show a caller nothing that retrieval did not already admit.
+    ///
+    /// A repository's README mentioning OpenClinic ranks well for "status of OpenClinic", and
+    /// without this it can open an answer that is about a different project.
+    func aboutNamedFirst(_ hits: [PassageHit], focus: QueryFocus, policy: AdmissionPolicy) async throws -> [PassageHit] {
+        guard !focus.entities.isEmpty else { return hits }
+        var about: [PassageHit] = []
+        var others: [PassageHit] = []
+        for hit in hits {
+            if try await entities(in: hit.object, policy: policy).contains(where: focus.names) {
+                about.append(hit)
+            } else {
+                others.append(hit)
+            }
+        }
+        return about + others
+    }
+
+    /// The stored claims a question asked for by name, for a caller that has passages of its
+    /// own. Nothing unless the question names both a subject and something about it, because
+    /// that is the case where the answer is a row and no passage says it.
+    func askedClaims(focus: QueryFocus, window: QueryTimeWindow?, policy: AdmissionPolicy) async throws -> [AnswerPoint] {
+        guard !focus.entities.isEmpty, !focus.predicates.isEmpty else { return [] }
+        let (points, _) = try await assemble(hits: [], focus: focus, window: window, policy: policy)
+        return points.filter { focus.asks($0.predicate) }
+    }
+
+    /// Contradictions touching `claimIDs`, skipping any whose other side the policy does not
+    /// admit: a conflict with a claim the caller cannot read would tell them it exists.
+    func contradictions(touching claimIDs: Set<ClaimID>, policy: AdmissionPolicy) async throws -> [Contradiction] {
+        var touching: [Contradiction] = []
+        for item in try await store.contradictions() where claimIDs.contains(item.claimA) || claimIDs.contains(item.claimB) {
+            guard let claimA = try await store.claim(item.claimA),
+                  let claimB = try await store.claim(item.claimB),
+                  try await isClaimAdmitted(claimA, policy: policy),
+                  try await isClaimAdmitted(claimB, policy: policy)
+            else { continue }
+            touching.append(item)
+        }
+        return touching
+    }
+
+    /// Whether `contradiction` stands against a line made of `rows`, so stating the line flat
+    /// would be wrong. If it touches the line, unresolved does, and so does losing. Winning does
+    /// not, and neither does `coexistingIntervals`, which has no winner because it was never a
+    /// conflict.
+    static func standsAgainst(_ contradiction: Contradiction, rows: Set<ClaimID>) -> Bool {
+        guard rows.contains(contradiction.claimA) || rows.contains(contradiction.claimB) else { return false }
+        if contradiction.resolution == .unresolved { return true }
+        return contradiction.winner.map { !rows.contains($0) } ?? false
+    }
+
+    /// The other side of a contradiction, as a sentence. The stored reason alone reads "equal
+    /// authority and no temporal ordering; both retained", which names neither value.
+    func rivalStatement(in contradiction: Contradiction, against rows: Set<ClaimID>) async throws -> String? {
+        let rival = rows.contains(contradiction.claimA) ? contradiction.claimB : contradiction.claimA
+        guard !rows.contains(rival),
+              let claim = try await store.claim(rival),
+              let subject = try await store.entity(claim.subject)
+        else { return nil }
+        return await phrase(claim: claim, subject: subject)
+    }
+
+    /// What a receipt links for these lines, in the order they are shown: each line's support,
+    /// then what stands against it, each row once. Counter-evidence is linked because a trace
+    /// listing only the side that agreed would be a one-sided account of the answer.
+    ///
+    /// The score is the row's position scaled to 0...1 and says nothing about relevance. It used
+    /// to assume about 3 rows per line, which collapsing repeated rows broke: a fact re-observed
+    /// five times gives one line and five rows, and `core_trace` printed `[-1.333]`.
+    static func rankedEvidence(_ points: [AnswerPoint]) -> [(EvidenceID, Double)] {
+        var seen = Set<EvidenceID>()
+        let rows = points.flatMap { $0.supporting + $0.counter }.map(\.id).filter { seen.insert($0).inserted }
+        return rows.enumerated().map { ($0.element, 1.0 - Double($0.offset) / Double(rows.count)) }
+    }
+
+    /// The order an answer's lines are shown in, and a total order, so the same store gives the
+    /// same lines in every process.
+    ///
+    /// A line joining two things the question named comes first, then the predicates it asked
+    /// about, most direct first, then the named subject, and only then authority and confidence.
+    /// Sorting on authority alone put `status`, which is derived and sits at a low tier by honest
+    /// design, behind every high-confidence language and commit row, where `.prefix(12)` cut it.
+    /// A question about status then never saw the answer.
+    ///
+    /// Asked comes ahead of subject so that "who contributed to OpenCore" leads with the lines
+    /// pointing at it. Authority stays a plain ordinal tie-break here, and multiplies nothing.
+    ///
+    /// The tie-breaks matter because subjects came from a `Set`. OpenClinic and OpenCone tie at
+    /// confidence .99, so the answer differed from run to run on an unchanged store.
+    static func ranked(_ points: [AnswerPoint], focus: QueryFocus) -> [AnswerPoint] {
+        points
+            .map { point -> AnswerPoint in
+                var point = point
+                point.supporting.sort { ($0.authority.rawValue, $1.id.value) > ($1.authority.rawValue, $0.id.value) }
+                point.counter.sort { $0.id.value < $1.id.value }
+                return point
+            }
+            .sorted { lhs, rhs in
+                func key(_ point: AnswerPoint) -> (Int, Int, Int, Int, Double) {
+                    let joinsNames = focus.names(point.subject) && (point.object.map(focus.names) ?? false)
+                    return (joinsNames ? 1 : 0, focus.askRank(point.predicate), focus.names(point.subject) ? 1 : 0, point.authority.rawValue, point.confidence)
+                }
+                let left = key(lhs)
+                let right = key(rhs)
+                if left != right { return left > right }
+                if lhs.statement != rhs.statement { return lhs.statement < rhs.statement }
+                return (lhs.claimID?.value ?? "") < (rhs.claimID?.value ?? "")
+            }
+    }
+
+    private func isClaimAdmitted(_ claim: CoreClaim, policy: AdmissionPolicy) async throws -> Bool {
+        guard policy.admits(claim.domain),
+              let subject = try await store.entity(claim.subject),
+              policy.admits(subject.domain)
+        else { return false }
+        if let objectEntity = claim.objectEntity,
+           let target = try await store.entity(objectEntity),
+           !policy.admits(target.domain) {
+            return false
+        }
+        let supporting = try await store.evidence(for: claim.id, stance: .supports)
+        guard !supporting.isEmpty else { return false }
+        for (evidence, _, _) in supporting {
+            if let object = try await store.object(evidence.objectID), policy.admits(object.domain) {
+                return true
+            }
+        }
+        return false
     }
 
     /// Names worth trying against the entity index for one object.
@@ -300,7 +692,15 @@ public struct Reasoner: Sendable {
             objectText = claim.literal ?? "unknown"
         }
 
+        // These values are often whole sentences from a handoff document, which end in their
+        // own full stop.
+        func sentence(_ text: String) -> String { text.hasSuffix(".") ? text : text + "." }
+
         return switch claim.predicate {
+        case Predicate.objective: sentence("\(subject.canonicalName)'s objective: \(objectText)")
+        case Predicate.nextAction: sentence("\(subject.canonicalName)'s next action: \(objectText)")
+        case Predicate.lastVerifiedCommit: sentence("\(subject.canonicalName)'s last verified commit is \(objectText)")
+        case Predicate.verifyCommand: "\(subject.canonicalName)'s verify command is \(objectText)"
         case Predicate.primaryLanguage: "\(subject.canonicalName) is primarily written in \(objectText)."
         case Predicate.builtWith: "\(subject.canonicalName) is built with \(objectText)."
         case Predicate.status: "\(subject.canonicalName) is \(objectText)."
@@ -309,11 +709,40 @@ public struct Reasoner: Sendable {
         case Predicate.metWith: "\(subject.canonicalName) met with \(objectText)."
         case Predicate.attended: "\(subject.canonicalName) attended \(objectText)."
         case Predicate.partOf: "\(subject.canonicalName) is part of \(objectText)."
-        default: "\(subject.canonicalName) \(claim.predicate.replacingOccurrences(of: "_", with: " ")) \(objectText)."
+        default: sentence("\(subject.canonicalName) \(claim.predicate.replacingOccurrences(of: "_", with: " ")) \(objectText)")
         }
     }
 
-    private func summarise(points: [AnswerPoint], passages: [PassageHit], outcome: PassageOutcome) -> String {
+    /// Opens a count read from the event log when it is not a count of what was asked.
+    ///
+    /// **The defect.** "How many meetings this month" on a store with no meetings answered "5
+    /// events across 3 subjects", the commits of three repositories, in the flat voice of a
+    /// computed fact. The event log has no column to count meetings by, so it can only say what
+    /// it did count, and it has to say that before the number.
+    static func notCountedLine(_ terms: [String]) -> String? {
+        guard !terms.isEmpty else { return nil }
+        return "Not a count of '\(terms.joined(separator: " "))': the event log can only count every event in the window."
+    }
+
+    private func summarise(
+        points: [AnswerPoint],
+        passages: [PassageHit],
+        outcome: PassageOutcome,
+        window: QueryTimeWindow?,
+        activity: ActivitySummary?,
+        uncounted: [String],
+        calendar: Calendar
+    ) -> String {
+        if let window, let activity, activity.totalEvents > 0 {
+            let floor = activity.isTruncated ? "At least " : ""
+            var summary = Self.notCountedLine(uncounted).map { "\($0) " } ?? ""
+            summary += "\(floor)\(activity.totalEvents) event\(activity.totalEvents == 1 ? "" : "s") across "
+                + "\(activity.totalSubjects) subject\(activity.totalSubjects == 1 ? "" : "s"), \(window.span(in: calendar))."
+            if !points.isEmpty {
+                summary += " \(points.count) claim\(points.count == 1 ? "" : "s") from inside that window."
+            }
+            return summary
+        }
         if points.isEmpty && !passages.isEmpty {
             // The honest case for a source that produces no claims: there is text, and the
             // store has concluded nothing from it. Saying so beats saying nothing.

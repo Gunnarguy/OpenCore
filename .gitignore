@@ -15,6 +15,22 @@ DerivedData/
 *.sqlite3-shm
 /Local/
 .env
+.env.*
+!.env.example
+
+# Private names and credentials. Real values live in /Local/ or beside the store; the tracked
+# Docs/private-names.example.json shows the shape with made-up values, and
+# script/check_sensitive.sh fails if a real one reaches a tracked or staged file.
+private-names.json
+sensitive-terms.txt
+sensitive-allow.txt
+*.private.json
+*.p8
+*.pem
+*.key
+*.mobileprovision
+client_secret*.json
+google-ads.yaml
 
 # macOS / iCloud detritus
 .DS_Store
@@ -26,5 +42,8 @@ DerivedData/
 # XcodeGen output — regenerate with `cd Apps/OpenCoreMac && xcodegen generate`
 Apps/OpenCoreMac/Generated/
 
-# Claude Code hook checkpoints (kit, 2026-09-08)
+# Claude Code hook checkpoints and Codex kit mirrors (kit, 2026-09-08)
 **/.claude/.state/
+.agents/
+.codex/
+AGENTS.md

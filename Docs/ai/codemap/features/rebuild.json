@@ -1,0 +1,77 @@
+{
+  "schema": "codemap/1",
+  "id": "rebuild",
+  "name": "Rebuild rehearsal",
+  "aliases": ["rebuild", "rehearsal", "apply-rehearsal", "RebuildDiff", "Maintenance", "replay", "quarantine", "dropDerivedLayers"],
+  "purpose": "Re-derives a copy of the store and reports the difference by id, and applies it in one transaction on the owner's word. Unreviewed as of 2026-10-31.",
+  "revision": "e801208",
+  "verified_on": "2026-10-31",
+  "entry_points": ["RebuildRehearsal.rehearse"],
+  "files": [
+    {"path": "Sources/CoreGraph/RebuildRehearsal.swift", "role": "primary", "blob": "b4259bcc959a03ad4c7965826a98f406a004fd7a"},
+    {"path": "Sources/CoreStore/RebuildDiff.swift", "role": "primary", "blob": "58dbfe211a27ea5dd37475d06d2194bfa85ff287"},
+    {"path": "Sources/CoreStore/RebuildExplanation.swift", "role": "primary", "blob": "7db9266c9148a659a52d52c6943b6d7a0fbfd706"},
+    {"path": "Sources/CoreGraph/RebuildNarrative.swift", "role": "primary", "blob": "bd23e7f77c4b07982ee55c0972f88890d570c89c"},
+    {"path": "Apps/OpenCoreMac/Sources/AppModel+Maintenance.swift", "role": "primary", "blob": "9b5e36003a5eb659ed3fe889f357846601e5e273"},
+    {"path": "Apps/OpenCoreMac/Sources/MaintenanceView.swift", "role": "primary", "blob": "24a8efcb7968eafda5c2a90cbdc5c713100067e0"},
+    {"path": "Tests/CoreGraphTests/RebuildRehearsalTests.swift", "role": "test", "blob": "d40af01bae943b1d516a7866d0ffb04c956c8de6"},
+    {"path": "Tests/CoreGraphTests/RebuildHistoryTests.swift", "role": "test", "blob": "84f31a3240a9a4daecbcdc8777d7fcf725956428"}
+  ],
+  "nodes": [
+    {"id": "RebuildRehearsal.rehearse", "kind": "function", "path": "Sources/CoreGraph/RebuildRehearsal.swift", "line": 87, "match": "public func rehearse(in directory: URL, log: @Sendable (String) -> Void = { _ in }) async throws -> RebuildReport {", "status": "VERIFIED", "note": "Never touches the store it is pointed at."},
+    {"id": "RebuildRehearsal.apply", "kind": "function", "path": "Sources/CoreGraph/RebuildRehearsal.swift", "line": 157, "match": "public func apply(_ report: RebuildReport) async throws -> RebuildApplyOutcome {", "status": "VERIFIED", "note": "Writes the live store. The owner's step."},
+    {"id": "MaintenanceView", "kind": "view", "path": "Apps/OpenCoreMac/Sources/MaintenanceView.swift", "line": 7, "match": "struct MaintenanceView: View {", "status": "VERIFIED", "note": ""}
+  ],
+  "edges": [
+    {"from": "feature:rebuild", "type": "calls", "to": "RebuildRehearsal.apply", "status": "VERIFIED", "evidence": [{"path": "Sources/opencore/main.swift", "line": 1084, "match": "outcome = try await RebuildRehearsal(store: store).apply(report)"}], "note": "CLI apply."}
+  ],
+  "docs": [],
+  "unknowns": ["This code was not reviewed. A rehearsal's 161 retired, 146 added and 386 authority changes are untraced, and so is 13 of 13 receipts traced on a store holding 38."],
+  "related": ["store-floor", "ingest", "beliefs"],
+  "derived": {
+    "generated_by": "codemap 1.1.0 derive: declarations, type references and test mentions; edges are INFERRED",
+    "nodes": [
+      {"id": "RebuildReport", "kind": "model", "path": "Sources/CoreGraph/RebuildRehearsal.swift", "line": 7, "match": "public struct RebuildReport: Codable, Sendable {", "status": "VERIFIED"},
+      {"id": "RebuildRehearsal", "kind": "model", "path": "Sources/CoreGraph/RebuildRehearsal.swift", "line": 64, "match": "public struct RebuildRehearsal: Sendable {", "status": "VERIFIED"},
+      {"id": "RebuildDiff", "kind": "model", "path": "Sources/CoreStore/RebuildDiff.swift", "line": 19, "match": "public struct RebuildDiff: Codable, Sendable {", "status": "VERIFIED"},
+      {"id": "RebuildCarryOutcome", "kind": "model", "path": "Sources/CoreStore/RebuildDiff.swift", "line": 94, "match": "public struct RebuildCarryOutcome: Codable, Sendable {", "status": "VERIFIED"},
+      {"id": "MaintenanceCountsPanel", "kind": "view", "path": "Apps/OpenCoreMac/Sources/MaintenanceView.swift", "line": 307, "match": "private struct MaintenanceCountsPanel: View {", "status": "VERIFIED"},
+      {"id": "MaintenanceKindPanel", "kind": "view", "path": "Apps/OpenCoreMac/Sources/MaintenanceView.swift", "line": 406, "match": "private struct MaintenanceKindPanel: View {", "status": "VERIFIED"},
+      {"id": "MaintenanceEmbeddingPanel", "kind": "view", "path": "Apps/OpenCoreMac/Sources/MaintenanceView.swift", "line": 455, "match": "private struct MaintenanceEmbeddingPanel: View {", "status": "VERIFIED"},
+      {"id": "MaintenanceEmbeddingRow", "kind": "view", "path": "Apps/OpenCoreMac/Sources/MaintenanceView.swift", "line": 493, "match": "private struct MaintenanceEmbeddingRow: View {", "status": "VERIFIED"},
+      {"id": "MaintenanceSourcePanel", "kind": "view", "path": "Apps/OpenCoreMac/Sources/MaintenanceView.swift", "line": 548, "match": "private struct MaintenanceSourcePanel: View {", "status": "VERIFIED"},
+      {"id": "MaintenanceRebuildPanel", "kind": "view", "path": "Apps/OpenCoreMac/Sources/MaintenanceView.swift", "line": 595, "match": "private struct MaintenanceRebuildPanel: View {", "status": "VERIFIED"},
+      {"id": "MaintenanceRehearsalPanel", "kind": "view", "path": "Apps/OpenCoreMac/Sources/MaintenanceView.swift", "line": 627, "match": "private struct MaintenanceRehearsalPanel: View {", "status": "VERIFIED"}
+    ],
+    "edges": [
+      {"from": "RebuildReport", "type": "depends_on", "to": "RebuildDiff", "status": "INFERRED", "evidence": [{"path": "Sources/CoreGraph/RebuildRehearsal.swift", "line": 14, "match": "public var diff: RebuildDiff"}]},
+      {"from": "RebuildReport", "type": "depends_on", "to": "RebuildCarryOutcome", "status": "INFERRED", "evidence": [{"path": "Sources/CoreGraph/RebuildRehearsal.swift", "line": 17, "match": "public var carried: RebuildCarryOutcome"}]},
+      {"from": "RebuildRehearsal", "type": "depends_on", "to": "RebuildDiff", "status": "INFERRED", "evidence": [{"path": "Sources/CoreGraph/RebuildRehearsal.swift", "line": 172, "match": "static func blockers(in diff: RebuildDiff) -> [String] {"}]},
+      {"from": "app-shell#AppModel", "type": "depends_on", "to": "RebuildReport", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/AppModel+Maintenance.swift", "line": 126, "match": "func rehearseRebuild() async -> RebuildReport? {"}]},
+      {"from": "app-shell#AppModel", "type": "depends_on", "to": "RebuildRehearsal", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/AppModel+Maintenance.swift", "line": 131, "match": "let directory = RebuildRehearsal.defaultDirectory()"}]},
+      {"from": "MaintenanceView", "type": "depends_on", "to": "RebuildReport", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/MaintenanceView.swift", "line": 10, "match": "@State private var rehearsal: RebuildReport?"}]},
+      {"from": "MaintenanceRehearsalPanel", "type": "depends_on", "to": "RebuildReport", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/MaintenanceView.swift", "line": 628, "match": "let report: RebuildReport"}]},
+      {"from": "RebuildRehearsal", "type": "depends_on", "to": "feature:store-floor", "status": "INFERRED", "evidence": [{"path": "Sources/CoreGraph/RebuildRehearsal.swift", "line": 65, "match": "private let store: Store"}], "note": "via Store, Database, RebuildSafetyError"},
+      {"from": "RebuildRehearsal", "type": "depends_on", "to": "feature:ingest", "status": "INFERRED", "evidence": [{"path": "Sources/CoreGraph/RebuildRehearsal.swift", "line": 66, "match": "private let chunker: Chunker"}], "note": "via Chunker, IngestPipeline"},
+      {"from": "RebuildRehearsal", "type": "depends_on", "to": "feature:hardware", "status": "INFERRED", "evidence": [{"path": "Sources/CoreGraph/RebuildRehearsal.swift", "line": 88, "match": "try await Telemetry.span(\"rebuild.rehearse\", .graph) { scope in"}], "note": "via Telemetry"},
+      {"from": "RebuildRehearsal", "type": "depends_on", "to": "feature:beliefs", "status": "INFERRED", "evidence": [{"path": "Sources/CoreGraph/RebuildRehearsal.swift", "line": 111, "match": "_ = try await BeliefEngine(store: copy, now: now).reconcile()"}], "note": "via BeliefEngine"},
+      {"from": "store-floor#Store", "type": "depends_on", "to": "feature:store-floor", "status": "INFERRED", "evidence": [{"path": "Sources/CoreStore/RebuildDiff.swift", "line": 234, "match": "guard path != Database.defaultPath().standardizedFileURL.resolvingSymlinksInPath() else {"}], "note": "via Database, RebuildSafetyError, Authority, SQLValue"},
+      {"from": "app-shell#AppModel", "type": "depends_on", "to": "feature:store-floor", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/AppModel+Maintenance.swift", "line": 48, "match": "let kind: ObjectKind"}], "note": "via ObjectKind, Source, Store"},
+      {"from": "app-shell#AppModel", "type": "depends_on", "to": "feature:connectors", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/AppModel+Maintenance.swift", "line": 112, "match": "hasGitHubToken: GitHubConnector.resolveToken() != nil"}], "note": "via GitHubConnector"},
+      {"from": "MaintenanceView", "type": "depends_on", "to": "feature:app-shell", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/MaintenanceView.swift", "line": 9, "match": "@State private var diagnostics: AppModel.Diagnostics?"}], "note": "via AppModel, Pastel, ActionFeedbackCenter"},
+      {"from": "MaintenanceView", "type": "depends_on", "to": "feature:answers", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/MaintenanceView.swift", "line": 200, "match": "ScoreBar(value: passageCount > 0 ? Double(vecCount) / Double(passageCount) : 1.0)"}], "note": "via ScoreBar"},
+      {"from": "MaintenanceCountsPanel", "type": "depends_on", "to": "feature:app-shell", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/MaintenanceView.swift", "line": 309, "match": "let counts: AppModel.GraphCounts"}], "note": "via AppModel, Pastel, ActionFeedbackCenter, Section"},
+      {"from": "MaintenanceKindPanel", "type": "depends_on", "to": "feature:app-shell", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/MaintenanceView.swift", "line": 408, "match": "let kinds: [AppModel.KindCount]"}], "note": "via AppModel, Pastel"},
+      {"from": "MaintenanceKindPanel", "type": "depends_on", "to": "feature:answers", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/MaintenanceView.swift", "line": 439, "match": "ScoreBar(value: Double(row.count) / Double(total))"}], "note": "via ScoreBar"},
+      {"from": "MaintenanceEmbeddingPanel", "type": "depends_on", "to": "feature:app-shell", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/MaintenanceView.swift", "line": 457, "match": "let coverage: [AppModel.EmbeddingCoverage]"}], "note": "via AppModel, Pastel"},
+      {"from": "MaintenanceEmbeddingRow", "type": "depends_on", "to": "feature:app-shell", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/MaintenanceView.swift", "line": 494, "match": "let run: AppModel.EmbeddingCoverage"}], "note": "via AppModel, Pastel"},
+      {"from": "MaintenanceEmbeddingRow", "type": "depends_on", "to": "feature:answers", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/MaintenanceView.swift", "line": 513, "match": "ScoreBar(value: fraction)"}], "note": "via ScoreBar"},
+      {"from": "MaintenanceSourcePanel", "type": "depends_on", "to": "feature:store-floor", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/MaintenanceView.swift", "line": 550, "match": "let sources: [Source]"}], "note": "via Source"},
+      {"from": "MaintenanceSourcePanel", "type": "depends_on", "to": "feature:app-shell", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/MaintenanceView.swift", "line": 557, "match": ".foregroundStyle(Pastel.lavender)"}], "note": "via Pastel"},
+      {"from": "MaintenanceSourcePanel", "type": "depends_on", "to": "feature:browse", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/MaintenanceView.swift", "line": 589, "match": "source.lastSyncedAt.map { ClaimsView.formatter.string(from: $0) } ?? \"never synced\""}], "note": "via ClaimsView"},
+      {"from": "MaintenanceRebuildPanel", "type": "depends_on", "to": "feature:app-shell", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/MaintenanceView.swift", "line": 604, "match": ".foregroundStyle(Pastel.peach)"}], "note": "via Pastel"},
+      {"from": "MaintenanceRehearsalPanel", "type": "depends_on", "to": "feature:app-shell", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/MaintenanceView.swift", "line": 641, "match": ".foregroundStyle(report.canApply ? Pastel.mint : Pastel.peach)"}], "note": "via Pastel"}
+    ],
+    "edges_omitted": 0
+  }
+}

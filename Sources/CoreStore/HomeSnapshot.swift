@@ -30,6 +30,27 @@ public struct HomeSnapshot: Sendable {
         /// been working on" is a different lie. They are `.concept` in the `personal` domain
         /// where a project is `.project`, so the distinction is already in the data.
         public var kind: EntityKind
+        /// Commits that are upkeep rather than work. Counted apart so a nightly bot cannot lead
+        /// the list of what you have been doing.
+        public var upkeep: Int = 0
+    }
+
+    /// One slot whose value changed.
+    public struct BeliefChange: Sendable, Identifiable, Hashable {
+        public var id: BeliefID
+        public var subject: String
+        public var predicate: String
+        public var reason: String
+        public var decidedAt: Date
+    }
+
+    /// One open contradiction, named.
+    public struct ContradictionRow: Sendable, Identifiable, Hashable {
+        public var id: ContradictionID
+        public var subject: String
+        public var predicate: String
+        public var reason: String
+        public var detectedAt: Date
     }
 
     /// Projects and the like, busiest first.
@@ -47,6 +68,14 @@ public struct HomeSnapshot: Sendable {
     public var unattributed: Int
 
     public var openContradictions: Int
+    /// Revisions in the window, real changes of mind before a document restating itself, each
+    /// newest first. A first belief in a slot is not a change of mind.
+    public var beliefChanges: [BeliefChange] = []
+    /// The open contradictions behind `openContradictions`, newest first.
+    public var contradictionRows: [ContradictionRow] = []
+    /// Set only when a previous visit was known. nil and zero are different statements here.
+    public var eventsSinceVisit: Int?
+    public var beliefChangesSinceVisit: Int?
     public var objects: Int
     public var entities: Int
 
@@ -59,40 +88,24 @@ extension Store {
     /// - Parameter windowDays: how far back "recent" reaches. 7 by default, **chosen, not
     ///   measured**: it is one week because a week is the unit people plan in, not because any
     ///   retention or recall number pointed at it.
-    public func homeSnapshot(windowDays: Int = 7, limit: Int = 12) async throws -> HomeSnapshot {
-        let cutoff = Date().addingTimeInterval(-Double(windowDays) * 86_400)
+    /// - Parameter since: the previous visit, for "what changed since you were last here".
+    ///
+    /// **Sensitive subjects stay off this screen.** Home is on show whenever the app is, on a
+    /// shared screen or in a screenshot, so it reads only domains a person would not mind seeing
+    /// there. A query that names a sensitive domain still reaches them.
+    public func homeSnapshot(windowDays: Int = 7, limit: Int = 12, since visit: Date? = nil, now: Date = Date()) async throws -> HomeSnapshot {
+        let cutoff = now.addingTimeInterval(-Double(windowDays) * 86_400)
+        let visible = Set(Domain.allCases).filter { !$0.isSensitive && $0 != .restricted }
 
-        // Grouped in SQL. Loading 290 events to bucket them in Swift is merely wasteful today
-        // and is the difference between a screen that opens and one that hangs at 100k.
-        //
-        // INNER JOIN, so an event whose subject resolves to no entity is excluded rather than
-        // rendered under a raw hash. Those are counted separately below instead of vanishing:
-        // an empty list because nothing happened and an empty list because nothing could be
-        // named are different facts.
-        let rows = try await database.query(
-            """
-            SELECT e.canonical_name AS name, e.kind AS kind, COUNT(*) AS n, MAX(v.occurred_at) AS last,
-                   (SELECT verb FROM event v2 WHERE v2.subject = v.subject AND v2.occurred_at >= ?
-                    GROUP BY v2.verb ORDER BY COUNT(*) DESC LIMIT 1) AS verb
-            FROM event v JOIN entity e ON e.id = v.subject
-            WHERE v.occurred_at >= ?
-            GROUP BY v.subject
-            ORDER BY n DESC
-            LIMIT ?
-            """,
-            [.real(cutoff.timeIntervalSince1970), .real(cutoff.timeIntervalSince1970), .integer(Int64(limit))]
-        )
-
-        let recent = rows.compactMap { row -> HomeSnapshot.Activity? in
-            guard let last = row.date("last"),
-                  let kind = EntityKind(rawValue: row.requireString("kind"))
-            else { return nil }
-            return HomeSnapshot.Activity(
-                subject: row.requireString("name"),
-                events: row.requireInt("n"),
-                lastAt: last,
-                verb: row.string("verb") ?? "activity",
-                kind: kind
+        let activity = try await activity(from: cutoff, to: now, domains: visible, limit: limit, detailsPerSubject: 0)
+        let recent = activity.groups.map {
+            HomeSnapshot.Activity(
+                subject: $0.subject.canonicalName,
+                events: $0.events,
+                lastAt: $0.lastAt,
+                verb: $0.verb,
+                kind: $0.subject.kind,
+                upkeep: $0.upkeep
             )
         }
 
@@ -104,17 +117,67 @@ extension Store {
             [.real(cutoff.timeIntervalSince1970)]
         )
 
+        // Newest first, version above 1, and only slots this screen may show.
+        var beliefChanges: [HomeSnapshot.BeliefChange] = []
+        for belief in try await beliefsDecided(since: cutoff).sorted(by: { $0.decidedAt > $1.decidedAt }) where belief.version > 1 {
+            guard let claim = try await claim(belief.claimID),
+                  visible.contains(claim.domain),
+                  let subject = try await entity(claim.subject),
+                  visible.contains(subject.domain)
+            else { continue }
+            beliefChanges.append(HomeSnapshot.BeliefChange(
+                id: belief.id,
+                subject: subject.canonicalName,
+                predicate: claim.predicate,
+                reason: belief.reason,
+                decidedAt: belief.decidedAt
+            ))
+        }
+        // Real changes of mind first. One handoff rewrite is three revisions, an objective, a commit
+        // and a next action, and the screen shows six rows, so in date order a single session could
+        // push a repository going dormant off it. Nothing is dropped: the count stays every revision.
+        beliefChanges = beliefChanges.filter { !Predicate.documentRestated.contains($0.predicate) }
+            + beliefChanges.filter { Predicate.documentRestated.contains($0.predicate) }
+
+        var contradictionRows: [HomeSnapshot.ContradictionRow] = []
+        let open = try await contradictions(unresolvedOnly: true)
+        for item in open {
+            guard let claim = try await claim(item.claimA),
+                  visible.contains(claim.domain),
+                  let subject = try await entity(claim.subject),
+                  visible.contains(subject.domain)
+            else { continue }
+            contradictionRows.append(HomeSnapshot.ContradictionRow(
+                id: item.id,
+                subject: subject.canonicalName,
+                predicate: claim.predicate,
+                reason: item.reason,
+                detectedAt: item.detectedAt
+            ))
+        }
+
+        var eventsSinceVisit: Int?
+        var beliefChangesSinceVisit: Int?
+        if let visit {
+            eventsSinceVisit = try await self.activity(from: visit, to: now, domains: visible, limit: 0).totalEvents
+            beliefChangesSinceVisit = beliefChanges.filter { $0.decidedAt >= visit }.count
+        }
+
         let allSources = try await sources()
 
         return HomeSnapshot(
             recent: recent,
             windowDays: windowDays,
             unattributed: unattributed,
-            openContradictions: try await contradictions(unresolvedOnly: true).count,
+            openContradictions: open.count,
+            beliefChanges: beliefChanges,
+            contradictionRows: contradictionRows,
+            eventsSinceVisit: eventsSinceVisit,
+            beliefChangesSinceVisit: beliefChangesSinceVisit,
             objects: try await objectCount(),
             entities: try await database.scalarInt("SELECT COUNT(*) FROM entity"),
             lastSyncedAt: allSources.compactMap(\.lastSyncedAt).max(),
-            neverSynced: allSources.filter { $0.lastSyncedAt == nil }.map(\.displayName)
+            neverSynced: allSources.filter { $0.kind != .manual && $0.lastSyncedAt == nil }.map(\.displayName)
         )
     }
 }

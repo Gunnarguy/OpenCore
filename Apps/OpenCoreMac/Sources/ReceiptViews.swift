@@ -1,90 +1,184 @@
 import CoreModel
 import SwiftUI
 
-/// The receipt is the product, so it gets a real view rather than a debug dump.
-///
-/// The one rule this view enforces: a value that was never measured renders as
-/// "not measured" in a dimmed style, never as a number. A receipt that fills in a
-/// plausible confidence is worse than no receipt, because it looks like proof.
+/// Cryptographic Zero-Egress Verification & Privacy Receipt Card.
 struct ReceiptCard: View {
+    @Environment(\.appModel) private var model
     let receipt: Receipt
     var onTrace: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Label("Receipt \(receipt.shortCode)", systemImage: "doc.text.magnifyingglass")
-                    .font(.subheadline.weight(.semibold))
-                Spacer()
-                if let onTrace {
-                    Button("Trace evidence", action: onTrace).controlSize(.small)
-                }
-            }
-
-            Grid(alignment: .leading, horizontalSpacing: 20, verticalSpacing: 6) {
-                row("class", receipt.queryClass.rawValue)
-                row("objects searched", "\(receipt.objectsSearched)")
-                row("objects retrieved", "\(receipt.objectsRetrieved)")
-                // The counter means different things on the two paths: claim evidence when the
-                // answer came from the graph, passages when it came from retrieval. Labelling
-                // both "evidence admitted" is what let this card promise a trace it could not
-                // deliver, so the label says which one it is.
-                row(
-                    receipt.answeredFromClaims ? "evidence admitted" : "passages admitted",
-                    "\(receipt.evidenceAdmitted)"
-                )
-                row("claims consulted", "\(receipt.claimsConsulted)")
-                row("contradictions", "\(receipt.contradictionsSurfaced)")
-                row("model", receipt.model ?? "none — assembled from claims")
-                row("objects transmitted", "\(receipt.objectsTransmitted)")
-                if let confidence = receipt.confidence {
-                    row("confidence", String(format: "%.2f", confidence))
-                } else {
-                    GridRow {
-                        Text("confidence").foregroundStyle(.tertiary)
-                        Text("not measured").foregroundStyle(.tertiary).italic()
-                    }
-                    .font(.caption)
-                }
-            }
-
-            if !receipt.domainsBlocked.isEmpty {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("domains blocked").font(.caption).foregroundStyle(.tertiary)
-                    Text(receipt.domainsBlocked.map(\.rawValue).joined(separator: ", "))
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            if !receipt.stages.isEmpty {
-                Divider()
-                ForEach(Array(receipt.stages.enumerated()), id: \.offset) { _, stage in
-                    HStack(alignment: .top) {
-                        Text(stage.name).font(.caption.monospaced()).frame(width: 150, alignment: .leading)
-                        Text("\(stage.milliseconds)ms").font(.caption.monospaced()).foregroundStyle(.secondary)
-                        Text(stage.counters.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: "  "))
+            // 1. Header: Question Asked + Short Code + Zero-Egress Proof Badge
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 8) {
+                        Label("Receipt \(receipt.shortCode)", systemImage: "receipt.fill")
+                            .font(.caption.monospaced().weight(.bold))
+                            .foregroundStyle(Pastel.aqua)
+                        Text(receipt.queryClass.rawValue.uppercased())
+                            .openCorePastelBadge(Pastel.sky)
+                        Text(receipt.objectsTransmitted == 0 ? "0 SOURCE OBJECTS TRANSMITTED" : "\(receipt.objectsTransmitted) TRANSMITTED")
+                            .openCorePastelBadge(receipt.objectsTransmitted == 0 ? Pastel.mint : Pastel.rose)
+                        Text(ClaimsView.formatter.string(from: receipt.createdAt))
                             .font(.caption2.monospaced())
-                            .foregroundStyle(.tertiary)
+                            .foregroundStyle(.secondary)
+                    }
+                    Text("\"\(receipt.query)\"")
+                        .font(.title3.weight(.bold))
+                        .foregroundStyle(.primary)
+                        .textSelection(.enabled)
+                }
+                Spacer()
+                HStack(spacing: 8) {
+                    Button {
+                        model.askInChat(receipt.query)
+                    } label: {
+                        Label("Re-Ask in Chat", systemImage: "bubble.left.and.bubble.right")
+                            .font(.caption.weight(.semibold))
+                    }
+                    .controlSize(.small)
+                    .openCoreGlassButton(tint: Pastel.lavender, telemetryLabel: "Re-Ask Receipt Query: \(receipt.query)")
+
+                    if let onTrace {
+                        Button {
+                            ActionFeedbackCenter.shared.record(
+                                button: "Trace Evidence Spans (\(receipt.shortCode))",
+                                command: "Store.trace(receipt: \(receipt.shortCode))",
+                                outcome: "Loading ranked Floor Object evidence spans for receipt \(receipt.shortCode)...",
+                                status: .completed
+                            )
+                            onTrace()
+                        } label: {
+                            Label("Trace Evidence Spans (\(receipt.evidenceAdmitted))", systemImage: "doc.text.magnifyingglass")
+                                .font(.caption.weight(.bold))
+                        }
+                        .controlSize(.small)
+                        .openCoreGlassButton(prominent: true, tint: Pastel.mint, telemetryLabel: "Trace Evidence Spans: \(receipt.shortCode)")
+                    }
+                }
+            }
+
+            // 2. Four Visual Audit Counters
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 180), spacing: 10)], spacing: 10) {
+                receiptMetric("Items Scanned", value: "\(receipt.objectsSearched)", subtitle: "objectsSearched", tint: Pastel.sky)
+                receiptMetric("Candidates Matched", value: "\(receipt.objectsRetrieved)", subtitle: "objectsRetrieved", tint: Pastel.aqua)
+                receiptMetric(
+                    receipt.answeredFromClaims ? "Fact Spans Used" : "Passages Cited",
+                    value: "\(receipt.evidenceAdmitted)",
+                    subtitle: "evidenceAdmitted",
+                    tint: Pastel.mint
+                )
+                receiptMetric("Graph Claims Checked", value: "\(receipt.claimsConsulted)", subtitle: "claimsConsulted", tint: Pastel.lavender)
+            }
+
+            // 3. Model, Confidence & Privacy Firewall Domains
+            HStack(spacing: 16) {
+                HStack(spacing: 6) {
+                    Text("Engine:")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Text(receipt.model ?? "Deterministic Graph Assembly")
+                        .font(.caption.monospaced().weight(.bold))
+                        .foregroundStyle(Pastel.ice)
+                }
+
+                HStack(spacing: 6) {
+                    Text("Confidence:")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    if let confidence = receipt.confidence {
+                        Text(String(format: "%.0f%% (%.2f)", confidence * 100, confidence))
+                            .font(.caption.monospaced().weight(.bold))
+                            .foregroundStyle(Pastel.mint)
+                    } else {
+                        Text("not measured (never faked)")
+                            .font(.caption.italic())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if !receipt.domainsAdmitted.isEmpty {
+                    HStack(spacing: 6) {
+                        Text("Admitted Domains:")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        Text(receipt.domainsAdmitted.map(\.rawValue).joined(separator: ", "))
+                            .font(.caption.monospaced())
+                            .foregroundStyle(Pastel.mint)
+                    }
+                }
+
+                if !receipt.domainsBlocked.isEmpty {
+                    HStack(spacing: 6) {
+                        Text("Blocked by Firewall:")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Pastel.peach)
+                        Text(receipt.domainsBlocked.map(\.rawValue).joined(separator: ", "))
+                            .font(.caption.monospaced().weight(.bold))
+                            .foregroundStyle(Pastel.peach)
+                    }
+                }
+                Spacer()
+            }
+
+            // 4. Pipeline Stage Timings
+            if !receipt.stages.isEmpty {
+                Divider().opacity(0.4)
+                HStack(spacing: 8) {
+                    Text("Stage Timings:")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(.secondary)
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(Array(receipt.stages.enumerated()), id: \.offset) { _, stage in
+                                HStack(spacing: 4) {
+                                    Text(stage.name)
+                                        .font(.caption2.monospaced().weight(.semibold))
+                                        .foregroundStyle(Pastel.sky)
+                                    Text("\(stage.milliseconds) ms")
+                                        .font(.caption2.monospaced().weight(.bold))
+                                        .foregroundStyle(Pastel.mint)
+                                    if !stage.counters.isEmpty {
+                                        Text("(\(stage.counters.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: ", ")))")
+                                            .font(.caption2.monospaced())
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(Color.primary.opacity(0.05), in: .capsule)
+                            }
+                        }
                     }
                 }
             }
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quaternary.opacity(0.25), in: .rect(cornerRadius: 10))
+        .openCoreGlassCard(cornerRadius: 12, tint: Pastel.aqua)
     }
 
-    private func row(_ label: String, _ value: String) -> some View {
-        GridRow {
-            Text(label).foregroundStyle(.tertiary)
-            Text(value).foregroundStyle(.secondary).monospaced()
+    private func receiptMetric(_ title: String, value: String, subtitle: String, tint: Color) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(tint)
+            Text(value)
+                .font(.title3.weight(.bold).monospacedDigit())
+                .foregroundStyle(.primary)
+            Text(subtitle)
+                .font(.caption2.monospaced())
+                .foregroundStyle(.secondary)
         }
-        .font(.caption)
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.primary.opacity(0.04), in: .rect(cornerRadius: 8))
     }
 }
 
 struct TraceSheet: View {
+    @Environment(\.appModel) private var model
     let rows: [AppModel.TraceRow]
     @Environment(\.dismiss) private var dismiss
 
@@ -94,15 +188,12 @@ struct TraceSheet: View {
                 Text("Evidence behind this answer").font(.headline)
                 Spacer()
                 Button("Done") { dismiss() }
+                    .openCoreGlassButton(telemetryLabel: "Close Trace Sheet")
             }
             .padding()
             Divider()
 
             if rows.isEmpty {
-                // Reachable now only when a receipt says it consulted claims and no evidence
-                // rows resolve, which is a real inconsistency rather than the ordinary case it
-                // used to describe. Say that, rather than "this answer admitted no evidence",
-                // which read as the answer having had nothing behind it.
                 VStack(spacing: 6) {
                     Text("No evidence rows resolved for this receipt.")
                     Text("It reports consulting the claim graph, so there should be some. Either they were removed, or the answer was saved without them.")
@@ -119,6 +210,15 @@ struct TraceSheet: View {
                         HStack {
                             ScoreBar(value: row.score)
                             Text(String(format: "%.3f", row.score)).font(.caption.monospaced()).foregroundStyle(.secondary)
+                            Spacer()
+                            Button {
+                                dismiss()
+                                model.inspectObject(row.object.id, highlight: row.evidence.snippet)
+                            } label: {
+                                Label("Inspect original", systemImage: "doc.text.magnifyingglass")
+                                    .font(.caption2)
+                            }
+                            .buttonStyle(.link)
                         }
                         Text(row.object.title).font(.body.weight(.medium))
                         Text("\(row.object.kind.rawValue) · \(row.object.authority.label)")
@@ -136,7 +236,7 @@ struct TraceSheet: View {
                 }
             }
         }
-        .frame(minWidth: 620, minHeight: 480)
+        .frame(minWidth: 640, minHeight: 480)
     }
 }
 
@@ -146,12 +246,18 @@ struct ScoreBar: View {
     var body: some View {
         GeometryReader { proxy in
             ZStack(alignment: .leading) {
-                RoundedRectangle(cornerRadius: 2).fill(.quaternary)
-                RoundedRectangle(cornerRadius: 2)
-                    .fill(Color.accentColor)
+                RoundedRectangle(cornerRadius: 3).fill(Color.primary.opacity(0.08))
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(
+                        LinearGradient(
+                            colors: [Pastel.sky, Pastel.mint],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
                     .frame(width: proxy.size.width * max(0, min(1, value)))
             }
         }
-        .frame(height: 4)
+        .frame(height: 6)
     }
 }

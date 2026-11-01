@@ -1,21 +1,19 @@
 import CoreIngest
 import CoreJSONRPC
+import CoreMCP
 import CoreModel
+import CoreSearch
 import SwiftUI
 
-/// One screen for MCP, in two modes.
-///
-/// These used to be two sidebar rows, MCP and MCP Store, and the split was not merely
-/// cosmetic: it is why choosing tools after signing in was only possible from the CLI. Adding
-/// a server lived on one tab, managing one lived on the other, and the discovery panel and
-/// tool picker that the second needed were built into the first and reachable only on the
-/// new-source path. Two doors onto one job, with a working part stranded behind the wrong one.
+/// One hub for Connections & MCP: local workspace & Apple connectors, external MCP sources,
+/// the official server catalogue, OpenCore's own outbound MCP server playground, and corpus rebuild.
 struct MCPView: View {
-    /// Which half of the job is on screen. `sources` is the default because the catalogue is
-    /// where you go once and the source list is where you come back to.
-    private enum Mode: String, CaseIterable, Identifiable {
-        case sources = "Your sources"
-        case catalogue = "Catalogue"
+    enum Mode: String, CaseIterable, Identifiable {
+        case sources = "MCP Ecosystem"
+        case connectors = "Workspace & Connectors"
+        case catalogue = "Registry Catalogue"
+        case server = "OpenCore Server (8 Tools)"
+        case corpus = "Corpus & Rebuild"
 
         var id: String { rawValue }
     }
@@ -24,25 +22,37 @@ struct MCPView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Picker("", selection: $mode) {
-                ForEach(Mode.allCases) { Text($0.rawValue).tag($0) }
+            HStack {
+                Picker("", selection: $mode) {
+                    ForEach(Mode.allCases) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize(horizontal: true, vertical: false)
+                Spacer()
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(maxWidth: 320)
             .padding(.vertical, 10)
+            .padding(.horizontal, 20)
 
             Divider()
 
             switch mode {
-            case .sources: MCPSourcesView()
-            // Adding from the catalogue lands you back on the source list, because adding is
-            // not the end of the job: a new source has no allowlist and fetches nothing until
-            // its tools are chosen, which happens over there.
-            case .catalogue: MCPStoreView { mode = .sources }
+            case .sources:
+                MCPSourcesView(
+                    onOpenCatalogue: { mode = .catalogue },
+                    onOpenServerInspector: { mode = .server }
+                )
+            case .connectors:
+                SourcesView()
+            case .catalogue:
+                MCPStoreView { mode = .sources }
+            case .server:
+                OpenCoreMCPServerInspectorView()
+            case .corpus:
+                CorpusView()
             }
         }
-        .navigationTitle("MCP")
+        .navigationTitle("Connections & MCP")
     }
 }
 
@@ -50,14 +60,18 @@ struct MCPView: View {
 /// The CLI makes you read a printed list, then retype each name behind `--tool`. Here the
 /// list you read and the list you approve are the same object.
 struct MCPSourcesView: View {
-    @Environment(AppModel.self) private var model
+    @Environment(\.appModel) private var model
+    var onOpenCatalogue: () -> Void = {}
+    var onOpenServerInspector: () -> Void = {}
+
     @State private var mcp = MCPSourcesModel()
+    @State private var showingCustomForm = false
 
     @State private var name = ""
     @State private var command = ""
     @State private var argumentsText = ""
     @State private var environmentText = ""
-    @State private var domain: Domain = .personal
+    @State private var domain: Domain = .project
 
     @State private var pendingRemoval: MCPSourcesModel.SourceRow?
     @State private var showingRemoval = false
@@ -65,18 +79,18 @@ struct MCPSourcesView: View {
     var body: some View {
         @Bindable var mcp = mcp
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: 24) {
                 header
-                form
+                ecosystemStatusBanner
                 if let notice = mcp.notice { MCPSourcesNotice(text: notice) }
-                // Only the add-a-new-server path renders inline. Editing an existing source
-                // puts the same picker in a sheet, so a list of ticks can never be ambiguous
-                // about which server it belongs to.
+                if showingCustomForm { form }
                 if !mcp.discoveredTools.isEmpty && mcp.editing == nil { discovery }
                 configured
+                if !mcp.detectedOnMac.isEmpty { detectedSection }
+                if !mcp.curatedPresets.isEmpty { presetsSection }
             }
-            .padding(24)
-            .frame(maxWidth: 780, alignment: .leading)
+            .padding(28)
+            .frame(maxWidth: 940, alignment: .leading)
             .frame(maxWidth: .infinity)
         }
         .task { await model.loadMCPSources(into: mcp) }
@@ -101,11 +115,71 @@ struct MCPSourcesView: View {
     // MARK: - Sections
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text("MCP servers").font(.title2.weight(.semibold))
-            Text("Any MCP server can be a source. Nothing it offers is called until you tick it.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+        HStack(alignment: .top, spacing: 16) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Model Context Protocol Ecosystem")
+                    .font(.title2.weight(.semibold))
+                Text("Connected local and OAuth MCP servers on your Mac. Every server starts default-deny: nothing is called until you tick its read-only tools.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            OpenCoreGlassCluster(spacing: 8) {
+                HStack(spacing: 8) {
+                    Button {
+                        Task { await model.loadMCPSources(into: mcp) }
+                    } label: {
+                        Label("Rescan Mac", systemImage: "arrow.clockwise")
+                            .font(.caption.weight(.medium))
+                    }
+                    .openCoreGlassButton()
+                    .disabled(isWorking)
+
+                    Button {
+                        withAnimation(.easeOut(duration: 0.15)) {
+                            showingCustomForm.toggle()
+                        }
+                    } label: {
+                        Label(
+                            showingCustomForm ? "Hide Custom Form" : "Custom Server…",
+                            systemImage: showingCustomForm ? "chevron.up.circle" : "plus.circle.fill"
+                        )
+                        .font(.caption.weight(.medium))
+                    }
+                    .openCoreGlassButton(prominent: !showingCustomForm)
+                }
+            }
+        }
+    }
+
+    private var ecosystemStatusBanner: some View {
+        let readyCount = mcp.sources.filter { !($0.config?.allowedTools.isEmpty ?? true) }.count
+        return HStack(spacing: 12) {
+            MCPSummaryStatCard(
+                title: "Configured Servers",
+                value: "\(mcp.sources.count)",
+                subtitle: "\(readyCount) with active tool allowlist",
+                symbol: "powerplug.fill",
+                tint: .accentColor
+            )
+            MCPSummaryStatCard(
+                title: "Featured Presets",
+                value: "\(mcp.curatedPresets.count + mcp.detectedOnMac.count)",
+                subtitle: "1-click add or browse 9,600+ in Registry",
+                symbol: "square.grid.2x2.fill",
+                tint: .purple,
+                action: onOpenCatalogue
+            )
+            MCPSummaryStatCard(
+                title: "OpenCore Outbound Server",
+                value: "8 Read-Only Tools",
+                subtitle: mcp.registeredOpenCoreClients.isEmpty
+                    ? "Click to test & inspect JSON-RPC"
+                    : "Active in \(mcp.registeredOpenCoreClients.joined(separator: " · "))",
+                symbol: "checkmark.shield.fill",
+                tint: .green,
+                action: onOpenServerInspector
+            )
         }
     }
 
@@ -119,12 +193,13 @@ struct MCPSourcesView: View {
             disabled: isWorking
         ) {
             let config = discoverConfig()
+            mcp.pendingDiscoveredConfig = config
             Task { await model.discoverMCP(config: config, into: mcp) }
         }
     }
 
     private var discovery: some View {
-        MCPToolPicker(mcp: mcp, actionLabel: "Add source", disabled: !canAdd) {
+        MCPToolPicker(mcp: mcp, actionLabel: "Add Source with Selected Tools", disabled: !canAdd) {
             let config = addConfig()
             Task { await model.addMCPSource(config: config, into: mcp) }
         }
@@ -132,34 +207,127 @@ struct MCPSourcesView: View {
 
     private var configured: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Divider()
-            Text("Configured MCP sources").font(.subheadline.weight(.semibold))
+            HStack(alignment: .firstTextBaseline) {
+                Text("Configured MCP Sources")
+                    .font(.headline)
+                Text("\(mcp.sources.count) connected")
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Browse Full Registry →", action: onOpenCatalogue)
+                    .buttonStyle(.link)
+                    .font(.caption)
+            }
 
             if mcp.sources.isEmpty {
-                Text("None yet. Enter a command above and discover what it offers, or pick one from the catalogue.")
+                Text("No MCP servers configured yet. Add one from the detected or preset cards below, or open the Registry.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
+                    .padding(16)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .openCoreGlassCard(cornerRadius: 12)
             } else {
-                ForEach(mcp.sources) { row in
-                    MCPSourcesConfiguredRow(row: row, disabled: isWorking) {
-                        Task { await model.syncMCPSource(row, into: mcp) }
-                    } chooseTools: {
-                        Task { await model.discoverTools(for: row, into: mcp) }
-                    } remove: {
-                        pendingRemoval = row
-                        showingRemoval = true
+                LazyVStack(alignment: .leading, spacing: 12) {
+                    ForEach(mcp.sources) { row in
+                        MCPSourcesConfiguredRow(row: row, disabled: isWorking) {
+                            Task { await model.syncMCPSource(row, into: mcp) }
+                        } chooseTools: {
+                            Task { await model.discoverTools(for: row, into: mcp) }
+                        } remove: {
+                            pendingRemoval = row
+                            showingRemoval = true
+                        }
                     }
                 }
             }
         }
     }
 
+    private var detectedSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Divider()
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Detected on This Mac")
+                        .font(.headline)
+                    Text("Discovered in your local Claude Code / Antigravity / Gemini MCP configurations.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Restore All (\(mcp.detectedOnMac.count))") {
+                    Task { await model.registerAllDetectedServers(into: mcp) }
+                }
+                .controlSize(.small)
+                .openCoreGlassButton(prominent: true)
+                .disabled(isWorking)
+            }
+
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 380), spacing: 12)], spacing: 12) {
+                ForEach(mcp.detectedOnMac) { server in
+                    MCPDetectedServerCard(
+                        server: server,
+                        disabled: isWorking,
+                        onAdd: {
+                            Task { await model.registerDetectedServer(server, into: mcp) }
+                        },
+                        onDiscover: {
+                            populateForm(from: server)
+                            Task { await model.discoverDetectedServer(server, into: mcp) }
+                        }
+                    )
+                }
+            }
+        }
+    }
+
+    private var presetsSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Divider()
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Featured & Official MCP Presets")
+                        .font(.headline)
+                    Text("One-click templates for popular local stdio and hosted OAuth MCP servers.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Search 9,600+ Servers in Catalogue →", action: onOpenCatalogue)
+                    .buttonStyle(.link)
+                    .font(.caption)
+            }
+
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 380), spacing: 12)], spacing: 12) {
+                ForEach(mcp.curatedPresets) { server in
+                    MCPDetectedServerCard(
+                        server: server,
+                        disabled: isWorking,
+                        onAdd: {
+                            Task { await model.registerDetectedServer(server, into: mcp) }
+                        },
+                        onDiscover: {
+                            populateForm(from: server)
+                            Task { await model.discoverDetectedServer(server, into: mcp) }
+                        }
+                    )
+                }
+            }
+        }
+    }
+
+    private func populateForm(from server: MCPSourcesModel.DetectedServer) {
+        name = server.config.name
+        command = server.config.command
+        argumentsText = server.config.arguments.joined(separator: " ")
+        environmentText = server.config.environmentNames.joined(separator: " ")
+        domain = server.config.domain
+    }
+
     // MARK: - Form to config
 
     private func discoverConfig() -> MCPServerConfig {
         MCPServerConfig(
-            // Discovery calls nothing, so the name is only a label in error text. The CLI
-            // uses a placeholder here for the same reason.
             name: trimmed(name).isEmpty ? "discover" : trimmed(name),
             command: trimmed(command),
             arguments: words(argumentsText),
@@ -171,9 +339,6 @@ struct MCPSourcesView: View {
     private func addConfig() -> MCPServerConfig {
         let allowed = mcp.discoveredTools.map(\.name).filter { mcp.isAllowed($0) }
 
-        // The form's fields are text, so everything it collects is a JSON string. A tool
-        // needing an object or a number is configurable only from the CLI's
-        // `--tool-arg-json` until this panel grows a typed editor.
         var arguments: [String: [String: JSONValue]] = [:]
         for tool in allowed {
             let filled = (mcp.toolArguments[tool] ?? [:]).compactMapValues { raw -> JSONValue? in
@@ -181,6 +346,12 @@ struct MCPSourcesView: View {
                 return trimmed.isEmpty ? nil : .string(trimmed)
             }
             if !filled.isEmpty { arguments[tool] = filled }
+        }
+
+        if var base = mcp.pendingDiscoveredConfig {
+            base.allowedTools = allowed
+            base.toolArguments = arguments
+            return base
         }
 
         return MCPServerConfig(
@@ -196,6 +367,9 @@ struct MCPSourcesView: View {
 
     private var canAdd: Bool {
         guard !isWorking, mcp.allowedCount > 0 else { return false }
+        if let pending = mcp.pendingDiscoveredConfig {
+            return !pending.name.isEmpty && (!pending.command.isEmpty || pending.url != nil)
+        }
         return !trimmed(name).isEmpty && !trimmed(command).isEmpty
     }
 
@@ -213,6 +387,113 @@ struct MCPSourcesView: View {
     }
 }
 
+private struct MCPSummaryStatCard: View {
+    let title: String
+    let value: String
+    let subtitle: String
+    let symbol: String
+    let tint: Color
+    var action: (() -> Void)? = nil
+
+    var body: some View {
+        Group {
+            if let action {
+                Button(action: action) { cardBody }
+                    .buttonStyle(.plain)
+            } else {
+                cardBody
+            }
+        }
+    }
+
+    private var cardBody: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: symbol)
+                .font(.title3)
+                .foregroundStyle(tint)
+                .frame(width: 28, height: 28)
+                .background(tint.opacity(0.14), in: .rect(cornerRadius: 8))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(value)
+                    .font(.headline.monospacedDigit())
+                Text(subtitle)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .openCoreGlassCard(cornerRadius: 12, tint: tint)
+        .contentShape(.rect)
+    }
+}
+
+private struct MCPDetectedServerCard: View {
+    let server: MCPSourcesModel.DetectedServer
+    let disabled: Bool
+    let onAdd: () -> Void
+    let onDiscover: () -> Void
+
+    private var isHosted: Bool { server.config.url != nil }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: server.symbol)
+                    .font(.title3)
+                    .foregroundStyle(Color.accentColor)
+                    .frame(width: 32, height: 32)
+                    .background(Color.accentColor.opacity(0.14), in: .rect(cornerRadius: 8))
+
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(server.displayTitle)
+                            .font(.callout.weight(.semibold))
+                        Text(server.sourceBadge)
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(server.isInstalledOnMac ? .green : .secondary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(
+                                (server.isInstalledOnMac ? Color.green : Color.secondary).opacity(0.14),
+                                in: .capsule
+                            )
+                    }
+                    Text(server.summary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+                Spacer(minLength: 0)
+            }
+
+            HStack(spacing: 8) {
+                MetricPill(label: "transport", value: isHosted ? "OAuth HTTP" : "stdio")
+                MetricPill(label: "domain", value: server.config.domain.rawValue)
+                Spacer()
+                if !isHosted {
+                    Button("Discover Tools", action: onDiscover)
+                        .controlSize(.small)
+                        .openCoreGlassButton()
+                        .disabled(disabled)
+                }
+                Button("Add to Sources", action: onAdd)
+                    .controlSize(.small)
+                    .openCoreGlassButton(prominent: true)
+                    .disabled(disabled)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .openCoreGlassCard(cornerRadius: 12)
+    }
+}
+
 // MARK: - Server form
 
 private struct MCPSourcesServerForm: View {
@@ -226,12 +507,14 @@ private struct MCPSourcesServerForm: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
+            Text("Connect a Custom Stdio MCP Server")
+                .font(.subheadline.weight(.semibold))
             MCPSourcesField(label: "Name", prompt: "slack", text: $name)
             MCPSourcesField(label: "Command", prompt: "npx", text: $command)
             MCPSourcesField(label: "Arguments", prompt: "-y @modelcontextprotocol/server-slack", text: $argumentsText)
             MCPSourcesField(label: "Environment", prompt: "SLACK_BOT_TOKEN", text: $environmentText)
 
-            Text("Arguments are split on spaces. Environment takes variable NAMES, never values: the value is read from your environment when the server launches and is never written to the database.")
+            Text("Arguments are split on spaces. Environment takes variable NAMES, never values: the value is read from your environment or Keychain when the server launches and is never written to the database.")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
 
@@ -243,13 +526,14 @@ private struct MCPSourcesServerForm: View {
                 .labelsHidden()
                 .frame(width: 130)
                 Spacer()
-                Button("Discover", action: discover)
+                Button("Discover Tools", action: discover)
+                    .openCoreGlassButton(prominent: true)
                     .disabled(disabled || command.trimmingCharacters(in: .whitespaces).isEmpty)
             }
         }
-        .padding(14)
+        .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quaternary.opacity(0.3), in: .rect(cornerRadius: 10))
+        .openCoreGlassCard(cornerRadius: 12)
     }
 }
 
@@ -286,12 +570,30 @@ private struct MCPToolPicker: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            MCPSourcesDiscoveryHeader(
-                serverName: mcp.discoveredServerName,
-                protocolVersion: mcp.discoveredProtocolVersion,
-                command: mcp.discoveredCommand,
-                toolCount: mcp.discoveredTools.count
-            )
+            HStack(alignment: .top) {
+                MCPSourcesDiscoveryHeader(
+                    serverName: mcp.discoveredServerName,
+                    protocolVersion: mcp.discoveredProtocolVersion,
+                    command: mcp.discoveredCommand,
+                    toolCount: mcp.discoveredTools.count
+                )
+                Spacer()
+                HStack(spacing: 8) {
+                    Button("Tick Likely Read-Only") {
+                        mcp.selectAllLikelyReadOnly()
+                    }
+                    .controlSize(.small)
+                    .openCoreGlassButton(prominent: true)
+                    .help("Pre-check ready tools whose advisory is Likely Read. Review before saving.")
+
+                    Button("Clear All") {
+                        mcp.clearAllowed()
+                    }
+                    .controlSize(.small)
+                    .openCoreGlassButton()
+                    .disabled(mcp.allowedCount == 0)
+                }
+            }
 
             MCPSourcesSafetyNote()
 
@@ -309,6 +611,8 @@ private struct MCPToolPicker: View {
                 action: action
             )
         }
+        .padding(16)
+        .openCoreGlassCard(cornerRadius: 12)
     }
 }
 
@@ -320,7 +624,7 @@ private struct MCPToolPicker: View {
 private struct MCPToolSheet: View {
     let row: MCPSourcesModel.SourceRow
     let mcp: MCPSourcesModel
-    @Environment(AppModel.self) private var model
+    @Environment(\.appModel) private var model
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -341,7 +645,7 @@ private struct MCPToolSheet: View {
             Divider()
 
             ScrollView {
-                MCPToolPicker(mcp: mcp, actionLabel: "Save", disabled: mcp.allowedCount == 0) {
+                MCPToolPicker(mcp: mcp, actionLabel: "Save Allowlist", disabled: mcp.allowedCount == 0) {
                     Task {
                         await model.saveAllowedTools(for: row, into: mcp)
                         dismiss()
@@ -350,7 +654,7 @@ private struct MCPToolSheet: View {
                 .padding(20)
             }
         }
-        .frame(minWidth: 640, minHeight: 620)
+        .frame(minWidth: 680, minHeight: 640)
     }
 }
 
@@ -447,7 +751,7 @@ private struct MCPSourcesToolRow: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quaternary.opacity(0.3), in: .rect(cornerRadius: 10))
+        .openCoreGlassCard(cornerRadius: 10)
     }
 
     @ViewBuilder
@@ -517,12 +821,6 @@ private struct MCPSourcesArgumentField: View {
         }
     }
 
-    /// An argument already stored as an object, array or number.
-    ///
-    /// Shown, not offered for editing. This field writes text, and turning `{"page_size":10}`
-    /// back into JSON would mean guessing whether the user meant the number or the string,
-    /// which is the guess `--tool-arg-json` exists as a separate flag to avoid. Editable here
-    /// would silently flatten a working Notion configuration into nonsense.
     private func lockedValue(_ json: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(json)
@@ -554,7 +852,9 @@ private struct MCPSourcesAddBar: View {
                 .font(.caption.monospaced())
                 .foregroundStyle(countColor)
             Spacer()
-            Button(label, action: action).disabled(disabled)
+            Button(label, action: action)
+                .openCoreGlassButton(prominent: true)
+                .disabled(disabled)
         }
     }
 }
@@ -573,18 +873,79 @@ private struct MCPSourcesConfiguredRow: View {
     @State private var signingIn = false
     @State private var signInError: String?
 
+    private var serverIcon: String {
+        let low = row.name.lowercased()
+        if low.contains("github") { return "chevron.left.forwardslash.chevron.right" }
+        if low == "rea" || low.contains("reverse") { return "cpu.fill" }
+        if low.contains("notion") { return "doc.richtext" }
+        if low.contains("context7") { return "book.pages" }
+        if low.contains("gemini") { return "sparkles" }
+        if low.contains("developer-knowledge") { return "books.vertical.fill" }
+        if low.contains("home") { return "house.and.flag.fill" }
+        if low.contains("catalog") || low.contains("dataplex") { return "cylinder.split.1x2.fill" }
+        if low.contains("sequential") { return "brain.head.profile" }
+        if low.contains("data-agent") { return "cloud.fill" }
+        if low.contains("notebook") { return "menucard.fill" }
+        if low.contains("visual") { return "chart.xyaxis.line" }
+        if low.contains("linear") { return "line.3.horizontal.decrease.circle" }
+        if low.contains("sentry") { return "ladybug.fill" }
+        if low.contains("slack") { return "bubble.left.and.text.bubble.right.fill" }
+        return "powerplug.fill"
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(row.source.displayName).font(.body.weight(.medium))
-                    Text(commandLine).font(.caption.monospaced()).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: serverIcon)
+                    .font(.title3)
+                    .foregroundStyle(hasAllowlist ? Color.accentColor : .secondary)
+                    .frame(width: 34, height: 34)
+                    .background(
+                        (hasAllowlist ? Color.accentColor : Color.secondary).opacity(0.14),
+                        in: .rect(cornerRadius: 8)
+                    )
+
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 8) {
+                        Text(row.source.displayName)
+                            .font(.callout.weight(.semibold))
+                        Text(hostedEndpoint != nil ? "OAUTH HTTP" : "STDIO")
+                            .font(.system(size: 9, weight: .bold, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.secondary.opacity(0.12), in: .capsule)
+                        if hasAllowlist {
+                            Text("\(row.config?.allowedTools.count ?? 0) tools enabled")
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(.green)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.green.opacity(0.14), in: .capsule)
+                        }
+                    }
+                    Text(commandLine)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                 }
                 Spacer()
-                if hostedEndpoint != nil { signInButton }
-                toolsButton
-                Button("Sync", action: sync).disabled(disabled || !canCall)
-                Button("Remove", action: remove).disabled(disabled)
+                HStack(spacing: 8) {
+                    if hostedEndpoint != nil { signInButton }
+                    toolsButton
+                    Button("Sync", action: sync)
+                        .controlSize(.small)
+                        .openCoreGlassButton()
+                        .disabled(disabled || !canCall || !hasAllowlist)
+                    Button(role: .destructive, action: remove) {
+                        Image(systemName: "trash")
+                    }
+                    .controlSize(.small)
+                    .buttonStyle(.borderless)
+                    .help("Remove \(row.name)")
+                    .disabled(disabled)
+                }
             }
 
             detail
@@ -596,37 +957,31 @@ private struct MCPSourcesConfiguredRow: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quaternary.opacity(0.3), in: .rect(cornerRadius: 10))
+        .openCoreGlassCard(cornerRadius: 12, tint: hasAllowlist ? .accentColor : nil)
         .task { refreshSignedIn() }
     }
 
-    /// A hosted server signs in; a local one reads a credential from the environment. Only one
-    /// of those two is ever offered, so the row cannot suggest an action that does nothing.
     private var hostedEndpoint: URL? {
-        guard let raw = row.config?.url else { return nil }
+        guard let raw = row.config?.url, !raw.isEmpty else { return nil }
         return URL(string: raw)
     }
 
-    /// A hosted server cannot be reached at all until it is signed in, so neither listing its
-    /// tools nor syncing is offered before that.
-    private var canCall: Bool { hostedEndpoint == nil || signedIn }
+    private var canCall: Bool { row.config != nil && (hostedEndpoint == nil || signedIn) }
 
     private var hasAllowlist: Bool { !(row.config?.allowedTools.isEmpty ?? true) }
 
-    /// Prominent when the allowlist is empty, because that source fetches nothing and this
-    /// button is the whole remedy. It is the step that used to require the CLI.
-    ///
-    /// Two branches rather than one button with an erased style: type-erasing a view destroys
-    /// its identity, and this app has already paid for that once in Settings.
     @ViewBuilder
     private var toolsButton: some View {
         if hasAllowlist {
-            Button("Tools", action: chooseTools)
+            Button("Edit Tools", action: chooseTools)
+                .controlSize(.small)
+                .openCoreGlassButton()
                 .disabled(disabled || !canCall)
                 .help(toolsHelp)
         } else {
-            Button("Choose tools", action: chooseTools)
-                .buttonStyle(.borderedProminent)
+            Button("Choose Tools", action: chooseTools)
+                .controlSize(.small)
+                .openCoreGlassButton(prominent: true)
                 .disabled(disabled || !canCall)
                 .help(toolsHelp)
         }
@@ -643,12 +998,21 @@ private struct MCPSourcesConfiguredRow: View {
         if signingIn {
             ProgressView().controlSize(.small)
         } else if signedIn {
-            Button("Sign out") {
-                MCPSignIn.signOut(server: row.name)
-                refreshSignedIn()
+            Button("Sign Out") {
+                do {
+                    try MCPSignIn.signOut(server: row.name)
+                    signInError = nil
+                    refreshSignedIn()
+                } catch {
+                    signInError = error.localizedDescription
+                }
             }
+            .controlSize(.small)
+            .openCoreGlassButton()
         } else {
-            Button("Sign in", action: startSignIn).buttonStyle(.borderedProminent)
+            Button("Sign In", action: startSignIn)
+                .controlSize(.small)
+                .openCoreGlassButton(prominent: true)
         }
     }
 
@@ -673,22 +1037,28 @@ private struct MCPSourcesConfiguredRow: View {
 
     private var commandLine: String {
         guard let config = row.config else { return "configuration unreadable" }
-        if let url = config.url { return url }
+        if let url = config.url, !url.isEmpty { return url }
         return ([config.command] + config.arguments).joined(separator: " ")
     }
 
     @ViewBuilder
     private var detail: some View {
         if let config = row.config {
-            MCPSourcesAllowlistLine(tools: config.allowedTools)
+            MCPSourcesAllowlistLine(tools: config.allowedTools, isHostedAndUnsigned: hostedEndpoint != nil && !signedIn)
             HStack(spacing: 12) {
                 MetricPill(label: "domain", value: config.domain.rawValue)
                 MetricPill(label: "authority", value: config.authority.label)
                 syncedPill
+                let origins = config.environmentOrigins()
+                if !origins.isEmpty {
+                    ForEach(origins, id: \.variable) { item in
+                        MetricPill(label: item.variable, value: item.origin)
+                    }
+                }
             }
             if !row.missingEnvironment.isEmpty {
                 Label(
-                    "not set in your environment: \(row.missingEnvironment.joined(separator: ", ")). Sync refuses to run until they are set.",
+                    "not set in your environment or Keychain: \(row.missingEnvironment.joined(separator: ", ")). Sync refuses to run until they are set.",
                     systemImage: "exclamationmark.triangle"
                 )
                 .font(.caption)
@@ -719,16 +1089,24 @@ private struct MCPSourcesConfiguredRow: View {
 /// has gone quiet. Say which one it is.
 private struct MCPSourcesAllowlistLine: View {
     let tools: [String]
+    var isHostedAndUnsigned: Bool = false
 
     var body: some View {
         if tools.isEmpty {
-            Text("no tools allowed, so this source fetches nothing. Choose tools to fix it.")
-                .font(.caption)
-                .foregroundStyle(.orange)
+            if isHostedAndUnsigned {
+                Label("Hosted OAuth server: click Sign In, then Choose Tools to select read-only tools.", systemImage: "person.badge.key")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Label("Ready to configure: click Choose Tools to inspect this server and tick read-only tools.", systemImage: "checklist")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
         } else {
             Text("allowed: \(tools.joined(separator: ", "))")
                 .font(.caption.monospaced())
                 .foregroundStyle(.secondary)
+                .lineLimit(2)
         }
     }
 }
@@ -739,12 +1117,16 @@ private struct MCPSourcesNotice: View {
     let text: String
 
     var body: some View {
-        Text(text)
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .padding(14)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(.quaternary.opacity(0.3), in: .rect(cornerRadius: 10))
+        HStack(spacing: 8) {
+            Image(systemName: "info.circle.fill")
+                .foregroundStyle(Color.accentColor)
+            Text(text)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .openCoreGlassCard(cornerRadius: 10, tint: .accentColor)
     }
 }
 
@@ -765,5 +1147,362 @@ private extension MCPToolRisk {
         case .unclear: "UNCLEAR"
         case .likelyRead: "LIKELY READ"
         }
+    }
+}
+
+// MARK: - OpenCore Outbound MCP Server Inspector & Live Playground
+
+struct OpenCoreMCPServerInspectorView: View {
+    @Environment(\.appModel) private var model
+    @Environment(\.appSettings) private var settings
+
+    enum ToolChoice: String, CaseIterable, Identifiable {
+        case ask = "core_ask"
+        case search = "core_search"
+        case claims = "core_claims"
+        case dossier = "core_dossier"
+        case timeline = "core_timeline"
+        case contradictions = "core_contradictions"
+        case changed = "core_changed"
+        case trace = "core_trace"
+
+        var id: String { rawValue }
+
+        var promptPlaceholder: String {
+            switch self {
+            case .ask: "Question (e.g. What is OpenCore built with?)"
+            case .search: "Search query (e.g. SQLite)"
+            case .claims, .dossier: "Entity name (e.g. OpenCore)"
+            case .timeline: "Optional entity filter (or leave blank for all)"
+            case .contradictions: "Leave blank (or type 'unresolved' for unresolved only)"
+            case .changed: "Days lookback (e.g. 30)"
+            case .trace: "Receipt short code (e.g. oc_...)"
+            }
+        }
+    }
+
+    struct CheckRow: Identifiable, Sendable {
+        let id: String
+        let endpoint: String
+        let passed: Bool
+        let milliseconds: Int
+        let preview: String
+    }
+
+    @State private var selectedTool: ToolChoice = .ask
+    @State private var parameterInput = "What is OpenCore built with?"
+    @State private var secondaryInput = ""
+    @State private var outputText = ""
+    @State private var lastLatencyMs: Int?
+    @State private var running = false
+    @State private var healthChecks: [CheckRow] = []
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                header
+                statusBanner
+                playgroundPanel
+                healthcheckPanel
+            }
+            .padding(24)
+            .frame(maxWidth: 780, alignment: .leading)
+            .frame(maxWidth: .infinity)
+        }
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("OpenCore MCP Server")
+                    .font(.title2.weight(.semibold))
+                Spacer()
+                Button {
+                    Task { await runFullHealthcheck() }
+                } label: {
+                    Label("Verify All Endpoints", systemImage: "checkmark.shield.fill")
+                        .font(.caption.weight(.semibold))
+                }
+                .openCoreGlassButton(prominent: true)
+                .disabled(running || model.store == nil)
+            }
+            Text("Inspect and test the exact JSON-RPC methods and 8 read-only tools that Claude Code, Codex, and Antigravity call over `opencore mcp`.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var statusBanner: some View {
+        HStack(spacing: 16) {
+            MetricPill(label: "protocol", value: MCPServer.protocolVersion)
+            MetricPill(label: "supported", value: MCPServer.supportedProtocolVersions.joined(separator: ", "))
+            MetricPill(label: "tools", value: "\(MCPServer.toolDefinitions.count)")
+            Spacer()
+            HStack(spacing: 5) {
+                Image(systemName: settings.mcpExposeSensitiveDomains ? "lock.open.trianglebadge.exclamationmark" : "lock.shield.fill")
+                    .foregroundStyle(settings.mcpExposeSensitiveDomains ? .orange : .green)
+                Text(settings.mcpExposeSensitiveDomains ? "Sensitive domains exposed" : "Sensitive domains firewalled")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(settings.mcpExposeSensitiveDomains ? .orange : .secondary)
+            }
+        }
+        .padding(14)
+        .openCoreGlassCard(cornerRadius: 10)
+    }
+
+    private var playgroundPanel: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SectionLabel("Live Tool Playground")
+
+            HStack(spacing: 10) {
+                Picker("Tool", selection: $selectedTool) {
+                    ForEach(ToolChoice.allCases) { tool in
+                        Text(tool.rawValue).font(.caption.monospaced()).tag(tool)
+                    }
+                }
+                .frame(width: 220)
+                .onChange(of: selectedTool) { _, newValue in
+                    switch newValue {
+                    case .ask: parameterInput = "What is OpenCore built with?"
+                    case .search: parameterInput = "evidence"
+                    case .claims, .dossier: parameterInput = "OpenCore"
+                    case .timeline: parameterInput = ""
+                    case .contradictions: parameterInput = ""
+                    case .changed: parameterInput = "30"
+                    case .trace: parameterInput = model.receipts.first?.shortCode ?? ""
+                    }
+                }
+
+                TextField(selectedTool.promptPlaceholder, text: $parameterInput)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit {
+                        Task { await runSelectedTool() }
+                    }
+
+                if selectedTool == .ask || selectedTool == .claims {
+                    TextField("as_of (YYYY-MM-DD, optional)", text: $secondaryInput)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 175)
+                }
+
+                Button("Execute") {
+                    Task { await runSelectedTool() }
+                }
+                .openCoreGlassButton(prominent: true)
+                .disabled(running || model.store == nil)
+            }
+
+            if !outputText.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Response (\(selectedTool.rawValue))")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        if let lastLatencyMs {
+                            Text("\(lastLatencyMs) ms")
+                                .font(.caption2.monospaced())
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                    ScrollView {
+                        Text(outputText)
+                            .font(.caption.monospaced())
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(10)
+                    }
+                    .frame(minHeight: 140, maxHeight: 280)
+                    .background(.quaternary.opacity(0.35), in: .rect(cornerRadius: 8))
+                }
+            }
+        }
+        .padding(16)
+        .openCoreGlassCard(cornerRadius: 12)
+    }
+
+    @ViewBuilder
+    private var healthcheckPanel: some View {
+        if !healthChecks.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    SectionLabel("Endpoint Verification Matrix", count: healthChecks.count)
+                    Spacer()
+                    let passedCount = healthChecks.filter(\.passed).count
+                    Text("\(passedCount)/\(healthChecks.count) passed")
+                        .font(.caption.monospaced())
+                        .foregroundStyle(passedCount == healthChecks.count ? .green : .orange)
+                }
+
+                ForEach(healthChecks) { row in
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        Image(systemName: row.passed ? "checkmark.circle.fill" : "xmark.circle.fill")
+                            .foregroundStyle(row.passed ? .green : .red)
+                        Text(row.endpoint)
+                            .font(.caption.monospaced().weight(.semibold))
+                            .frame(width: 175, alignment: .leading)
+                        Text(row.preview)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                        Spacer()
+                        Text("\(row.milliseconds)ms")
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.tertiary)
+                    }
+                    .padding(.vertical, 4)
+                    Divider()
+                }
+            }
+            .padding(16)
+            .openCoreGlassCard(cornerRadius: 12)
+        }
+    }
+
+    private func makeServer() -> MCPServer? {
+        guard let store = model.store else { return nil }
+        return MCPServer(
+            store: store,
+            embedder: try? NLEmbeddingProvider(),
+            sensitiveDomainsUnlockable: settings.mcpExposeSensitiveDomains
+        )
+    }
+
+    private func sendRPC(_ server: MCPServer, method: String, params: [String: JSONValue] = [:]) async throws -> (JSONValue, Int) {
+        let start = DispatchTime.now().uptimeNanoseconds
+        let payload: JSONValue = .object([
+            "jsonrpc": .string("2.0"),
+            "id": .number(1),
+            "method": .string(method),
+            "params": .object(params),
+        ])
+        let data = try JSONEncoder().encode(payload)
+        let req = try JSONDecoder().decode(RPCRequest.self, from: data)
+        let result = try await server.handle(req)
+        let ms = Int((DispatchTime.now().uptimeNanoseconds - start) / 1_000_000)
+        return (result, ms)
+    }
+
+    private func callTool(_ server: MCPServer, name: String, arguments: [String: JSONValue]) async throws -> (String, Bool, Int) {
+        let (res, ms) = try await sendRPC(
+            server,
+            method: "tools/call",
+            params: [
+                "name": .string(name),
+                "arguments": .object(arguments),
+            ]
+        )
+        let isErr = res["isError"]?.boolValue ?? false
+        let text = res["content"]?.arrayValue?.first?["text"]?.stringValue ?? "\(res)"
+        return (text, isErr, ms)
+    }
+
+    private func runSelectedTool() async {
+        guard let server = makeServer() else { return }
+        running = true
+        defer { running = false }
+
+        let trimmed = parameterInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        let secondary = secondaryInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        var args: [String: JSONValue] = [:]
+
+        switch selectedTool {
+        case .ask:
+            args["query"] = .string(trimmed.isEmpty ? "What is OpenCore?" : trimmed)
+            if !secondary.isEmpty { args["as_of"] = .string(secondary) }
+        case .search:
+            args["query"] = .string(trimmed.isEmpty ? "OpenCore" : trimmed)
+            args["limit"] = .number(6)
+        case .claims:
+            args["entity"] = .string(trimmed.isEmpty ? "OpenCore" : trimmed)
+            if !secondary.isEmpty { args["as_of"] = .string(secondary) }
+        case .dossier:
+            args["entity"] = .string(trimmed.isEmpty ? "OpenCore" : trimmed)
+        case .timeline:
+            args["days"] = .number(90)
+            if !trimmed.isEmpty { args["entity"] = .string(trimmed) }
+        case .contradictions:
+            args["unresolved_only"] = .bool(trimmed.lowercased().contains("unresolved"))
+        case .changed:
+            args["days"] = .number(Double(Int(trimmed) ?? 30))
+        case .trace:
+            args["receipt"] = .string(trimmed)
+        }
+
+        do {
+            let (text, _, ms) = try await callTool(server, name: selectedTool.rawValue, arguments: args)
+            outputText = text
+            lastLatencyMs = ms
+        } catch {
+            outputText = "RPC error: \(error)"
+            lastLatencyMs = nil
+        }
+    }
+
+    private func runFullHealthcheck() async {
+        guard let server = makeServer(), let store = model.store else { return }
+        running = true
+        defer { running = false }
+
+        var rows: [CheckRow] = []
+        let sampleEntity = (try? await store.entitiesByActivity(limit: 1).first?.0.canonicalName) ?? "OpenCore"
+
+        do {
+            let (initRes, ms) = try await sendRPC(server, method: "initialize", params: ["protocolVersion": .string("2025-11-25")])
+            let ver = initRes["protocolVersion"]?.stringValue ?? "?"
+            rows.append(CheckRow(id: "initialize", endpoint: "initialize", passed: ver == "2025-11-25", milliseconds: ms, preview: "protocolVersion: \(ver)"))
+        } catch {
+            rows.append(CheckRow(id: "initialize", endpoint: "initialize", passed: false, milliseconds: 0, preview: "\(error)"))
+        }
+
+        do {
+            let (pingRes, ms) = try await sendRPC(server, method: "ping")
+            rows.append(CheckRow(id: "ping", endpoint: "ping", passed: pingRes.objectValue != nil, milliseconds: ms, preview: "200 OK"))
+        } catch {
+            rows.append(CheckRow(id: "ping", endpoint: "ping", passed: false, milliseconds: 0, preview: "\(error)"))
+        }
+
+        do {
+            let (listRes, ms) = try await sendRPC(server, method: "tools/list")
+            let count = listRes["tools"]?.arrayValue?.count ?? 0
+            rows.append(CheckRow(id: "tools/list", endpoint: "tools/list", passed: count == 8, milliseconds: ms, preview: "\(count) tools registered"))
+        } catch {
+            rows.append(CheckRow(id: "tools/list", endpoint: "tools/list", passed: false, milliseconds: 0, preview: "\(error)"))
+        }
+
+        let toolCalls: [(String, [String: JSONValue])] = [
+            ("core_ask", ["query": .string("What is \(sampleEntity)?")]),
+            ("core_search", ["query": .string(sampleEntity), "limit": .number(4)]),
+            ("core_claims", ["entity": .string(sampleEntity)]),
+            ("core_dossier", ["entity": .string(sampleEntity)]),
+            ("core_timeline", ["days": .number(90)]),
+            ("core_contradictions", ["unresolved_only": .bool(false)]),
+            ("core_changed", ["days": .number(30)]),
+        ]
+
+        var latestReceiptCode = "oc_none"
+        for (name, args) in toolCalls {
+            do {
+                let (text, isErr, ms) = try await callTool(server, name: name, arguments: args)
+                if name == "core_ask",
+                   let code = text.components(separatedBy: "--- receipt ").dropFirst().first?.components(separatedBy: " ---").first {
+                    latestReceiptCode = code
+                }
+                let firstLine = text.split(whereSeparator: \.isNewline).first.map(String.init) ?? text
+                rows.append(CheckRow(id: name, endpoint: name, passed: !isErr && !text.isEmpty, milliseconds: ms, preview: firstLine))
+            } catch {
+                rows.append(CheckRow(id: name, endpoint: name, passed: false, milliseconds: 0, preview: "\(error)"))
+            }
+        }
+
+        do {
+            let (text, isErr, ms) = try await callTool(server, name: "core_trace", arguments: ["receipt": .string(latestReceiptCode)])
+            let firstLine = text.split(whereSeparator: \.isNewline).first.map(String.init) ?? text
+            rows.append(CheckRow(id: "core_trace", endpoint: "core_trace", passed: !isErr && !text.isEmpty, milliseconds: ms, preview: firstLine))
+        } catch {
+            rows.append(CheckRow(id: "core_trace", endpoint: "core_trace", passed: false, milliseconds: 0, preview: "\(error)"))
+        }
+
+        healthChecks = rows
     }
 }

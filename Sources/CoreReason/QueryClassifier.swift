@@ -24,8 +24,8 @@ public struct QueryClassifier: Sendable {
         (.aggregate, ["how many", "how much", "number of", "count of", "how often", "total number"]),
         (.causal, ["why", "what caused", "what led", "reason for", "because", "how come", "what made"]),
         (.differential, ["what changed", "what's new", "whats new", "since last", "diff", "this week", "recently changed"]),
-        (.temporal, ["when", "what was i", "back in", "in march", "last year", "six months ago", "at the time", "history of"]),
-        (.analytical, ["pattern", "across", "trend", "keep", "recurring", "common", "compare", "over time"]),
+        (.temporal, ["when", "what was i", "back in", "in march", "last year", "six months ago", "at the time", "history of", "recently", "lately"]),
+        (.analytical, ["pattern", "across", "trend", "keep", "recurring", "common", "compare", "over time", "difference between"]),
         (.epistemic, ["what do you know", "what do you believe", "how confident", "why do you think", "how sure", "what makes you"]),
     ]
 

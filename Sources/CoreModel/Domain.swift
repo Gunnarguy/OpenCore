@@ -6,6 +6,8 @@ import Foundation
 /// Enforcement lives in `CoreSearch.AdmissionPolicy`, not here. This type only names the
 /// compartments and the default read set for each.
 public enum Domain: String, Sendable, Codable, CaseIterable {
+    /// Mixed or unclassified imported memory. Only an explicit unsafe admission may read it.
+    case restricted
     case project
     case work
     case personal
@@ -18,6 +20,7 @@ public enum Domain: String, Sendable, Codable, CaseIterable {
     /// even on a perfect semantic match.
     public var readableDomains: Set<Domain> {
         switch self {
+        case .restricted: []
         case .project: [.project, .publicRecord]
         case .work: [.work, .project, .publicRecord]
         case .personal: [.personal, .publicRecord]
@@ -29,7 +32,7 @@ public enum Domain: String, Sendable, Codable, CaseIterable {
     }
 
     /// Domains that never appear in an answer without the user naming them in the query.
-    public static let sensitive: Set<Domain> = [.medical, .financial, .relationship]
+    public static let sensitive: Set<Domain> = [.medical, .financial, .relationship, .restricted]
 
     public var isSensitive: Bool { Domain.sensitive.contains(self) }
 }

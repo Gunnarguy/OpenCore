@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "OpenCore",
-    platforms: [.macOS(.v15)],
+    platforms: [.macOS(.v26)],
     products: [
         .library(name: "OpenCoreKit", targets: ["CoreModel", "CoreJSONRPC", "CoreTelemetry", "CoreStore", "CoreIngest", "CoreGraph", "CoreSearch", "CoreReason", "CoreMCP"]),
         .executable(name: "opencore", targets: ["opencore"]),
@@ -51,7 +51,7 @@ let package = Package(
         .testTarget(name: "CoreGraphTests", dependencies: ["CoreGraph", "CoreSearch", "CoreIngest", "CoreJSONRPC", "CoreStore", "CoreModel"]),
         .testTarget(name: "CoreReasonTests", dependencies: ["CoreReason", "CoreSearch", "CoreStore", "CoreModel"]),
         .testTarget(name: "CoreSearchTests", dependencies: ["CoreSearch", "CoreStore", "CoreModel"]),
-        .testTarget(name: "CoreMCPTests", dependencies: ["CoreMCP"]),
+        .testTarget(name: "CoreMCPTests", dependencies: ["CoreMCP", "CoreReason", "CoreGraph", "CoreSearch", "CoreIngest", "CoreStore", "CoreModel", "CoreJSONRPC"]),
         .testTarget(name: "CoreTelemetryTests", dependencies: ["CoreTelemetry"]),
     ]
 )

@@ -48,7 +48,7 @@ func positional(_ index: Int) -> String? {
 
 let Self_booleanFlags: Set<String> = [
     "open", "include-forks", "help", "unsafe-expose-sensitive", "no-context", "verbose",
-    "telemetry", "telemetry-summary",
+    "telemetry", "telemetry-summary", "fm", "no-fm", "apply",
 ]
 
 func parseDuration(_ text: String) -> TimeInterval? {
@@ -136,7 +136,9 @@ func usage() {
       opencore passages "TEXT" [--no-context]  passage retrieval: dense + BM25, RRF, MMR
       opencore eval [--file F] [--k N] [--verbose]
                                                  retrieval quality per leg over a benchmark
-      opencore ask "QUESTION"                an answer assembled from claims, with a receipt
+      opencore ask "QUESTION" [--no-fm]      an answer assembled from claims + /usr/bin/fm synthesis
+      opencore propose-claims [--entity NAME | --object ID | --limit N]
+                                                 extract byte-verified modelInference claims via /usr/bin/fm
 
     KNOWLEDGE
       opencore claims [ENTITY]               current claims, observed vs inferred
@@ -152,8 +154,12 @@ func usage() {
 
     INFRASTRUCTURE
       opencore mcp [--unsafe-expose-sensitive]   serve MCP over stdio
+      opencore daemon install|status|uninstall|run   scheduled background sync + embed
+      opencore repair-agent-memory [--apply --backup PATH]   dry-run imported memory policy repair; --apply creates NEW backup
       opencore doctor                            database, credentials, coverage
-      opencore rebuild [--no-embed]              re-derive everything from objects
+      opencore rebuild [--work-dir DIR]          rehearse a rebuild on a copy and show the difference
+      opencore rebuild --explain DIR             list every change in a rehearsal, by id and reason
+      opencore rebuild --apply-rehearsal DIR     apply a reviewed rehearsal, in one transaction
       opencore export [--format jsonl|markdown] [--to DIR]
                                                  everything back out, in a format you own
 
@@ -204,6 +210,9 @@ func report(_ outcome: IngestPipeline.Outcome) {
     print("events      \(outcome.events)")
     print("beliefs     \(outcome.beliefs) written")
     print("conflicts   \(outcome.contradictions) found — \(outcome.contradictionsResolved) resolved, \(outcome.contradictionsOpen) left open")
+    if outcome.documentSuccessions > 0 {
+        print("revisions   \(outcome.documentSuccessions) replaced by a newer revision of their own document")
+    }
     if outcome.chunks > 0 {
         print("\nnext: opencore embed   (passages are indexed lexically; vectors are separate)")
     }
@@ -316,6 +325,55 @@ func syncFiles() async throws {
     try await runSync(FilesystemConnector(handle: handle, roots: roots), label: "files")
 }
 
+func syncAgentMemory() async throws {
+    if let problem = LocalPrivateNames.currentProblem {
+        FileHandle.standardError.write(Data("note: \(problem.explanation)\n".utf8))
+    }
+    let memories = AgentMemoryPolicy.discoverMemories()
+    let repositories = AgentMemoryPolicy.discoverRepositories()
+    let roots = memories.roots + repositories.roots
+
+    guard !roots.isEmpty else {
+        print("no agent memory or repository anchor docs found")
+        return
+    }
+    try await runSync(
+        FilesystemConnector(handle: "Cross-Agent-Memory", roots: roots, knownUnread: memories.unread + repositories.unread),
+        label: "Cross-Agent Memory & Repo Docs (\(roots.count) roots)"
+    )
+}
+
+/// Defaults to a report only. Applying creates a consistent SQLite backup at a new path.
+func repairAgentMemoryPolicy() async throws {
+    if let problem = LocalPrivateNames.currentProblem {
+        FileHandle.standardError.write(Data("note: \(problem.explanation)\n".utf8))
+    }
+    let store = try await openStore()
+    let filesystemSources = Set(try await store.sources().filter {
+        $0.kind == .filesystem && (["agent-memory", "files:agent-memory", "Claude-Memory", "Cross-Agent-Memory", "GitHub-Workspace"].contains($0.handle) || $0.handle.hasPrefix("Repo-"))
+    }.map(\.id))
+    let repairs = try await store.allObjects().compactMap { object -> Store.ObjectPolicyRepair? in
+        guard filesystemSources.contains(object.sourceID),
+              let policy = AgentMemoryPolicy.classification(for: URL(fileURLWithPath: object.externalID)) else { return nil }
+        return Store.ObjectPolicyRepair(objectID: object.id, domain: policy.domain, authority: policy.authority, reason: "cross-agent import policy repair")
+    }
+    if flag("apply") {
+        guard let backup = option("backup") else {
+            throw StoreError.notFound("--apply requires --backup NEW_PATH; the command creates its own consistent backup")
+        }
+        let backupURL = URL(fileURLWithPath: (backup as NSString).expandingTildeInPath)
+        try await store.createPolicyRepairBackup(at: backupURL)
+        print("Created a private, consistent backup before policy repair.")
+    }
+    let report = try await store.reclassifyObjects(repairs, dryRun: !flag("apply"))
+    print("\(flag("apply") ? "Applied" : "Dry run"): \(report.objectsChanged) floor policies, \(report.versionsChanged) historical policies, \(report.claimsQuarantined) backed claim rows quarantined.")
+    if flag("apply") { print("Restricted legacy snapshots added: \(report.legacySnapshotsAdded)") }
+    print("Pending reviewed replay: \(report.objectsPendingRebuild) object(s).")
+    if report.requiresRebuild {
+        print("Derived interpretations require an audited rebuild. Corrections and receipts were preserved; do not run the existing destructive rebuild blindly.")
+    }
+}
+
 func syncApple(_ what: String) async throws {
     switch what {
     case "calendar":
@@ -338,20 +396,21 @@ func runSync(_ connector: any Connector, label: String) async throws {
     let started = Date()
 
     // Incremental where the connector supports it: pick up where the last sync stopped.
-    let since = try await store.sources().first { $0.id == connector.source.id }?.lastSyncedAt
-    if let since { progress("incremental since \(dateFormatter.string(from: since))") }
-
-    let batch = try await connector.fetch(since: since, cursor: nil, log: progress)
-    guard !batch.objects.isEmpty else {
-        print("nothing new")
-        try await store.markSynced(connector.source.id, at: Date(), cursor: batch.cursor)
+    let result = try await SourceSync(store: store, pipeline: IngestPipeline(store: store)).run(
+        connector.source.id,
+        log: progress,
+        phase: { phase in
+            if case .fetching(let since?) = phase { progress("incremental since \(dateFormatter.string(from: since))") }
+        },
+        fetch: { since in try await connector.fetch(since: since, cursor: nil, log: progress) }
+    )
+    guard let outcome = result.derived else {
+        print(result.heldBecause ?? "nothing new")
         return
     }
 
-    let outcome = try await IngestPipeline(store: store).run(objects: batch.objects, log: progress)
-    try await store.markSynced(connector.source.id, at: Date(), cursor: batch.cursor)
-
     report(outcome)
+    if let held = result.heldBecause { print("\nincomplete: \(held)") }
     print("\ndone in \(Int(Date().timeIntervalSince(started)))s")
 }
 
@@ -426,15 +485,22 @@ func runPassages(_ query: String) async throws {
     let classification = QueryClassifier().classify(query)
 
     let search = PassageSearch(store: store, embedder: embedder(quiet: true))
+    let window = TemporalIntent.window(in: query)
+    let searchText = window?.searchText ?? query
     let outcome = try await search.search(
-        query: query,
+        query: searchText,
         queryClass: classification.queryClass,
         policy: policy,
         limit: option("limit").flatMap(Int.init) ?? 8,
-        expandContext: !flag("no-context")
+        expandContext: !flag("no-context"),
+        window: window?.interval
     )
 
     print("class       \(classification.queryClass.rawValue)")
+    if let window {
+        print(try await store.windowReport(window, domains: policy.admitted, calendar: .current).text)
+        if searchText.isEmpty { print("This names a span and no topic, so no passage was read. `opencore ask` answers it from the event log.") }
+    }
     print("legs        lexical \(outcome.lexicalCandidates) · dense \(outcome.denseCandidates) → fused \(outcome.afterFusion)")
     print("timings     " + outcome.stageTimings.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)ms" }.joined(separator: " · "))
     print("chunks      \(outcome.chunksSearched) searched, \(outcome.blockedByDomain) withheld by domain, \(outcome.droppedByDiversity) dropped by MMR")
@@ -459,6 +525,10 @@ func ask(_ query: String) async throws {
     // object-level scorer, which meant `ask` never touched the dense index.
     let reasoner = Reasoner(store: store, embedder: embedder(quiet: true))
     let answer = try await reasoner.answer(query)
+    // Chosen, not measured, and the same two limits `core_ask` prints with. The answer's ordering
+    // is what makes a cut safe, so the question's own line is above it.
+    let pointsShown = 12
+    let passagesShown = 5
 
     print("Q: \(query)\n")
 
@@ -472,7 +542,18 @@ func ask(_ query: String) async throws {
         print(insufficient)
     } else {
         print(answer.summary + "\n")
-        for point in answer.points.prefix(12) {
+        if let activity = answer.activity, activity.totalEvents > 0 {
+            print("Activity in this window, from the event log")
+            for group in activity.groups {
+                let upkeep = group.upkeep > 0 ? " and \(group.upkeep) upkeep" : ""
+                print("  \(group.subject.canonicalName): \(group.events) \(group.verb)\(upkeep), latest \(dateFormatter.string(from: group.lastAt))")
+                for event in group.latest {
+                    print("    \(dateFormatter.string(from: event.occurredAt))  \(event.detail.replacingOccurrences(of: "\n", with: " ").prefix(100))")
+                }
+            }
+            print("")
+        }
+        for point in answer.points.prefix(pointsShown) {
             print("\(point.derivation == .observed ? "•" : "~") \(point.statement)")
             print("  confidence \(String(format: "%.2f", point.confidence)) · \(point.authority.label) · \(point.derivation.rawValue)")
             for evidence in point.supporting.prefix(2) {
@@ -482,7 +563,19 @@ func ask(_ query: String) async throws {
                 print("  ✗ counter: \(evidence.snippet.replacingOccurrences(of: "\n", with: " ").prefix(110))")
             }
         }
-        print("\n  • observed directly    ~ inferred")
+        if answer.points.count > pointsShown {
+            print("  (\(pointsShown) of \(answer.points.count) claims shown, most relevant first)")
+        }
+        if !answer.points.isEmpty { print("\n  • observed directly    ~ inferred") }
+        // The summary says how many passages matched, and `--no-fm` used to show none of them.
+        if !answer.passages.isEmpty {
+            print("\nMatching passages")
+            for hit in answer.passages.prefix(passagesShown) {
+                let date = hit.object.authoredAt.map { " · \(dateFormatter.string(from: $0))" } ?? ""
+                print("  \(hit.object.title) [\(hit.object.kind.rawValue)\(date)]")
+                print("    \(hit.chunk.text.replacingOccurrences(of: "\n", with: " ").prefix(160))")
+            }
+        }
     }
 
     if !answer.contradictions.isEmpty {
@@ -493,7 +586,93 @@ func ask(_ query: String) async throws {
         }
     }
 
+    if answer.counted == nil, !flag("no-fm") {
+        let (domain, requested) = AdmissionPolicy.classifyDomain(
+            query,
+            knownEntitySurfaces: try await store.aliasSurfaces()
+        )
+        let policy = AdmissionPolicy(queryDomain: domain, explicitlyRequested: requested)
+        let passageSearch = PassageSearch(store: store, embedder: embedder(quiet: true))
+        // The text and window the answer used, so this summary cannot range over all of time
+        // beneath an answer that says it read one week.
+        if let outcome = try? await passageSearch.search(
+            query: answer.searchedText ?? query,
+            queryClass: answer.receipt.queryClass,
+            policy: policy,
+            limit: 5,
+            window: answer.window?.interval
+        ) {
+            var sources: [GroundingSource] = []
+            for hit in outcome.hits {
+                sources.append(GroundingSource(
+                    index: sources.count + 1,
+                    title: hit.object.title,
+                    text: hit.chunk.text,
+                    objectID: hit.object.id,
+                    authority: hit.object.authority,
+                    uri: hit.object.uri
+                ))
+            }
+            if !sources.isEmpty, let brief = await Conversation.synthesizeGroundedBrief(question: query, sources: sources) {
+                let groundedCount = brief.verdicts.filter(\.isGrounded).count
+                print("\n── supplemental passage summary (\(brief.modelName)); separate retrieval, no persisted receipt ──")
+                print(brief.text)
+                print("  grounding   \(groundedCount)/\(brief.verdicts.count) sentences passed citation and lexical-overlap checks")
+                for src in brief.sources {
+                    print("  [\(src.index)] \(src.title) (\(src.authority.label)); object: \(src.objectID.value); uri: \(src.uri ?? "none")")
+                }
+            }
+        }
+    }
+
+    print("\nThe receipt below covers the claim answer, excluding the supplemental passage summary.")
     printReceipt(answer.receipt)
+}
+
+func proposeClaims() async throws {
+    let store = try await openStore()
+    let proposer = ModelClaimProposer(store: store)
+    let limit = option("limit").flatMap(Int.init) ?? 4
+
+    var outcomes: [ModelClaimProposer.ProposalOutcome] = []
+    if let objectIDText = option("object") {
+        guard let object = try await store.object(ObjectID(objectIDText)) else {
+            print("no object with id '\(objectIDText)'")
+            exit(1)
+        }
+        outcomes.append(try await proposer.propose(from: object))
+    } else if let entityName = option("entity") ?? positional(1) {
+        guard let entity = try await store.resolve(surface: entityName).first?.0 else {
+            print("no entity known as '\(entityName)'")
+            exit(1)
+        }
+        print("proposing byte-verified modelInference claims for \(entity.canonicalName) (\(entity.kind.rawValue))...")
+        outcomes = try await proposer.proposeForEntity(entity.id, limit: limit)
+    } else {
+        let all = try await store.allObjects()
+            .filter { $0.kind == .note || $0.kind == .document || $0.kind == .file }
+            .prefix(limit)
+        for object in all {
+            outcomes.append(try await proposer.propose(from: object))
+        }
+    }
+
+    guard !outcomes.isEmpty else {
+        print("no matching objects found to propose claims from")
+        return
+    }
+
+    var totalVerified = 0
+    for outcome in outcomes {
+        totalVerified += outcome.verifiedProposals.count
+        print("\n\(outcome.objectTitle)  [\(outcome.modelName)]")
+        print("  proposed \(outcome.candidatesProposed) · byte-verified \(outcome.verifiedProposals.count) · rejected (unverified span) \(outcome.rejectedUnverifiedSpan)")
+        for prop in outcome.verifiedProposals {
+            print("  ~ [modelInference] \(prop.subject) \(prop.predicate) → \(prop.value)")
+            print("    quote: \"\(prop.verbatimQuote.prefix(120))\"")
+        }
+    }
+    print("\n\(totalVerified) byte-verified modelInference claim(s) reconciled across \(outcomes.count) object(s)")
 }
 
 func printReceipt(_ receipt: Receipt) {
@@ -522,6 +701,8 @@ func printReceipt(_ receipt: Receipt) {
 
 func listClaims(_ entityName: String?) async throws {
     let store = try await openStore()
+    let asOfWorld = option("world").flatMap(dateFormatter.date(from:))
+    let asOfKnowledge = option("as-of").flatMap(dateFormatter.date(from:))
 
     let claims: [CoreClaim]
     if let entityName {
@@ -530,11 +711,17 @@ func listClaims(_ entityName: String?) async throws {
             return
         }
         print("\(entity.canonicalName) (\(entity.kind.rawValue))\n")
-        claims = try await store.claims(subject: entity.id)
+        claims = try await store.claims(
+            subject: entity.id,
+            currentOnly: asOfWorld == nil && asOfKnowledge == nil,
+            asOfWorld: asOfWorld,
+            asOfKnowledge: asOfKnowledge
+        )
     } else {
         claims = try await store.allClaims(limit: option("limit").flatMap(Int.init) ?? 60)
     }
 
+    var printedHistoryKeys: Set<String> = []
     for claim in claims {
         let value = try await claimValue(claim, in: store)
         let subject = try await subjectName(claim, in: store)
@@ -542,6 +729,14 @@ func listClaims(_ entityName: String?) async throws {
         print("\(claim.derivation == .observed ? "•" : "~") \(subject) \(claim.predicate) \(value)")
         // The id prefix is printed so `opencore correct` has something to name.
         print("   \(claim.id.value.prefix(8))  conf \(String(format: "%.2f", claim.confidence)) · \(claim.authority.label)\(validity)")
+        if printedHistoryKeys.insert(claim.claimKey).inserted {
+            let history = try await store.beliefHistory(key: claim.claimKey)
+            if history.count > 1 {
+                for belief in history {
+                    print("   v\(belief.version) (\(dateFormatter.string(from: belief.decidedAt))): \(belief.reason)")
+                }
+            }
+        }
     }
     print("\n\(claims.count) claims  · observed  ~ inferred")
 }
@@ -596,8 +791,9 @@ func memoryCheckout(_ dateText: String) async throws {
         print("date must be YYYY-MM-DD")
         return
     }
+    let world = option("world").flatMap(dateFormatter.date(from:))
     let store = try await openStore()
-    let beliefs = try await store.beliefs(asOfKnowledge: instant)
+    let beliefs = try await store.beliefs(asOfKnowledge: instant, asOfWorld: world)
 
     print("what OpenCore believed on \(dateText)\n")
     guard !beliefs.isEmpty else {
@@ -639,9 +835,13 @@ func trace(_ code: String) async throws {
     guard !rows.isEmpty else {
         // Counted answers cite nothing by construction. Saying so distinguishes them from an
         // answer that genuinely had nothing behind it.
-        print(receipt.queryClass == .aggregate
-            ? "computed count over \(receipt.objectsSearched) admitted rows; cites no evidence because none was read"
-            : "this receipt admitted no evidence")
+        if receipt.queryClass == .aggregate {
+            print("computed count over \(receipt.objectsSearched) admitted rows; cites no evidence because none was read")
+        } else if !receipt.answeredFromClaims, receipt.evidenceAdmitted > 0 {
+            print("answered from \(receipt.evidenceAdmitted) passage(s) and read no claims, so it has no evidence rows to trace")
+        } else {
+            print("this receipt admitted no evidence")
+        }
         printReceipt(receipt)
         return
     }
@@ -684,9 +884,8 @@ func listChats() async throws {
 
 func chat(_ question: String, resuming: String? = nil) async throws {
     let readiness = Conversation.readiness()
-    guard readiness.isReady else {
-        print(readiness.message)
-        exit(1)
+    if !readiness.isReady {
+        progress(readiness.message)
     }
 
     let store = try await openStore()
@@ -716,8 +915,11 @@ func chat(_ question: String, resuming: String? = nil) async throws {
     guard let turn = final else { return }
 
     if let error = turn.error {
-        print("error: \(error)")
-        exit(1)
+        progress("note: \(error)")
+        if turn.text.isEmpty {
+            print("error: \(error)")
+            exit(1)
+        }
     }
 
     print("\n\(turn.text)\n")
@@ -865,24 +1067,122 @@ func correctClaim(_ prefix: String) async throws {
 
 // MARK: - Rebuild
 
+/// `opencore rebuild` rehearses on a copy and prints what would change. It never writes to the
+/// store it was pointed at. `--apply-rehearsal DIR` is the separate, reviewed step.
 func rebuild() async throws {
+    if let rehearsal = option("explain") {
+        printExplanation(try RebuildReport.load(from: URL(fileURLWithPath: (rehearsal as NSString).expandingTildeInPath)))
+        return
+    }
     let store = try await openStore()
-    let objectCount = try await store.objectCount()
-    print("re-deriving from \(objectCount) objects (objects themselves are not touched)")
+    if let approved = option("apply-rehearsal") {
+        let directory = URL(fileURLWithPath: (approved as NSString).expandingTildeInPath)
+        let report = try RebuildReport.load(from: directory)
+        printRehearsal(report)
+        let outcome: RebuildApplyOutcome
+        do {
+            outcome = try await RebuildRehearsal(store: store).apply(report)
+        } catch let refusal as RebuildSafetyError {
+            FileHandle.standardError.write(Data("\n\(refusal.localizedDescription)\n".utf8))
+            exit(1)
+        }
+        print("\napplied. The store as it was is in \(outcome.backupPath).")
+        print("past answers traced after applying: \(outcome.receipts.filter { $0.outcome == .resolves }.count) resolve, \(outcome.receiptsBroken) broken, \(outcome.receipts.filter { $0.outcome == .noLinks }.count) had no links")
+        try await reembed(store: store, because: "applying a rehearsal left passages without vectors")
+        return
+    }
 
-    // Proof that the trust stack holds. Vectors go too: they are derived from chunk text,
-    // and a chunk whose boundaries moved has a vector that describes text that no longer
-    // exists.
-    try await store.dropDerivedLayers()
-    let outcome = try await IngestPipeline(store: store).rederive(log: progress)
-    report(outcome)
+    let directory = option("work-dir").map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }
+        ?? RebuildRehearsal.defaultDirectory()
+    print("rehearsing on a copy in \(directory.path)")
+    print("the store itself is not touched\n")
+    let report = try await RebuildRehearsal(store: store).rehearse(in: directory, log: progress)
+    printRehearsal(report)
+    if report.canApply {
+        print("\nTo apply this after reading it:")
+        print("  opencore rebuild --apply-rehearsal \"\(directory.path)\"")
+    }
+}
 
-    // Vectors are a derived layer like every other, and this is the command that promises to
-    // reconstruct all of them. Dropping them and stopping left retrieval silently lexical-only
-    // until someone remembered to run `embed`: the dense leg contributed nothing, no error was
-    // raised, and results looked plausible because BM25 still returned something. Re-embedding
-    // here is what makes "objects are the floor" true for the dense leg too.
-    try await reembed(store: store, because: "rebuild dropped every vector")
+func printRehearsal(_ report: RebuildReport) {
+    let diff = report.diff
+    print(String(format: "rehearsal took %.0fs", report.seconds))
+    print("")
+    print("  table               before     after")
+    for row in diff.counts {
+        print("  \(row.table.padding(toLength: 18, withPad: " ", startingAt: 0))  \(String(format: "%6d    %6d", row.before, row.after))\(row.before == row.after ? "" : "   (\(row.after > row.before ? "+" : "")\(row.after - row.before))")")
+    }
+    print("")
+    print("  claims retired          \(diff.claimsRetired)")
+    print("  claim rows dropped      \(diff.claimRowsDropped)")
+    print("  claims restored         \(diff.claimsRestored)")
+    print("  claims added            \(diff.claimsAdded)")
+    print("  domains raised          \(diff.domainsRaised)")
+    print("  domains lowered         \(diff.domainsLowered)")
+    print("  authority changed       \(diff.authorityChanged)")
+    print("  held in quarantine      \(diff.quarantineHeld)")
+    print("  beliefs changed         \(diff.beliefsChanged)")
+    print("  beliefs added           \(diff.beliefsAdded)")
+    print("  open contradictions     \(diff.openContradictionsBefore) -> \(diff.openContradictionsAfter)")
+    print("  contradiction rows lost \(diff.contradictionRowsDropped)")
+    print("  belief versions lost    \(diff.beliefVersionsDropped)")
+    print("  receipts in store       \(diff.receiptsTotal)")
+    print("    with evidence rows    \(diff.receiptsWithEvidence)")
+    print("    with claim links      \(diff.receiptsWithClaims)")
+    print("    trace resolves        \(diff.receiptsResolving)")
+    print("    trace broken          \(diff.receiptsBroken)")
+    print("    never had links       \(diff.receiptsWithoutLinks)")
+    print("  receipt links kept      \(diff.receiptLinksKept) of \(diff.receiptLinksBefore)")
+    print("  corrections kept        \(diff.correctionsKept) of \(diff.correctionsBefore)")
+    print("  corrections undone      \(diff.correctionsUndone)")
+    print("  passages needing vector \(diff.chunksWithoutVector)")
+    let narrative = RebuildNarrative(report)
+    print("\n\(narrative.headline)")
+    for finding in narrative.findings {
+        print("\n  \(finding.title): \(finding.summary)")
+        finding.breakdown.forEach { print("    \($0)") }
+    }
+    print("\n  Every change, by id and reason: opencore rebuild --explain \"\((report.pristinePath as NSString).deletingLastPathComponent)\"")
+    for (name, rows) in diff.samples.sorted(by: { $0.key < $1.key }) where !rows.isEmpty {
+        print("\n  \(name), first \(rows.count):")
+        for row in rows.prefix(8) {
+            print("    \(row.subject) \(row.predicate) = \(row.value.prefix(70))\(row.note.map { "  (\($0.prefix(70)))" } ?? "")")
+        }
+    }
+    if !report.warnings.isEmpty {
+        print("\nWARNINGS")
+        report.warnings.forEach { print("  \($0)") }
+    }
+    if !report.blockers.isEmpty {
+        print("\nBLOCKED, this rehearsal cannot be applied")
+        report.blockers.forEach { print("  \($0)") }
+    }
+}
+
+/// Every row behind a rehearsal's totals. Prints the owner's own claims, so it stays a terminal
+/// command and writes no file.
+func printExplanation(_ report: RebuildReport) {
+    let explanation = report.explanation
+    print("claims (\(explanation.claims.count) changes, \(explanation.unexplained) unexplained)")
+    for change in explanation.claims {
+        let authority = change.authorityBefore.map { "\($0)" } ?? "-"
+        print("  \(change.claimID)  \(change.kind.rawValue)  \(change.reason.rawValue)  authority \(authority)>\(change.authorityAfter)  domain \(change.domainBefore ?? "-")>\(change.domainAfter)\(change.heldAtEarlierDomain ? "  held" : "")\(change.relatedClaimID.map { "  see \($0)" } ?? "")")
+        print("    \(change.subject) \(change.predicate) = \(change.value.prefix(90))")
+    }
+    print("\nbeliefs (\(explanation.beliefs.count))")
+    for belief in explanation.beliefs {
+        print("  \(belief.subject) \(belief.predicate)  \(belief.reason.rawValue)")
+        print("    was \(belief.before.map { String($0.prefix(80)) } ?? "no belief") (\(belief.claimBefore ?? "-"))")
+        print("    now \(belief.after.prefix(80)) (\(belief.claimAfter))")
+    }
+    print("\ncontradictions (\(explanation.contradictions.count))")
+    for row in explanation.contradictions {
+        print("  \(row.id)  \(row.fate.rawValue)  \(row.subject) \(row.predicate)  \(row.resolutionBefore ?? "-")>\(row.resolutionAfter)")
+    }
+    print("\nreceipts (\(explanation.receipts.count))")
+    for receipt in explanation.receipts {
+        print("  \(receipt.code)  \(receipt.outcome.rawValue)  \(receipt.detail)")
+    }
 }
 
 /// Re-derive the dense leg, or say loudly that it is empty.
@@ -958,6 +1258,105 @@ func serveMCP() async throws {
     await server.run()
 }
 
+// MARK: - Background Daemon
+
+enum DaemonCommands {
+    static let label = "com.gunnar.opencore.sync"
+
+    static var plistURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/LaunchAgents/\(label).plist")
+    }
+
+    static var logURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/opencore-daemon.log")
+    }
+
+    static var binaryPath: String {
+        let localBin = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/bin/opencore").path
+        if FileManager.default.isExecutableFile(atPath: localBin) {
+            return localBin
+        }
+        return CommandLine.arguments.first ?? localBin
+    }
+
+    static func install() throws {
+        let interval = option("interval").flatMap(Int.init) ?? 3600
+        let plistDir = plistURL.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: plistDir, withIntermediateDirectories: true)
+
+        let plist: [String: Any] = [
+            "Label": label,
+            "ProgramArguments": [binaryPath, "daemon", "run"],
+            "StartInterval": interval,
+            "RunAtLoad": false,
+            "StandardOutPath": logURL.path,
+            "StandardErrorPath": logURL.path,
+            "ProcessType": "Background",
+        ]
+        let data = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+        try data.write(to: plistURL, options: .atomic)
+
+        let uid = getuid()
+        _ = runLaunchctl(["bootout", "gui/\(uid)/\(label)"])
+        let boot = runLaunchctl(["bootstrap", "gui/\(uid)", plistURL.path])
+        print("installed   \(plistURL.path)")
+        print("binary      \(binaryPath)")
+        print("interval    every \(interval)s")
+        print("log         \(logURL.path)")
+        print("launchctl   \(boot == 0 ? "loaded" : "written (load with launchctl bootstrap)")")
+    }
+
+    static func uninstall() throws {
+        let uid = getuid()
+        _ = runLaunchctl(["bootout", "gui/\(uid)/\(label)"])
+        if FileManager.default.fileExists(atPath: plistURL.path) {
+            try FileManager.default.removeItem(at: plistURL)
+            print("removed     \(plistURL.path)")
+        } else {
+            print("daemon is not installed")
+        }
+    }
+
+    static func status() {
+        let installed = FileManager.default.fileExists(atPath: plistURL.path)
+        let uid = getuid()
+        let loaded = runLaunchctl(["print", "gui/\(uid)/\(label)"]) == 0
+        print("label       \(label)")
+        print("plist       \(installed ? plistURL.path : "not installed")")
+        print("state       \(loaded ? "loaded in launchd" : (installed ? "plist present, not loaded" : "inactive"))")
+        print("log         \(logURL.path)")
+    }
+
+    static func run() async throws {
+        print("[\(ISO8601DateFormatter().string(from: Date()))] opencore daemon run starting")
+        try? await syncAgentMemory()
+        if GitHubConnector.resolveToken() != nil {
+            try? await syncGitHub()
+        }
+        try? await syncApple("notes")
+        try? await embed()
+        print("[\(ISO8601DateFormatter().string(from: Date()))] opencore daemon run finished")
+    }
+
+    private static func runLaunchctl(_ args: [String]) -> Int32 {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        proc.arguments = args
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+            return proc.terminationStatus
+        } catch {
+            return -1
+        }
+    }
+}
+
 // MARK: - Dispatch
 
 do {
@@ -974,14 +1373,17 @@ do {
         switch positional(1) {
         case "github": try await syncGitHub()
         case "files": try await syncFiles()
+        case "agent-memory", "workspace": try await syncAgentMemory()
         case "calendar", "reminders", "notes": try await syncApple(positional(1)!)
         case "mcp":
             guard let name = positional(2) else { print("usage: opencore sync mcp NAME"); exit(1) }
             try await MCPSourceCommands.sync(name)
         default:
-            print("usage: opencore sync github | files | calendar | reminders | notes | mcp NAME")
+            print("usage: opencore sync github | files | agent-memory | calendar | reminders | notes | mcp NAME")
             exit(1)
         }
+    case "repair-agent-memory":
+        try await repairAgentMemoryPolicy()
     case "mcp-source":
         switch positional(1) {
         case "discover": try await MCPSourceCommands.discover()
@@ -1006,8 +1408,10 @@ do {
     case "eval":
         try await Eval.run()
     case "ask":
-        guard let query = positional(1) else { print("usage: opencore ask \"QUESTION\""); exit(1) }
+        guard let query = positional(1) else { print("usage: opencore ask \"QUESTION\" [--no-fm]"); exit(1) }
         try await ask(query)
+    case "propose-claims":
+        try await proposeClaims()
     case "claims":
         try await listClaims(positional(1))
     case "contradictions":
@@ -1047,6 +1451,16 @@ do {
         try await exportStore()
     case "mcp":
         try await serveMCP()
+    case "daemon":
+        switch positional(1) {
+        case "install": try DaemonCommands.install()
+        case "uninstall": try DaemonCommands.uninstall()
+        case "status", nil: DaemonCommands.status()
+        case "run": try await DaemonCommands.run()
+        default:
+            print("usage: opencore daemon install [--interval SECONDS] | status | uninstall | run")
+            exit(1)
+        }
     case "help", "--help", "-h", nil:
         usage()
     case let unknown?:

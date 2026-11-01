@@ -33,7 +33,7 @@ public actor StdioTransport {
             case .launchFailed(let detail): "could not launch server: \(detail)"
             case .timedOut(let method, let seconds): "'\(method)' did not respond within \(Int(seconds))s"
             case .closed(let stderr): "server exited\(stderr.isEmpty ? "" : ": \(stderr.prefix(400))")"
-            case .oversizedMessage: "server sent a message over \(maximumLineBytes / 1_048_576)MB with no newline"
+            case .oversizedMessage: "server sent a message over \(maximumLineBytes / 1_048_576)MB"
             case .malformed(let detail): "malformed response: \(detail)"
             case .remote(let code, let message): "server returned error \(code): \(message)"
             }
@@ -135,17 +135,15 @@ public actor StdioTransport {
     }
 
     private func write(_ value: JSONValue) throws {
-        guard let data = try? JSONEncoder().encode(value),
-              var line = String(data: data, encoding: .utf8)
-        else { throw TransportError.malformed("could not encode outgoing message") }
-
-        // Defensive: an embedded newline would split one message into two invalid ones.
-        line = line.replacingOccurrences(of: "\n", with: " ")
-        guard let payload = (line + "\n").data(using: .utf8) else {
+        guard var payload = try? JSONEncoder().encode(value) else {
             throw TransportError.malformed("could not encode outgoing message")
         }
+        // JSONEncoder escapes embedded string newlines. Framing needs an actual LF byte,
+        // never the two literal characters backslash+n (which leaves peers waiting forever).
+        payload.append(0x0A)
         inputPipe.fileHandleForWriting.write(payload)
     }
+
 }
 
 // MARK: - Line reading
@@ -160,6 +158,7 @@ private final class LineReader: @unchecked Sendable {
     private let lock = NSLock()
     private var buffer = Data()
     private var lines: [String] = []
+    private var oversized = false
     private var finished = false
     private var errorText = Data()
 
@@ -199,11 +198,24 @@ private final class LineReader: @unchecked Sendable {
         // context reachable from async code, because a suspension between them would hold
         // the lock across an await.
         lock.withLock {
+            guard !finished else { return }
+            // Previously every small read rescanned the entire accumulated prefix. An 8 MB
+            // line became quadratic work and could time out before its size was rejected.
+            var scanOffset = buffer.count
             buffer.append(chunk)
 
-            while let newline = buffer.firstIndex(of: 0x0A) {
+            while scanOffset < buffer.count,
+                  let newline = buffer[buffer.index(buffer.startIndex, offsetBy: scanOffset)...].firstIndex(of: 0x0A) {
                 let lineData = buffer[buffer.startIndex..<newline]
+                guard lineData.count <= StdioTransport.maximumLineBytes else {
+                    oversized = true
+                    finished = true
+                    buffer.removeAll()
+                    lines.removeAll()
+                    return
+                }
                 buffer.removeSubrange(buffer.startIndex...newline)
+                scanOffset = 0
                 if let text = String(data: lineData, encoding: .utf8) {
                     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
                     if !trimmed.isEmpty { lines.append(trimmed) }
@@ -211,6 +223,7 @@ private final class LineReader: @unchecked Sendable {
             }
 
             if buffer.count > StdioTransport.maximumLineBytes {
+                oversized = true
                 buffer.removeAll()
                 finished = true
             }
@@ -221,10 +234,12 @@ private final class LineReader: @unchecked Sendable {
     /// stream closed.
     func nextLine(before deadline: Date) async throws -> String? {
         while Date() < deadline {
-            let outcome: (line: String?, done: Bool) = lock.withLock {
-                if !lines.isEmpty { return (lines.removeFirst(), false) }
-                return (nil, finished)
+            let outcome: (line: String?, done: Bool, oversized: Bool) = lock.withLock {
+                if oversized { return (nil, true, true) }
+                if !lines.isEmpty { return (lines.removeFirst(), false, false) }
+                return (nil, finished, false)
             }
+            if outcome.oversized { throw StdioTransport.TransportError.oversizedMessage }
             if let line = outcome.line { return line }
             if outcome.done { return nil }
 

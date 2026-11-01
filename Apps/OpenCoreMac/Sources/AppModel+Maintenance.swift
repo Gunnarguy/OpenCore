@@ -83,28 +83,6 @@ extension AppModel {
         var delta: Int { after - before }
     }
 
-    struct RebuildComparison: Sendable {
-        let before: GraphCounts
-        let after: GraphCounts
-        let outcome: IngestPipeline.Outcome
-
-        /// Load-bearing. If this is false, something above the objects was holding the only
-        /// copy of something, which is the one thing this system promises cannot happen.
-        var reproducedExactly: Bool { before == after }
-
-        var rows: [CountComparison] {
-            let beforeRows = before.labelled
-            let afterRows = after.labelled
-            return beforeRows.indices.map { index in
-                CountComparison(
-                    label: beforeRows[index].label,
-                    before: beforeRows[index].value,
-                    after: afterRows[index].value
-                )
-            }
-        }
-    }
-
     // MARK: - Diagnostics
 
     /// Everything `opencore doctor` prints, gathered in one pass.
@@ -141,54 +119,51 @@ extension AppModel {
 
     // MARK: - Rebuild
 
-    /// Drop every derived layer and re-derive it from the stored objects.
+    /// Rebuild a copy of the store and report the difference. Writes nothing to the store.
     ///
-    /// Mirrors `opencore rebuild` statement for statement, including the table list and the
-    /// page size, so the app and the CLI cannot disagree about what "rebuild" means. The
-    /// before and after counts come back together because reproducing the graph exactly is
-    /// the invariant being tested, and a rebuild that quietly changes the numbers is a bug
-    /// the user needs to see rather than a result to accept.
-    func runRebuild() async -> RebuildComparison? {
+    /// In the sync lane, like applying one: a scheduled sync now writes on its own, and the copy
+    /// a rehearsal reports on should not be moving underneath it.
+    func rehearseRebuild() async -> RebuildReport? {
         guard let store else { return nil }
-        do {
-            state = .working("counting the graph")
-            let before = try await graphCounts(in: store)
-
-            // Vectors go too: a vector describes chunk text, and a chunk whose boundaries
-            // moved has a vector for text that no longer exists. They are rebuilt below,
-            // because a rebuild that leaves the dense leg empty degrades retrieval to
-            // lexical-only without raising anything.
-            state = .working("dropping derived layers")
-            try await store.dropDerivedLayers()
-
-            state = .working("re-deriving from the floor")
-            // `rederive`, not `run`: it replays each object's earlier states before deriving
-            // from the current ones. Calling `run` on current objects alone quietly produces a
-            // smaller graph than the one just dropped, which is how a rebuild deleted the
-            // store's only contradiction and reported success.
-            let outcome = try await pipeline(for: store).rederive { [weak self] message in
-                Task { @MainActor in self?.state = .working(message) }
+        return await exclusively("Rebuild rehearsal", refused: { _ in nil }) {
+            do {
+                state = .working("rehearsing a rebuild on a copy")
+                let directory = RebuildRehearsal.defaultDirectory()
+                let report = try await RebuildRehearsal(store: store, chunker: settings.chunker)
+                    .rehearse(in: directory) { [weak self] message in
+                        Task { @MainActor in self?.state = .working(message) }
+                    }
+                state = .idle
+                return report
+            } catch {
+                state = .failed("rebuild rehearsal: \(error)")
+                return nil
             }
+        }
+    }
 
-            // Cleared here, not before the work. This used to sit above the rebuild, so the
-            // warning that says "your store no longer matches your chunking settings" was
-            // dismissed by *starting* a re-derive rather than by finishing one: a rebuild that
-            // threw left the store stale and the warning gone. It is only true once the
-            // passages actually exist at the current parameters.
-            settings.chunkingDirty = false
+    /// Apply a rehearsal someone has read. One transaction, so a running `opencore mcp` sees
+    /// the old graph or the new one and never a half-empty one.
+    func applyRehearsal(_ report: RebuildReport) async -> RebuildApplyOutcome? {
+        guard let store else { return nil }
+        return await exclusively("Applying a rebuild", refused: { _ in nil }) {
+            do {
+                state = .working("applying the reviewed rebuild")
+                let outcome = try await RebuildRehearsal(store: store, chunker: settings.chunker).apply(report)
 
-            // Rebuild the dense leg before reporting success. `buildEmbeddings` is resumable
-            // and skips chunks that already have a vector, so this is the full cost only
-            // because the drop above emptied the table.
-            await buildEmbeddings()
+                // Cleared here and not earlier: "your passages do not match your chunking settings"
+                // is only false once the new passages actually exist in the store.
+                settings.chunkingDirty = false
 
-            let after = try await graphCounts(in: store)
-            await refresh()
-            state = .idle
-            return RebuildComparison(before: before, after: after, outcome: outcome)
-        } catch {
-            state = .failed("rebuild: \(error)")
-            return nil
+                // Only passages whose text changed still need a vector, so this is usually quick.
+                await buildEmbeddings()
+                await refresh()
+                state = .idle
+                return outcome
+            } catch {
+                state = .failed("applying rebuild: \(error.localizedDescription)")
+                return nil
+            }
         }
     }
 

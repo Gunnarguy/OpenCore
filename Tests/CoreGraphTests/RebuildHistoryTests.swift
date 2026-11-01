@@ -52,6 +52,9 @@ private func repository(pushedAt: Date) -> CoreObject {
         // Text differs with the date so `contentHash` changes and the ingest is an update.
         text: "gunnarguy/MMT-2025\n\nLast pushed \(ISO8601DateFormatter().string(from: pushedAt)).",
         authoredAt: Date(timeIntervalSince1970: 1_700_000_000),
+        // Read an hour after the push, because a replay reads this version at this time and its
+        // readings have to fall in the order the syncs did.
+        ingestedAt: pushedAt.addingTimeInterval(3_600),
         domain: .project,
         authority: .authoredArtifact,
         metadata: [
@@ -67,7 +70,10 @@ func rebuildReproducesSupersession() async throws {
     try await store.upsert(source)
 
     // January's sync: nothing pushed for seven months, so the repository reads dormant.
-    _ = try await IngestPipeline(store: store, now: january.addingTimeInterval(200 * 86_400))
+    //
+    // Was 200 days, which is 4 August and after the sync below. Time alone sorted it out then, but
+    // a record is now read in order, and these two reads were the wrong way round.
+    _ = try await IngestPipeline(store: store, now: january.addingTimeInterval(190 * 86_400))
         .run(objects: [repository(pushedAt: january)])
 
     // August's sync: the same repository, freshly pushed. This is the upsert that used to

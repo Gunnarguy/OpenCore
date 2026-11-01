@@ -1,23 +1,41 @@
 import CoreModel
+import CoreReason
 import SwiftUI
 
-/// The bitemporal model made visible: move the date and watch what OpenCore believed change.
-///
-/// The screen is a diff rather than a snapshot. A snapshot asks the reader to remember the
-/// current set and spot the difference themselves, and the difference is the entire reason
-/// the belief table is append-only.
+/// The bitemporal model made visible: move Knowledge Time, World Time, or both, and watch
+/// what OpenCore believed or what was true in the world change.
 struct TimeTravelView: View {
-    @Environment(AppModel.self) private var model
+    @Environment(\.appModel) private var model
+    @State private var axis: AppModel.TimeTravelAxis = .knowledge
     @State private var date = Date()
+    @State private var worldDate = Date()
     @State private var rows: [AppModel.TimeTravelRow] = []
     @State private var onlyChanges = false
+    @State private var filter = ""
     @State private var loading = false
+    @State private var loadError: String?
+    @State private var loadedQuery: TimeTravelQuery?
+
+    private var timeQuery: TimeTravelQuery {
+        TimeTravelQuery(day: day, worldDay: worldDay, axis: axis, dataGeneration: model.dataGeneration)
+    }
 
     private var day: Date { Calendar.current.startOfDay(for: date) }
+    private var worldDay: Date { Calendar.current.startOfDay(for: worldDate) }
     private var dayText: String { ClaimsView.formatter.string(from: day) }
 
     private var visible: [AppModel.TimeTravelRow] {
-        onlyChanges ? rows.filter { $0.change != .unchanged } : rows
+        var result = onlyChanges ? rows.filter { $0.change != .unchanged } : rows
+        let needle = filter.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if !needle.isEmpty {
+            result = result.filter {
+                $0.subject.lowercased().contains(needle)
+                    || $0.predicate.lowercased().contains(needle)
+                    || ($0.then?.value.lowercased().contains(needle) ?? false)
+                    || ($0.now?.value.lowercased().contains(needle) ?? false)
+            }
+        }
+        return result
     }
 
     var body: some View {
@@ -27,47 +45,110 @@ struct TimeTravelView: View {
             content
         }
         .navigationTitle("Time travel")
-        // Keyed on the store as well as the day: the detail view can appear before
-        // `start()` has opened it, and the query would otherwise answer empty forever.
-        .task(id: TimeTravelQuery(day: day, storeReady: model.store != nil)) { await reload() }
+        .searchable(text: $filter, prompt: "Filter subjects, predicates, or values")
+        .task(id: timeQuery) {
+            await reload()
+        }
     }
 
     private var controlBar: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 12) {
-                Image(systemName: "clock.arrow.circlepath").foregroundStyle(.secondary)
-                DatePicker("", selection: $date, in: ...Date(), displayedComponents: .date)
+                Picker("Axis", selection: $axis) {
+                    ForEach(AppModel.TimeTravelAxis.allCases) { item in
+                        Text(item.rawValue).tag(item)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize(horizontal: true, vertical: false)
+
+                DatePicker(
+                    axis == .both ? "Knowledge:" : "",
+                    selection: $date,
+                    in: ...Date(),
+                    displayedComponents: .date
+                )
+                .labelsHidden()
+
+                if axis == .both {
+                    Text("· World:")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.secondary)
+                    DatePicker(
+                        "World:",
+                        selection: $worldDate,
+                        in: ...Date(),
+                        displayedComponents: .date
+                    )
                     .labelsHidden()
+                }
+
                 if loading { ProgressView().controlSize(.small) }
                 Spacer()
                 Toggle("Only what changed", isOn: $onlyChanges)
                     .toggleStyle(.switch)
                     .controlSize(.small)
             }
-            Text("Transaction time: what OpenCore believed on this date, not what was true on it. Valid time is the other axis and this picker does not move it.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+
+            HStack(spacing: 8) {
+                OpenCoreGlassCluster(spacing: 6) {
+                    HStack(spacing: 6) {
+                        presetButton("Today", daysAgo: 0)
+                        presetButton("24h ago", daysAgo: 1)
+                        presetButton("7d ago", daysAgo: 7)
+                        presetButton("30d ago", daysAgo: 30)
+                        presetButton("90d ago", daysAgo: 90)
+                        presetButton("1y ago", daysAgo: 365)
+                    }
+                }
+                Spacer()
+                Text(axis.explanation)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 14)
     }
 
+    private func presetButton(_ label: String, daysAgo: Int) -> some View {
+        Button(label) {
+            let target = Calendar.current.date(byAdding: .day, value: -daysAgo, to: Date()) ?? Date()
+            date = target
+            if axis == .both { worldDate = target }
+            let targetStr = ClaimsView.formatter.string(from: target)
+            ActionFeedbackCenter.shared.record(
+                button: "Time Travel Preset: \(label) (\(targetStr))",
+                command: "Select Time Travel date",
+                outcome: "Selected \(targetStr) (\(daysAgo) day(s) ago). Loading the requested comparison.",
+                status: .received
+            )
+        }
+        .controlSize(.small)
+        .openCoreGlassButton(telemetryLabel: "Time Travel Preset: \(label)")
+    }
+
     private var content: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 14) {
-                if !rows.isEmpty {
-                    TimeTravelSummary(dayText: dayText, rows: rows)
+                BitemporalExplainerCard(axis: axis)
+                if !rows.isEmpty, loadedQuery == timeQuery {
+                    TimeTravelSummary(dayText: dayText, query: timeQuery, rows: rows)
+                        .id(timeQuery)
                 }
-                ForEach(visible) { row in
+                ForEach(loadedQuery == timeQuery ? visible : []) { row in
                     TimeTravelRowCard(row: row, dayText: dayText)
                 }
             }
             .padding(24)
-            .frame(maxWidth: 780, alignment: .leading)
+            .frame(maxWidth: 1440, alignment: .leading)
             .frame(maxWidth: .infinity)
         }
         .overlay {
-            if visible.isEmpty { EmptyState(message: emptyMessage) }
+            if let loadError { EmptyState(message: "Could not load this comparison.\n\(loadError)") }
+            else if visible.isEmpty && !loading { EmptyState(message: emptyMessage) }
         }
     }
 
@@ -75,23 +156,32 @@ struct TimeTravelView: View {
         if rows.isEmpty {
             return "OpenCore held no beliefs on \(dayText), and holds none now.\nSync a source first."
         }
-        return "Nothing changed between \(dayText) and now."
+        return "Nothing matched or changed between \(dayText) and now."
     }
 
     private func reload() async {
+        let requested = timeQuery
         loading = true
-        let fetched = await model.timeTravel(asOf: instant(endingOn: day))
-        // A superseded run still finishes its awaits, so without this the older answer can
-        // land on top of the newer one.
-        guard !Task.isCancelled else { return }
+        loadedQuery = nil
+        rows = []
+        loadError = nil
+        do {
+        let fetched = try await model.timeTravel(
+            asOf: instant(endingOn: requested.day),
+            worldInstant: instant(endingOn: requested.worldDay),
+            axis: requested.axis
+        )
+        guard !Task.isCancelled, requested == timeQuery else { return }
         rows = fetched
+        loadedQuery = requested
         loading = false
+        } catch {
+            guard !Task.isCancelled, requested == timeQuery else { return }
+            loadError = error.localizedDescription
+            loading = false
+        }
     }
 
-    /// A picked day means "as that day ended", clamped to now.
-    ///
-    /// Reading it as midnight would make the default of today report a full day of drift
-    /// against itself, which is the opposite of what a reader expects from "today".
     private func instant(endingOn start: Date) -> Date {
         let calendar = Calendar.current
         let next = calendar.date(byAdding: .day, value: 1, to: start) ?? start.addingTimeInterval(86_400)
@@ -99,16 +189,76 @@ struct TimeTravelView: View {
     }
 }
 
-private struct TimeTravelQuery: Equatable, Sendable {
+private struct TimeTravelQuery: Hashable, Sendable {
     let day: Date
-    let storeReady: Bool
+    let worldDay: Date
+    let axis: AppModel.TimeTravelAxis
+    let dataGeneration: Int
+}
+
+// MARK: - Two-Clock Bitemporal Explainer
+
+private struct BitemporalExplainerCard: View {
+    let axis: AppModel.TimeTravelAxis
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Label("Why Two Clocks? (Bitemporal Memory)", systemImage: "clock.badge.checkmark")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(Color.accentColor)
+                Spacer()
+                Text("Active axis: \(axis.rawValue)")
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Clock 1: What OpenCore Knew")
+                        .font(.caption.weight(.semibold))
+                    Text("Knowledge Time (observedAt / decidedAt)")
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(Color.accentColor)
+                    Text("Rewinds OpenCore's database to that date. Shows what your notes and docs said before later edits or syncs.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Clock 2: What Was True in Real Life")
+                        .font(.caption.weight(.semibold))
+                    Text("World Time (validFrom / validTo)")
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.purple)
+                    Text("Filters facts by when they were actually true in the world, even if you synced the file weeks later.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .openCoreGlassCard(cornerRadius: 10)
+    }
 }
 
 // MARK: - Summary
 
 private struct TimeTravelSummary: View {
+    @Environment(\.appModel) private var model
     let dayText: String
+    let query: TimeTravelQuery
     let rows: [AppModel.TimeTravelRow]
+
+    @State private var synthesizing = false
+    @State private var brief: Conversation.GroundedBrief?
+    @State private var summaryTask: Task<Void, Never>?
+    @State private var summaryRequestID = UUID()
 
     private var held: Int { rows.filter { $0.then != nil }.count }
 
@@ -117,48 +267,130 @@ private struct TimeTravelSummary: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("On \(dayText) OpenCore held \(held) belief\(held == 1 ? "" : "s").")
-                .font(.callout)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("On \(dayText) OpenCore held \(held) active fact\(held == 1 ? "" : "s") (Belief rows).")
+                    .font(.callout.weight(.medium))
+                Spacer()
+                Button {
+                    startSummary()
+                } label: {
+                    HStack(spacing: 4) {
+                        if synthesizing {
+                            ProgressView().controlSize(.mini)
+                        } else {
+                            Image(systemName: "sparkles")
+                        }
+                        Text("Summarize Diff (/fm)")
+                    }
+                    .font(.caption.weight(.medium))
+                }
+                .controlSize(.small)
+                .openCoreGlassButton(prominent: true)
+                .disabled(synthesizing)
+                .help("Synthesize a grounded executive summary of what changed between \(dayText) and now using /usr/bin/fm.")
+            }
             HStack(spacing: 12) {
-                MetricPill(label: "no longer held", value: "\(count(.noLongerHeld))")
-                MetricPill(label: "changed since", value: "\(count(.changed))")
-                MetricPill(label: "learned since", value: "\(count(.learned))")
-                MetricPill(label: "unchanged", value: "\(count(.unchanged))")
+                MetricPill(label: "retracted since (noLongerHeld)", value: "\(count(.noLongerHeld))")
+                MetricPill(label: "updated since (changed)", value: "\(count(.changed))")
+                MetricPill(label: "discovered since (learned)", value: "\(count(.learned))")
+                MetricPill(label: "still true (unchanged)", value: "\(count(.unchanged))")
+            }
+
+            if let brief {
+                Divider()
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Label(
+                            "On-Device Bitemporal Diff Brief (\(brief.modelName))",
+                            systemImage: "sparkles"
+                        )
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.purple)
+                        Spacer()
+                        Button {
+                            cancelSummary()
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    Text(brief.text)
+                        .font(.callout)
+                        .textSelection(.enabled)
+                }
             }
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quaternary.opacity(0.3), in: .rect(cornerRadius: 10))
+        .openCoreGlassCard(cornerRadius: 10)
+        .onChange(of: query) { _, _ in cancelSummary() }
+        .onDisappear { cancelSummary() }
+    }
+
+    private func cancelSummary() {
+        summaryTask?.cancel()
+        summaryTask = nil
+        summaryRequestID = UUID()
+        synthesizing = false
+        brief = nil
+    }
+
+    private func startSummary() {
+        cancelSummary()
+        let requestID = UUID()
+        let requested = query
+        summaryRequestID = requestID
+        synthesizing = true
+        summaryTask = Task {
+            let result = await model.synthesizeTimeTravelBrief(dayText: dayText, rows: rows)
+            // This view is also keyed by both clocks, axis, and corpus generation. A cancelled
+            // synthesis from another coordinate cannot publish into the current summary.
+            guard !Task.isCancelled, summaryRequestID == requestID,
+                  requested == query, model.dataGeneration == requested.dataGeneration else { return }
+            brief = result
+            synthesizing = false
+            summaryTask = nil
+        }
     }
 }
 
 // MARK: - Rows
 
-/// Colors and labels are precomputed for the reason `ContradictionSideRow` documents:
-/// ternaries over `ShapeStyle` inside a `ForEach` inside a `LazyVStack` exhaust the
-/// type checker's budget.
 private struct TimeTravelRowCard: View {
+    @Environment(\.appModel) private var model
     let row: AppModel.TimeTravelRow
     let dayText: String
 
     private var thenTone: Color { row.change == .unchanged ? .primary : .secondary }
     private var nowTone: Color { row.change == .noLongerHeld ? .red : .primary }
     private var reason: String? { (row.now ?? row.then)?.belief.reason }
-
-    private var fill: AnyShapeStyle {
-        switch row.change {
-        case .noLongerHeld: AnyShapeStyle(Color.red.opacity(0.10))
-        default: AnyShapeStyle(HierarchicalShapeStyle.quaternary.opacity(0.3))
-        }
-    }
+    private var cardTint: Color? { row.change == .noLongerHeld ? .red : nil }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            TimeTravelBadge(change: row.change)
+            HStack {
+                TimeTravelBadge(change: row.change)
+                Spacer()
+                if let claimID = row.activeClaimID {
+                    Button {
+                        model.inspectClaim(claimID)
+                    } label: {
+                        Label("Inspect Provenance", systemImage: "doc.text.magnifyingglass")
+                            .font(.caption2)
+                    }
+                    .buttonStyle(.link)
+                }
+            }
 
-            Text("\(row.subject) \(row.predicate)")
-                .font(.callout.weight(.medium))
+            HStack(spacing: 6) {
+                EntityLinkChip(name: row.subject, entityID: row.subjectID, prominent: true)
+                Text(row.predicate)
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(.secondary)
+            }
 
             TimeTravelSideRow(
                 label: "then",
@@ -188,7 +420,7 @@ private struct TimeTravelRowCard: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(fill, in: .rect(cornerRadius: 10))
+        .openCoreGlassCard(cornerRadius: 10, tint: cardTint)
     }
 }
 
@@ -207,11 +439,15 @@ private struct TimeTravelSideRow: View {
                 .foregroundStyle(.tertiary)
 
             if let held {
-                Text(held.value)
-                    .font(.callout)
-                    .strikethrough(struck)
-                    .foregroundStyle(tone)
-                    .lineLimit(1)
+                if let targetID = held.objectEntityID {
+                    EntityLinkChip(name: held.value, entityID: targetID)
+                } else {
+                    Text(held.value)
+                        .font(.callout)
+                        .strikethrough(struck)
+                        .foregroundStyle(tone)
+                        .lineLimit(1)
+                }
                 Spacer(minLength: 12)
                 TimeTravelMeta(belief: held.belief)
             } else {
@@ -275,7 +511,6 @@ private struct TimeTravelBadge: View {
     }
 }
 
-/// Retraction is a recorded event, so an unrecorded date says so rather than guessing one.
 private struct TimeTravelRetraction: View {
     let retractedAt: Date?
 

@@ -9,10 +9,32 @@ import SwiftUI
 final class ChatModel {
     var turns: [Turn] = []
     var draft = ""
+    var draftTokens = 0
     var sending = false
+    var sendTask: Task<Void, Never>?
+    var sendRequestID = UUID()
+
+    func stopSending() {
+        if sending {
+            ActionFeedbackCenter.shared.record(button: "Stop chat", command: "Cancel active response",
+                                               outcome: "Cancellation requested. You can ask another question.", status: .received)
+        }
+        sendTask?.cancel()
+        sendTask = nil
+        sendRequestID = UUID()
+        sending = false
+        retained = nil
+        retainedKey = nil
+        if let index = turns.lastIndex(where: { $0.role == .core && $0.streaming }) {
+            turns[index].streaming = false
+            turns[index].error = "Stopped by you."
+        }
+    }
     var readiness: Conversation.Readiness = .unknown("checking")
+    var telemetry: Conversation.FoundationModelsTelemetry = Conversation.telemetry()
     /// Source the reader is inspecting, keyed by turn so two answers can be open at once.
     var expandedSource: [UUID: Int] = [:]
+    var structuredAnswers: [UUID: Answer] = [:]
     var showingReceipt: Turn?
 
     /// Saved threads, most recently used first.
@@ -45,6 +67,7 @@ final class ChatModel {
 
     func refreshReadiness() {
         readiness = Conversation.readiness()
+        telemetry = Conversation.telemetry()
     }
 
     // MARK: - Saved threads
@@ -56,22 +79,29 @@ final class ChatModel {
     /// Begin a new thread. Nothing is written until the first question is asked, so opening the
     /// tab and closing it does not litter the list with empty rows.
     func startNewThread() {
+        stopSending()
         currentID = UUID().uuidString
         retained = nil
         retainedKey = nil
         turns = []
         expandedSource = [:]
+        structuredAnswers = [:]
         judgements = [:]
     }
 
     /// Reopen a saved thread, restoring both the visible history and the model's context.
     func open(_ thread: StoredConversation, store: Store, tuning: RetrievalTuning) async {
+        stopSending()
         currentID = thread.id
         retained = nil
         retainedKey = nil
         expandedSource = [:]
+        structuredAnswers = [:]
         judgements = [:]
-        turns = (try? await conversation(store: store, tuning: tuning).restore()) ?? []
+        let requestID = sendRequestID
+        let restored = (try? await conversation(store: store, tuning: tuning).restore()) ?? []
+        guard !Task.isCancelled, currentID == thread.id, sendRequestID == requestID else { return }
+        turns = restored
         // After the turns, because it keys on their ids.
         await loadJudgements(store: store)
     }
@@ -101,7 +131,9 @@ final class ChatModel {
 
     /// Load verdicts for a reopened thread, so a judgement made yesterday is still shown.
     func loadJudgements(store: Store) async {
-        guard let stored = try? await store.turns(conversationID: currentID) else { return }
+        let conversationID = currentID
+        guard let stored = try? await store.turns(conversationID: conversationID),
+              !Task.isCancelled, currentID == conversationID else { return }
         for row in stored {
             guard let verdict = row.judgement, let id = UUID(uuidString: row.id) else { continue }
             judgements[id] = verdict
@@ -114,12 +146,18 @@ final class ChatModel {
 /// The design brief for this screen: it should feel like a good chat app, and it should be
 /// impossible to forget that every sentence came from somewhere. Those pull in opposite
 /// directions, because provenance UI is usually clutter. The resolution here is that
-/// provenance is *quiet until questioned* — citations are small inline chips, sources sit
+/// provenance is *quiet until questioned*: citations are small inline chips, sources sit
 /// collapsed under the answer, and the grounding check only raises its voice when it fails.
 struct ChatView: View {
-    @Environment(AppModel.self) private var model
-    @Environment(AppSettings.self) private var settings
+    @Environment(\.appModel) private var model
+    @Environment(\.appSettings) private var settings
     @State private var chat = ChatModel()
+
+    private struct ChatLoadTrigger: Equatable {
+        let storeReady: Bool
+        let dataGeneration: Int
+        let pendingQuestion: String?
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -147,10 +185,19 @@ struct ChatView: View {
         // question, and the model's assets were never pre-loaded, so the first answer of every
         // session was slow for no visible reason. Same fix as `TimeTravelView`, which hit this
         // and solved it; it just was not carried across.
-        .task(id: model.store != nil) {
-            // Typed on Home and handed over rather than answered there. Two answer surfaces for
-            // one question is exactly the split that produced Ask and Chat.
-            if let question = PendingQuestion.shared.take() { chat.draft = question }
+        .task(id: ChatLoadTrigger(
+            storeReady: model.store != nil,
+            dataGeneration: model.dataGeneration,
+            pendingQuestion: model.pendingQuestion
+        )) {
+            // Typed on Home, Quick Jump, Menu Bar or Entity and handed over rather than
+            // answered in a duplicate surface.
+            if let question = model.pendingQuestion {
+                model.pendingQuestion = nil
+                chat.draft = question
+            } else if let question = PendingQuestion.shared.take() {
+                chat.draft = question
+            }
             chat.refreshReadiness()
             guard let store = model.store else { return }
             await chat.loadThreads(store: store)
@@ -242,25 +289,73 @@ struct ChatView: View {
     // MARK: - Composer
 
     private var composer: some View {
-        HStack(alignment: .bottom, spacing: 10) {
-            TextField("Ask about your own history", text: $chat.draft, axis: .vertical)
-                .textFieldStyle(.plain)
-                .font(.body)
-                .lineLimit(1...6)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .background(.quaternary.opacity(0.4), in: .rect(cornerRadius: 12))
-                .onSubmit(send)
-
-            Button(action: send) {
-                Image(systemName: chat.sending ? "stop.fill" : "arrow.up")
-                    .font(.system(size: 13, weight: .bold))
-                    .frame(width: 30, height: 30)
+        let jarvis = JarvisController.shared
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Label(chat.telemetry.modelVariant, systemImage: "cpu.fill")
+                    .font(.caption2.monospaced().weight(.semibold))
+                    .foregroundStyle(.green)
+                if let ctx = chat.telemetry.contextWindowTokens {
+                    Text("· \(ctx.formatted()) ctx")
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                }
+                if !chat.telemetry.capabilities.isEmpty {
+                    Text("· \(chat.telemetry.capabilities.joined(separator: " + "))")
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(Color.accentColor)
+                }
+                Spacer()
+                if chat.draftTokens > 0 {
+                    Text("\(chat.draftTokens) prompt token\(chat.draftTokens == 1 ? "" : "s")")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
             }
-            .buttonStyle(.borderedProminent)
-            .clipShape(.circle)
-            .disabled(chat.draft.trimmingCharacters(in: .whitespaces).isEmpty || chat.sending)
-            .keyboardShortcut(.return, modifiers: [])
+            .padding(.horizontal, 4)
+
+            HStack(alignment: .bottom, spacing: 10) {
+                TextField("Ask about your own history", text: $chat.draft, axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .font(.body)
+                    .lineLimit(1...6)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(.quaternary.opacity(0.4), in: .rect(cornerRadius: 12))
+                    .onSubmit(send)
+                    .onChange(of: chat.draft) { _, newValue in
+                        Task {
+                            chat.draftTokens = await Conversation.estimateTokenCount(for: newValue)
+                        }
+                    }
+
+                Button {
+                    jarvis.toggleVoiceListening { spoken in
+                        chat.draft = spoken
+                        send()
+                    }
+                } label: {
+                    Image(systemName: jarvis.isListening ? "stop.circle.fill" : "mic.fill")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(jarvis.isListening ? .red : .primary)
+                        .frame(width: 30, height: 30)
+                }
+                .buttonStyle(.bordered)
+                .clipShape(.circle)
+                .help("Dictate question on device via Apple Speech Recognition")
+
+                Button {
+                    if chat.sending { chat.stopSending() } else { send() }
+                } label: {
+                    Image(systemName: chat.sending ? "stop.fill" : "arrow.up")
+                        .font(.system(size: 13, weight: .bold))
+                        .frame(width: 30, height: 30)
+                }
+                .buttonStyle(.borderedProminent)
+                .clipShape(.circle)
+                .disabled(!chat.sending && chat.draft.trimmingCharacters(in: .whitespaces).isEmpty)
+                .keyboardShortcut(.return, modifiers: [])
+            }
         }
         .padding(16)
     }
@@ -271,21 +366,44 @@ struct ChatView: View {
 
         chat.draft = ""
         chat.sending = true
+        let priorQuestions = chat.turns.filter { $0.role == .you }.map(\.text)
+        let priorSourceTitles = chat.turns.filter { $0.role == .core }.flatMap { $0.sources.map(\.title) }
+        let contextualized = Conversation.contextualizedQuery(
+            question,
+            priorQuestions: priorQuestions,
+            priorSourceTitles: priorSourceTitles
+        )
         chat.turns.append(Turn(role: .you, text: question))
 
         let tuning = settings.tuning
-
-        Task {
+        let requestID = UUID()
+        chat.sendRequestID = requestID
+        chat.sendTask = Task {
+            defer {
+                if chat.sendRequestID == requestID { chat.sending = false; chat.sendTask = nil }
+            }
+            async let structuredAnswer = model.reasonAnswer(contextualized, persistReceipt: false)
             let conversation = chat.conversation(store: store, tuning: tuning)
+            await conversation.configureGeneration(.init(reasoningLevel: settings.fmReasoningLevelRaw,
+                                                         includeSchemaInPrompt: settings.fmIncludeSchemaInPrompt))
             var placeholderIndex: Int?
+            var finalTurnID: UUID?
 
             for await update in conversation.send(question) {
+                guard !Task.isCancelled, chat.sendRequestID == requestID else { break }
+                finalTurnID = update.id
                 if let index = placeholderIndex {
                     chat.turns[index] = update
                 } else {
                     chat.turns.append(update)
                     placeholderIndex = chat.turns.count - 1
                 }
+            }
+            guard !Task.isCancelled, chat.sendRequestID == requestID else { return }
+            let answer = await structuredAnswer
+            guard !Task.isCancelled, chat.sendRequestID == requestID else { return }
+            if let finalTurnID, let answer {
+                chat.structuredAnswers[finalTurnID] = answer
             }
             chat.sending = false
             // After, not before: the thread's title and turn count are only correct once the
@@ -300,7 +418,7 @@ struct ChatView: View {
 private struct TurnView: View {
     let turn: Turn
     @Bindable var chat: ChatModel
-    @Environment(AppModel.self) private var model
+    @Environment(\.appModel) private var model
 
     var body: some View {
         if turn.role == .you {
@@ -315,10 +433,21 @@ private struct TurnView: View {
         } else {
             VStack(alignment: .leading, spacing: 12) {
                 if let error = turn.error {
-                    Label(error, systemImage: "xmark.circle.fill")
-                        .font(.callout).foregroundStyle(.red)
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout).foregroundStyle(.orange)
+                    if !turn.text.isEmpty {
+                        answerText
+                    }
+                    if let structured = chat.structuredAnswers[turn.id] {
+                        StructuredAnswerCard(answer: structured, isFallback: true)
+                    }
                 } else {
                     answerText
+                    if !turn.streaming,
+                       let structured = chat.structuredAnswers[turn.id],
+                       (!structured.points.isEmpty || !structured.contradictions.isEmpty || (structured.activity?.totalEvents ?? 0) > 0) {
+                        StructuredAnswerCard(answer: structured, isFallback: false)
+                    }
                 }
                 if !turn.sources.isEmpty { SourceStrip(turn: turn, chat: chat) }
                 // A good answer that will not survive closing the window. Said out loud,
@@ -327,7 +456,7 @@ private struct TurnView: View {
                     Label("This turn was not saved. \(failure)", systemImage: "externaldrive.trianglebadge.exclamationmark")
                         .font(.caption).foregroundStyle(.orange)
                 }
-                if !turn.streaming && turn.error == nil { footer }
+                if !turn.streaming && (!turn.text.isEmpty || turn.error == nil) { footer }
             }
         }
     }
@@ -383,8 +512,24 @@ private struct TurnView: View {
                         .textSelection(.enabled)
                 }
                 Spacer()
+                if !turn.text.isEmpty {
+                    Button {
+                        if JarvisController.shared.isSpeaking {
+                            JarvisController.shared.stopSpeaking()
+                        } else {
+                            JarvisController.shared.speak(turn.text)
+                        }
+                    } label: {
+                        Label(
+                            JarvisController.shared.isSpeaking ? "Stop" : "Read Aloud",
+                            systemImage: JarvisController.shared.isSpeaking ? "stop.fill" : "speaker.wave.2.fill"
+                        )
+                    }
+                    .buttonStyle(.link)
+                    .font(.caption)
+                }
                 if turn.receipt != nil {
-                    Button("Why do you think that?") { chat.showingReceipt = turn }
+                    Button("Audit Receipt (Why & How)") { chat.showingReceipt = turn }
                         .buttonStyle(.link).font(.caption)
                 }
             }
@@ -399,7 +544,11 @@ private struct TurnView: View {
         } else {
             parts.append("\(receipt.objectsRetrieved) of \(receipt.objectsSearched) passages")
         }
-        parts.append(receipt.model == nil ? "no model" : "on-device")
+        if receipt.objectsTransmitted > 0 {
+            parts.append("cloud (\(receipt.objectsTransmitted) sent)")
+        } else {
+            parts.append(receipt.model == nil ? "deterministic graph" : "100% on-device (\(receipt.model ?? "fm"))")
+        }
         parts.append(receipt.shortCode)
         return parts.joined(separator: " · ")
     }
@@ -516,6 +665,7 @@ private struct SourceChip: View {
 }
 
 private struct SourceDetail: View {
+    @Environment(\.appModel) private var model
     let source: GroundingSource
 
     var body: some View {
@@ -524,6 +674,13 @@ private struct SourceDetail: View {
                 Text(source.title).font(.caption.weight(.semibold))
                 Text(source.authority.label).font(.caption2).foregroundStyle(.tertiary)
                 Spacer()
+                Button {
+                    model.inspectObject(source.objectID, highlight: source.text)
+                } label: {
+                    Label("Inspect Floor Object", systemImage: "doc.text.magnifyingglass")
+                        .font(.caption2)
+                }
+                .buttonStyle(.link)
                 if let uri = source.uri, let url = URL(string: uri) {
                     Link("Open", destination: url).font(.caption2)
                 }
@@ -540,6 +697,97 @@ private struct SourceDetail: View {
     }
 }
 
+// MARK: - Structured Believed Claims & Counter-Evidence
+
+private struct StructuredAnswerCard: View {
+    @Environment(\.appModel) private var model
+    let answer: Answer
+    let isFallback: Bool
+    @State private var expanded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: isFallback ? "brain.head.profile" : "checkmark.shield")
+                    .font(.caption)
+                    .foregroundStyle(isFallback ? .orange : Color.accentColor)
+                Text(isFallback
+                     ? "Deterministic Reasoner Fallback (\(answer.points.count) believed claims)"
+                     : "Structured Claims & Counter-Evidence (\(answer.points.count) claims\(answer.contradictions.isEmpty ? "" : ", \(answer.contradictions.count) open conflicts"))")
+                    .font(.caption.weight(.semibold))
+                Spacer()
+                if !isFallback {
+                    Button(expanded ? "Hide" : "Show") {
+                        withAnimation(.snappy(duration: 0.18)) { expanded.toggle() }
+                    }
+                    .buttonStyle(.link)
+                    .font(.caption2)
+                }
+            }
+
+            if isFallback || expanded {
+                if isFallback {
+                    Text(answer.summary)
+                        .font(.callout)
+                        .textSelection(.enabled)
+                }
+
+                if let activity = answer.activity, activity.totalEvents > 0 {
+                    ActivityRows(activity: activity)
+                }
+
+                ForEach(Array(answer.points.prefix(8).enumerated()), id: \.offset) { _, point in
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(point.statement)
+                            .font(.caption)
+                        if !point.counter.isEmpty {
+                            Text("\(point.counter.count) COUNTER-EVIDENCE")
+                                .font(.caption2.weight(.bold))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.orange.opacity(0.18), in: .capsule)
+                                .foregroundStyle(.orange)
+                        }
+                        Spacer()
+                        Text(point.authority.label)
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                        if let claimID = point.claimID {
+                            Button("Inspect") { model.inspectClaim(claimID) }
+                                .buttonStyle(.link)
+                                .font(.caption2)
+                        }
+                    }
+                }
+
+                if !answer.contradictions.isEmpty {
+                    Divider()
+                    ForEach(answer.contradictions, id: \.id) { conflict in
+                        HStack(spacing: 6) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.caption2)
+                                .foregroundStyle(.orange)
+                            Text(conflict.reason)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Button("Inspect A") { model.inspectClaim(conflict.claimA) }
+                                .buttonStyle(.link)
+                                .font(.caption2)
+                            Button("Inspect B") { model.inspectClaim(conflict.claimB) }
+                                .buttonStyle(.link)
+                                .font(.caption2)
+                        }
+                    }
+                }
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .openCoreGlassCard(cornerRadius: 10, tint: isFallback ? .orange : .accentColor)
+    }
+}
+
 // MARK: - Empty state
 
 private struct ChatEmptyState: View {
@@ -547,21 +795,24 @@ private struct ChatEmptyState: View {
 
     private let examples = [
         "What have I been building lately?",
-        "What did I decide about retrieval?",
+        "What is the current objective and verify command for OpenCore?",
         "Which projects use Swift?",
         "What changed in OpenIntelligence recently?",
     ]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Ask about your own history")
+            Text("Grounded Chat Over Your Own History")
                 .font(.title3.weight(.semibold))
-            Text("Answers come only from what you have synced. Every sentence is checked against the passages it was written from, and anything unsupported is flagged rather than hidden.")
+            Text("OpenCore retrieves passages from your indexed history for an on-device answer. It shows source references, sentence grounding checks, structured claims and counter-evidence alongside the response.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             VStack(alignment: .leading, spacing: 6) {
+                Text("TRY A QUESTION")
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(.tertiary)
                 ForEach(examples, id: \.self) { example in
                     Button(example) { draft = example }
                         .buttonStyle(.link)
@@ -626,5 +877,38 @@ private struct ChatReceiptSheet: View {
             }
         }
         .frame(minWidth: 640, minHeight: 620)
+    }
+}
+
+
+/// What happened in a question's time window, from the event log.
+struct ActivityRows: View {
+    @Environment(\.appModel) private var model
+    let activity: ActivitySummary
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(activity.groups) { group in
+                Button { model.openEntity(id: group.subject.id) } label: {
+                    VStack(alignment: .leading, spacing: 1) {
+                        HStack(spacing: 8) {
+                            Text(group.subject.canonicalName).font(.caption.weight(.semibold))
+                            Spacer(minLength: 6)
+                            Text(group.upkeep > 0 ? "\(group.events) \(group.verb) +\(group.upkeep) upkeep" : "\(group.events) \(group.verb)")
+                                .font(.caption2.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                        if let latest = group.latest.first {
+                            Text(latest.detail)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                    }
+                    .contentShape(.rect)
+                }
+                .buttonStyle(.plain)
+            }
+        }
     }
 }

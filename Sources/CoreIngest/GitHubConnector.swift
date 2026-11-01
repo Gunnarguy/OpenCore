@@ -1,5 +1,7 @@
 import CoreModel
+import CoreTelemetry
 import Foundation
+import Synchronization
 
 /// GitHub is the first connector on purpose.
 ///
@@ -55,7 +57,13 @@ public struct GitHubConnector: Connector {
         if let fromEnvironment = ProcessInfo.processInfo.environment["GITHUB_TOKEN"], !fromEnvironment.isEmpty {
             return (fromEnvironment, .environment)
         }
-        if let fromKeychain = Keychain.read(.githubToken) { return (fromKeychain, .keychain) }
+        switch Keychain.readResult(.githubToken) {
+        case .found(let token, source: .keychain): return (token, .keychain)
+        case .found(let token, source: .legacyVault): return (token, .legacyVault)
+        case .authenticationRequired: return (nil, .authenticationRequired)
+        case .failed: return (nil, .storageError)
+        case .missing: break
+        }
         if let fromCLI = ghCLIToken() { return (fromCLI, .ghCLI) }
         return (nil, .none)
     }
@@ -74,23 +82,45 @@ public struct GitHubConnector: Connector {
         return (try? JSONDecoder().decode(User.self, from: data))?.login
     }
 
+    private static let ghCache = GitHubCLITokenCache()
+
+    /// Explicit refresh/sign-in actions should invalidate immediately. Automatic lookups
+    /// expire success after 30 seconds and absence after 2 seconds, chosen to avoid repeated
+    /// subprocesses during tab rendering while still observing login and token rotation.
+    public static func invalidateTokenCache() {
+        ghCache.invalidate()
+    }
+
     private static func ghCLIToken() -> String? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["gh", "auth", "token"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
-            guard process.terminationStatus == 0 else { return nil }
-            let token = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-            return token.isEmpty ? nil : token
-        } catch {
-            return nil
+        ghCache.resolve(clock: { ProcessInfo.processInfo.systemUptime }) {
+            loadGHCLIToken()
         }
+    }
+
+    private static func loadGHCLIToken() -> String? {
+        let candidates = ["/opt/homebrew/bin/gh", "/usr/local/bin/gh", "/usr/bin/env"]
+        for candidate in candidates {
+            guard FileManager.default.isExecutableFile(atPath: candidate) else { continue }
+            let arguments = candidate == "/usr/bin/env" ? ["gh", "auth", "token"] : ["auth", "token"]
+            var environment = ProcessInfo.processInfo.environment
+            environment["GH_PROMPT_DISABLED"] = "1"
+            environment["GIT_TERMINAL_PROMPT"] = "0"
+            do {
+                let result = try BoundedProcess.run(
+                    executable: candidate, arguments: arguments, environment: environment,
+                    timeout: 5, maximumOutputBytes: 8_192
+                )
+                // A hanging executable should not be retried through another path to the
+                // same gh process. The shared runner drains pipes and forcibly reaps it.
+                guard !result.timedOut else { return nil }
+                guard result.status == 0 else { continue }
+                let token = result.stdoutText.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !token.isEmpty { return token }
+            } catch {
+                continue
+            }
+        }
+        return nil
     }
 
     // MARK: - Fetch
@@ -368,5 +398,48 @@ extension GitHubConnector {
         let name: String?
         let email: String?
         let date: Date?
+    }
+}
+
+/// The previous cache remembered both nil and successful tokens for the process lifetime,
+/// so a login or rotation in another terminal never reached an already running app.
+final class GitHubCLITokenCache: Sendable {
+    private struct Entry: Sendable {
+        let checkedAt: TimeInterval
+        let token: String?
+    }
+
+    private let entry = Mutex<Entry?>(nil)
+    private let successLifetime: TimeInterval
+    private let missingLifetime: TimeInterval
+
+    init(successLifetime: TimeInterval = 30, missingLifetime: TimeInterval = 2) {
+        self.successLifetime = successLifetime
+        self.missingLifetime = missingLifetime
+    }
+
+    func resolve(at now: TimeInterval, load: () -> String?) -> String? {
+        resolve(clock: { now }, load: load)
+    }
+
+    func resolve(clock: () -> TimeInterval, load: () -> String?) -> String? {
+        entry.withLock { cached in
+            let now = clock()
+            if let cached {
+                let age = now - cached.checkedAt
+                let lifetime = cached.token == nil ? missingLifetime : successLifetime
+                if age >= 0 && age < lifetime { return cached.token }
+            }
+            let loaded = load()?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let token = loaded.flatMap { $0.isEmpty ? nil : $0 }
+            // A slow or timed-out gh lookup must still receive the full absence lifetime;
+            // starting it before the subprocess would immediately expire a slow failure.
+            cached = Entry(checkedAt: clock(), token: token)
+            return token
+        }
+    }
+
+    func invalidate() {
+        entry.withLock { $0 = nil }
     }
 }

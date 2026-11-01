@@ -1,0 +1,67 @@
+{
+  "schema": "codemap/1",
+  "id": "connectors",
+  "name": "Connectors",
+  "aliases": ["GitHub", "files", "filesystem", "calendar", "reminders", "EventKit", "Apple Notes", "AppleScript", "Health", "source"],
+  "purpose": "Reads each outside source into CoreObjects and nothing else: GitHub, folders, Apple Calendar and Reminders, Notes and Health.",
+  "revision": "e801208",
+  "verified_on": "2026-10-31",
+  "entry_points": ["Connector"],
+  "files": [
+    {"path": "Sources/CoreIngest/Connector.swift", "role": "primary", "blob": "eb99a19e60950728e7a8df58d1afd41176ce53f8"},
+    {"path": "Sources/CoreIngest/FilesystemConnector.swift", "role": "primary", "blob": "87d474b76b4a9e0b999610988b09f8899bdfc3d7"},
+    {"path": "Sources/CoreIngest/GitHubConnector.swift", "role": "primary", "blob": "61e7f256dd77f229e64d124c90086fa048088d71"},
+    {"path": "Sources/CoreIngest/AppleEventKitConnector.swift", "role": "primary", "blob": "29273399c22b7a9241035d2bcfb01f27440bd9be"},
+    {"path": "Sources/CoreIngest/AppleNotesConnector.swift", "role": "primary", "blob": "222bedf0feb72f2f541e40f9d37f7693f105ee5c"},
+    {"path": "Sources/CoreIngest/HealthKitConnector.swift", "role": "primary", "blob": "0078422dd8824cc8cc31c5959e3fe35e01cc9bb9"},
+    {"path": "Sources/CoreModel/ConnectorBatch.swift", "role": "primary", "blob": "fe0cf8ede62baaf0b0d938a012e17e9a1cd90f4e"},
+    {"path": "Tests/CoreGraphTests/FreshStoreTests.swift", "role": "test", "blob": "7ed57283345b7aa8f17fbca128ce642ee8a2cc09"}
+  ],
+  "nodes": [
+    {"id": "Connector", "kind": "service", "path": "Sources/CoreIngest/Connector.swift", "line": 12, "match": "func fetch(since: Date?, cursor: String?, log: @Sendable (String) -> Void) async throws -> ConnectorBatch", "status": "VERIFIED", "note": "The whole protocol surface."},
+    {"id": "ConnectorBatch", "kind": "model", "path": "Sources/CoreModel/ConnectorBatch.swift", "line": 7, "match": "public struct ConnectorBatch: Sendable {", "status": "VERIFIED", "note": "`unread` says a read fell short, which holds the sync date."},
+    {"id": "AppleNotesConnector", "kind": "integration", "path": "Sources/CoreIngest/AppleNotesConnector.swift", "line": 16, "match": "public struct AppleNotesConnector: Connector {", "status": "VERIFIED", "note": "AppleScript, confined to this file."},
+    {"id": "AppleEventKitConnector", "kind": "integration", "path": "Sources/CoreIngest/AppleEventKitConnector.swift", "line": 17, "match": "public struct AppleEventKitConnector: Connector {", "status": "VERIFIED", "note": "Only the app can read it."},
+    {"id": "GitHubConnector", "kind": "integration", "path": "Sources/CoreIngest/GitHubConnector.swift", "line": 14, "match": "public struct GitHubConnector: Connector {", "status": "VERIFIED", "note": ""},
+    {"id": "FilesystemConnector", "kind": "integration", "path": "Sources/CoreIngest/FilesystemConnector.swift", "line": 19, "match": "public struct FilesystemConnector: Connector {", "status": "VERIFIED", "note": "Reports missing roots through `unread`."}
+  ],
+  "edges": [],
+  "docs": [],
+  "unknowns": ["Why the one real Apple Notes sync, on 2026-08-14, stored 0 objects. Re-read All Notes from the installed app tests it."],
+  "related": ["source-sync", "private-names"],
+  "derived": {
+    "generated_by": "codemap 1.1.0 derive: declarations, type references and test mentions; edges are INFERRED",
+    "nodes": [
+      {"id": "ConnectorError", "kind": "model", "path": "Sources/CoreIngest/Connector.swift", "line": 15, "match": "public enum ConnectorError: Error, CustomStringConvertible {", "status": "VERIFIED"},
+      {"id": "HealthKitConnector", "kind": "model", "path": "Sources/CoreIngest/HealthKitConnector.swift", "line": 34, "match": "public struct HealthKitConnector: Connector {", "status": "VERIFIED"}
+    ],
+    "edges": [
+      {"from": "Connector", "type": "depends_on", "to": "ConnectorBatch", "status": "INFERRED", "evidence": [{"path": "Sources/CoreIngest/Connector.swift", "line": 12, "match": "func fetch(since: Date?, cursor: String?, log: @Sendable (String) -> Void) async throws -> ConnectorBatch"}]},
+      {"from": "FilesystemConnector", "type": "depends_on", "to": "Connector", "status": "INFERRED", "evidence": [{"path": "Sources/CoreIngest/FilesystemConnector.swift", "line": 19, "match": "public struct FilesystemConnector: Connector {"}]},
+      {"from": "FilesystemConnector", "type": "depends_on", "to": "ConnectorBatch", "status": "INFERRED", "evidence": [{"path": "Sources/CoreIngest/FilesystemConnector.swift", "line": 243, "match": "public func fetch(since: Date?, cursor: String?, log: @Sendable (String) -> Void) async throws -> ConnectorBatch {"}]},
+      {"from": "GitHubConnector", "type": "depends_on", "to": "Connector", "status": "INFERRED", "evidence": [{"path": "Sources/CoreIngest/GitHubConnector.swift", "line": 14, "match": "public struct GitHubConnector: Connector {"}]},
+      {"from": "GitHubConnector", "type": "depends_on", "to": "ConnectorBatch", "status": "INFERRED", "evidence": [{"path": "Sources/CoreIngest/GitHubConnector.swift", "line": 128, "match": "public func fetch(since: Date?, cursor: String?, log: @Sendable (String) -> Void) async throws -> ConnectorBatch {"}]},
+      {"from": "GitHubConnector", "type": "depends_on", "to": "ConnectorError", "status": "INFERRED", "evidence": [{"path": "Sources/CoreIngest/GitHubConnector.swift", "line": 294, "match": "} catch ConnectorError.http(let status, _) where status == 409 {"}]},
+      {"from": "AppleEventKitConnector", "type": "depends_on", "to": "Connector", "status": "INFERRED", "evidence": [{"path": "Sources/CoreIngest/AppleEventKitConnector.swift", "line": 17, "match": "public struct AppleEventKitConnector: Connector {"}]},
+      {"from": "AppleEventKitConnector", "type": "depends_on", "to": "ConnectorBatch", "status": "INFERRED", "evidence": [{"path": "Sources/CoreIngest/AppleEventKitConnector.swift", "line": 80, "match": "public func fetch(since: Date?, cursor: String?, log: @Sendable (String) -> Void) async throws -> ConnectorBatch {"}]},
+      {"from": "AppleNotesConnector", "type": "depends_on", "to": "Connector", "status": "INFERRED", "evidence": [{"path": "Sources/CoreIngest/AppleNotesConnector.swift", "line": 16, "match": "public struct AppleNotesConnector: Connector {"}]},
+      {"from": "AppleNotesConnector", "type": "depends_on", "to": "ConnectorBatch", "status": "INFERRED", "evidence": [{"path": "Sources/CoreIngest/AppleNotesConnector.swift", "line": 72, "match": "public func fetch(since: Date?, cursor: String?, log: @Sendable (String) -> Void) async throws -> ConnectorBatch {"}]},
+      {"from": "HealthKitConnector", "type": "depends_on", "to": "Connector", "status": "INFERRED", "evidence": [{"path": "Sources/CoreIngest/HealthKitConnector.swift", "line": 34, "match": "public struct HealthKitConnector: Connector {"}]},
+      {"from": "HealthKitConnector", "type": "depends_on", "to": "ConnectorBatch", "status": "INFERRED", "evidence": [{"path": "Sources/CoreIngest/HealthKitConnector.swift", "line": 72, "match": "public func fetch(since: Date?, cursor: String?, log: @Sendable (String) -> Void) async throws -> ConnectorBatch {"}]},
+      {"from": "Connector", "type": "depends_on", "to": "feature:store-floor", "status": "INFERRED", "evidence": [{"path": "Sources/CoreIngest/Connector.swift", "line": 11, "match": "var source: Source { get }"}], "note": "via Source"},
+      {"from": "FilesystemConnector", "type": "depends_on", "to": "feature:store-floor", "status": "INFERRED", "evidence": [{"path": "Sources/CoreIngest/FilesystemConnector.swift", "line": 20, "match": "public let source: Source"}], "note": "via Source, Authority, CoreObject"},
+      {"from": "FilesystemConnector", "type": "depends_on", "to": "feature:firewall", "status": "INFERRED", "evidence": [{"path": "Sources/CoreIngest/FilesystemConnector.swift", "line": 29, "match": "public let domain: Domain"}], "note": "via Domain"},
+      {"from": "GitHubConnector", "type": "depends_on", "to": "feature:store-floor", "status": "INFERRED", "evidence": [{"path": "Sources/CoreIngest/GitHubConnector.swift", "line": 15, "match": "public let source: Source"}], "note": "via Source, CoreObject"},
+      {"from": "GitHubConnector", "type": "depends_on", "to": "feature:mcp-client", "status": "INFERRED", "evidence": [{"path": "Sources/CoreIngest/GitHubConnector.swift", "line": 55, "match": "public static func resolveTokenWithSource(explicit: String? = nil) -> (token: String?, source: CredentialSource) {"}], "note": "via CredentialSource, Keychain"},
+      {"from": "GitHubConnector", "type": "depends_on", "to": "feature:cli", "status": "INFERRED", "evidence": [{"path": "Sources/CoreIngest/GitHubConnector.swift", "line": 75, "match": "struct User: Decodable { let login: String }"}], "note": "via User"},
+      {"from": "GitHubConnector", "type": "depends_on", "to": "feature:hardware", "status": "INFERRED", "evidence": [{"path": "Sources/CoreIngest/GitHubConnector.swift", "line": 109, "match": "let result = try BoundedProcess.run("}], "note": "via BoundedProcess"},
+      {"from": "AppleEventKitConnector", "type": "depends_on", "to": "feature:store-floor", "status": "INFERRED", "evidence": [{"path": "Sources/CoreIngest/AppleEventKitConnector.swift", "line": 31, "match": "public let source: Source"}], "note": "via Source, CoreObject"},
+      {"from": "AppleNotesConnector", "type": "depends_on", "to": "feature:store-floor", "status": "INFERRED", "evidence": [{"path": "Sources/CoreIngest/AppleNotesConnector.swift", "line": 17, "match": "public let source: Source"}], "note": "via Source, CoreObject"},
+      {"from": "AppleNotesConnector", "type": "depends_on", "to": "feature:firewall", "status": "INFERRED", "evidence": [{"path": "Sources/CoreIngest/AppleNotesConnector.swift", "line": 224, "match": "static func domain(forFolder folder: String) -> Domain {"}], "note": "via Domain"},
+      {"from": "AppleNotesConnector", "type": "depends_on", "to": "feature:hardware", "status": "INFERRED", "evidence": [{"path": "Sources/CoreIngest/AppleNotesConnector.swift", "line": 243, "match": "let result = try BoundedProcess.run("}], "note": "via BoundedProcess"},
+      {"from": "HealthKitConnector", "type": "depends_on", "to": "feature:store-floor", "status": "INFERRED", "evidence": [{"path": "Sources/CoreIngest/HealthKitConnector.swift", "line": 35, "match": "public let source: Source"}], "note": "via Source, CoreObject"},
+      {"from": "ConnectorBatch", "type": "depends_on", "to": "feature:store-floor", "status": "INFERRED", "evidence": [{"path": "Sources/CoreModel/ConnectorBatch.swift", "line": 8, "match": "public var objects: [CoreObject]"}], "note": "via CoreObject"}
+    ],
+    "edges_omitted": 0
+  }
+}

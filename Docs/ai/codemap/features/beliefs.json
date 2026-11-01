@@ -1,0 +1,64 @@
+{
+  "schema": "codemap/1",
+  "id": "beliefs",
+  "name": "Beliefs and contradictions",
+  "aliases": ["BeliefEngine", "contradiction", "adjudicate", "supersede", "dormant", "status", "correction", "notifications", "alerts"],
+  "purpose": "Decides which claim stands in a slot: a record rewriting itself resolves by time, real disagreements become contradiction rows, and only new ones alert.",
+  "revision": "e801208",
+  "verified_on": "2026-10-31",
+  "entry_points": ["BeliefEngine.reconcile"],
+  "files": [
+    {"path": "Sources/CoreGraph/BeliefEngine.swift", "role": "primary", "blob": "83c4abb540c06325a03d838db9808ad826af5b11"},
+    {"path": "Sources/CoreGraph/BeliefAlerts.swift", "role": "primary", "blob": "dea0e3f5584d2b2b4e2f1bb9fb7dfed99bbff7ad"},
+    {"path": "Sources/CoreModel/Belief.swift", "role": "primary", "blob": "d1bb37bee60b6227641509ff1d22927ad974b1dd"},
+    {"path": "Sources/CoreModel/CommitNature.swift", "role": "primary", "blob": "7b923a472de4e9fb89871cf669baea88fd7b0b7f"},
+    {"path": "Apps/OpenCoreMac/Sources/BeliefNotifications.swift", "role": "primary", "blob": "f6a43b9cee214afe8cdc351feb01283ffba6757f"},
+    {"path": "Apps/OpenCoreMac/Sources/CorrectionSheet.swift", "role": "primary", "blob": "3005cd3445db0c6204960e93c1d0d2e9128c8886"},
+    {"path": "Tests/CoreGraphTests/BeliefEngineTests.swift", "role": "test", "blob": "f408e70510a3a868dbb0207d0bfc68305569b87c"},
+    {"path": "Tests/CoreGraphTests/BeliefHonestyTests.swift", "role": "test", "blob": "878e471041141811927eba4a13395bb66a1f3fb6"}
+  ],
+  "nodes": [
+    {"id": "BeliefEngine.reconcile", "kind": "function", "path": "Sources/CoreGraph/BeliefEngine.swift", "line": 38, "match": "public func reconcile() async throws -> Outcome {", "status": "VERIFIED", "note": ""},
+    {"id": "BeliefEngine.revisions", "kind": "function", "path": "Sources/CoreGraph/BeliefEngine.swift", "line": 230, "match": "private func revisions(among claims: [CoreClaim]) async throws -> [Revision] {", "status": "VERIFIED", "note": "A record that has since said something else drops out before authority compares."},
+    {"id": "BeliefEngine.adjudicate", "kind": "function", "path": "Sources/CoreGraph/BeliefEngine.swift", "line": 469, "match": "private func adjudicate(winner: CoreClaim, loser: CoreClaim) -> Verdict {", "status": "VERIFIED", "note": "Says when authority overrode a newer claim."},
+    {"id": "BeliefEngine.correct", "kind": "function", "path": "Sources/CoreGraph/BeliefEngine.swift", "line": 570, "match": "public func correct(", "status": "VERIFIED", "note": "A correction asserts a new claim and retracts the old."},
+    {"id": "BeliefAlerts", "kind": "service", "path": "Sources/CoreGraph/BeliefAlerts.swift", "line": 13, "match": "public static func contradictionIdentifier(for opened: [ContradictionID]) -> String? {", "status": "VERIFIED", "note": "Stable id, so a pass with nothing new alerts nothing."},
+    {"id": "BeliefNotifier", "kind": "service", "path": "Apps/OpenCoreMac/Sources/BeliefNotifications.swift", "line": 23, "match": "static func notifyIfNeeded(", "status": "VERIFIED", "note": "App side, untested."}
+  ],
+  "edges": [
+    {"from": "BeliefNotifier", "type": "calls", "to": "BeliefAlerts", "status": "VERIFIED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/BeliefNotifications.swift", "line": 33, "match": "if let identifier = BeliefAlerts.contradictionIdentifier(for: outcome.contradictionsNew) {"}], "note": ""}
+  ],
+  "docs": [],
+  "unknowns": ["Whether a notification is ever delivered: BeliefNotifier has never run, because the app was not launched."],
+  "related": ["ingest", "rebuild"],
+  "derived": {
+    "generated_by": "codemap 1.1.0 derive: declarations, type references and test mentions; edges are INFERRED",
+    "nodes": [
+      {"id": "BeliefEngine", "kind": "model", "path": "Sources/CoreGraph/BeliefEngine.swift", "line": 14, "match": "public struct BeliefEngine: Sendable {", "status": "VERIFIED"},
+      {"id": "ContradictionKind", "kind": "model", "path": "Sources/CoreModel/Belief.swift", "line": 4, "match": "public enum ContradictionKind: String, Sendable, Codable {", "status": "VERIFIED"},
+      {"id": "Resolution", "kind": "model", "path": "Sources/CoreModel/Belief.swift", "line": 14, "match": "public enum Resolution: String, Sendable, Codable {", "status": "VERIFIED"},
+      {"id": "Contradiction", "kind": "model", "path": "Sources/CoreModel/Belief.swift", "line": 27, "match": "public struct Contradiction: Hashable, Sendable, Codable, Identifiable {", "status": "VERIFIED"},
+      {"id": "Belief", "kind": "model", "path": "Sources/CoreModel/Belief.swift", "line": 66, "match": "public struct Belief: Hashable, Sendable, Codable, Identifiable {", "status": "VERIFIED"},
+      {"id": "Correction", "kind": "model", "path": "Sources/CoreModel/Belief.swift", "line": 109, "match": "public struct Correction: Hashable, Sendable, Codable, Identifiable {", "status": "VERIFIED"},
+      {"id": "CorrectionSheet", "kind": "view", "path": "Apps/OpenCoreMac/Sources/CorrectionSheet.swift", "line": 55, "match": "struct CorrectionSheet: View {", "status": "VERIFIED"}
+    ],
+    "edges": [
+      {"from": "BeliefEngine", "type": "depends_on", "to": "Contradiction", "status": "INFERRED", "evidence": [{"path": "Sources/CoreGraph/BeliefEngine.swift", "line": 40, "match": "var contradictions: [Contradiction] = []"}]},
+      {"from": "BeliefEngine", "type": "depends_on", "to": "ContradictionKind", "status": "INFERRED", "evidence": [{"path": "Sources/CoreGraph/BeliefEngine.swift", "line": 458, "match": "var kind: ContradictionKind"}]},
+      {"from": "BeliefEngine", "type": "depends_on", "to": "Resolution", "status": "INFERRED", "evidence": [{"path": "Sources/CoreGraph/BeliefEngine.swift", "line": 459, "match": "var resolution: Resolution"}]},
+      {"from": "BeliefEngine", "type": "depends_on", "to": "Belief", "status": "INFERRED", "evidence": [{"path": "Sources/CoreGraph/BeliefEngine.swift", "line": 546, "match": "try await store.save(Belief("}]},
+      {"from": "BeliefEngine", "type": "depends_on", "to": "Correction", "status": "INFERRED", "evidence": [{"path": "Sources/CoreGraph/BeliefEngine.swift", "line": 606, "match": "try await store.save(Correction("}]},
+      {"from": "BeliefNotifier", "type": "depends_on", "to": "BeliefAlerts", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/BeliefNotifications.swift", "line": 33, "match": "if let identifier = BeliefAlerts.contradictionIdentifier(for: outcome.contradictionsNew) {"}]},
+      {"from": "app-shell#AppModel", "type": "depends_on", "to": "BeliefEngine", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/CorrectionSheet.swift", "line": 39, "match": "try await BeliefEngine(store: store).correct("}]},
+      {"from": "BeliefEngine", "type": "depends_on", "to": "feature:store-floor", "status": "INFERRED", "evidence": [{"path": "Sources/CoreGraph/BeliefEngine.swift", "line": 15, "match": "private let store: Store"}], "note": "via Store, Predicate, CoreClaim, Evidence"},
+      {"from": "BeliefAlerts", "type": "depends_on", "to": "feature:store-floor", "status": "INFERRED", "evidence": [{"path": "Sources/CoreGraph/BeliefAlerts.swift", "line": 22, "match": "!Predicate.documentRestated.contains(predicate)"}], "note": "via Predicate"},
+      {"from": "Belief", "type": "depends_on", "to": "feature:store-floor", "status": "INFERRED", "evidence": [{"path": "Sources/CoreModel/Belief.swift", "line": 74, "match": "public var authority: Authority"}], "note": "via Authority, Validity"},
+      {"from": "Correction", "type": "depends_on", "to": "feature:store-floor", "status": "INFERRED", "evidence": [{"path": "Sources/CoreModel/Belief.swift", "line": 113, "match": "public var authority: Authority"}], "note": "via Authority"},
+      {"from": "BeliefNotifier", "type": "depends_on", "to": "feature:ingest", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/BeliefNotifications.swift", "line": 24, "match": "outcome: IngestPipeline.Outcome,"}], "note": "via IngestPipeline"},
+      {"from": "BeliefNotifier", "type": "depends_on", "to": "feature:store-floor", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/BeliefNotifications.swift", "line": 26, "match": "store: Store"}], "note": "via Store"},
+      {"from": "app-shell#AppModel", "type": "depends_on", "to": "feature:store-floor", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/CorrectionSheet.swift", "line": 16, "match": "claim wrong: CoreClaim,"}], "note": "via CoreClaim, Validity"},
+      {"from": "CorrectionSheet", "type": "depends_on", "to": "feature:app-shell", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/CorrectionSheet.swift", "line": 56, "match": "let row: AppModel.ClaimRow"}], "note": "via AppModel, Section"}
+    ],
+    "edges_omitted": 0
+  }
+}

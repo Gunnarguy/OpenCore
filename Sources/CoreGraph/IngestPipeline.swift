@@ -31,6 +31,11 @@ public struct IngestPipeline: Sendable {
         public var contradictions = 0
         public var contradictionsResolved = 0
         public var contradictionsOpen = 0
+        /// Open contradictions this pass found for the first time. `contradictionsOpen` counts
+        /// every open slot on every pass, so it cannot drive an alert.
+        public var contradictionsNew: [ContradictionID] = []
+        /// Claims replaced by a newer revision of the document that stated them.
+        public var documentSuccessions = 0
     }
 
     /// Store objects, then derive everything above them.
@@ -41,6 +46,7 @@ public struct IngestPipeline: Sendable {
         try await Telemetry.span("pipeline.run", .graph, attributes: ["storeObjects": String(storeObjects)]) { pipeline in
             pipeline.set("objects.in", objects.count)
             var outcome = Outcome()
+            var effectiveObjects = objects
 
             if storeObjects {
                 outcome.ingest = try await Telemetry.span("store.objects", .graph) { scope in
@@ -50,6 +56,9 @@ public struct IngestPipeline: Sendable {
                     scope.set("unchanged", ingested.unchanged)
                     return ingested
                 }
+                // Store may retain a stronger privacy compartment or merge floor metadata.
+                // Derivation must consume that effective floor, never the unchecked input.
+                effectiveObjects = try await store.objects(ids: objects.map(\.id))
                 log("objects: \(outcome.ingest.inserted) new, \(outcome.ingest.updated) changed, \(outcome.ingest.unchanged) unchanged")
             }
 
@@ -57,7 +66,7 @@ public struct IngestPipeline: Sendable {
             // depends on them, and a failure here should surface before the expensive stages.
             let allChunks = try await Telemetry.span("chunk", .graph) { scope in
                 var chunks: [CoreChunk] = []
-                for object in objects {
+                for object in effectiveObjects {
                     chunks.append(contentsOf: chunker.chunks(for: object))
                 }
                 try await store.save(chunks)
@@ -74,7 +83,7 @@ public struct IngestPipeline: Sendable {
             log("chunks: \(allChunks.count)")
 
             let resolved = try await Telemetry.span("resolve.entities", .graph) { scope in
-                let resolved = try await EntityResolver(store: store).resolve(objects: objects)
+                let resolved = try await EntityResolver(store: store).resolve(objects: effectiveObjects)
                 scope.set("entities", resolved.entities)
                 scope.set("aliases", resolved.aliases)
                 return resolved
@@ -84,7 +93,7 @@ public struct IngestPipeline: Sendable {
             log("entities: \(resolved.entities) with \(resolved.aliases) aliases")
 
             let extracted = try await Telemetry.span("extract.claims", .graph) { scope in
-                let extracted = try await ClaimExtractor(store: store, now: now).extract(from: objects)
+                let extracted = try await ClaimExtractor(store: store, now: now).extract(from: effectiveObjects)
                 scope.set("claims", extracted.claims)
                 scope.set("events", extracted.events)
                 scope.set("evidence", extracted.evidence)
@@ -109,6 +118,8 @@ public struct IngestPipeline: Sendable {
             outcome.contradictions = reconciled.contradictionsFound
             outcome.contradictionsResolved = reconciled.resolved
             outcome.contradictionsOpen = reconciled.unresolved
+            outcome.contradictionsNew = reconciled.newlyOpened
+            outcome.documentSuccessions = reconciled.documentSuccessions
             log("beliefs: \(reconciled.beliefsWritten) written, \(reconciled.contradictionsFound) contradictions (\(reconciled.resolved) resolved, \(reconciled.unresolved) open)")
 
             return outcome

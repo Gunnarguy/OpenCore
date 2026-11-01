@@ -142,4 +142,37 @@ struct AnswerRenderingTests {
     func citationRangeMatchesSourceCount() {
         #expect(Conversation.sourceCount == AnswerLimits.maximumSourceNumber)
     }
+
+    @Test("Elliptical follow-up questions inherit subject context from prior turns without rewriting standalone questions")
+    func contextualizedFollowUpQuery() {
+        let rewritten = Conversation.contextualizedQuery(
+            "When was it last updated?",
+            priorQuestions: ["What is OpenIntelligence built with?"],
+            priorSourceTitles: ["Gunnarguy/OpenIntelligence — README.md"]
+        )
+        #expect(rewritten.contains("OpenIntelligence"))
+
+        let standalone = Conversation.contextualizedQuery(
+            "What is OpenClinic built with?",
+            priorQuestions: ["What is OpenIntelligence built with?"],
+            priorSourceTitles: ["Gunnarguy/OpenIntelligence — README.md"]
+        )
+        #expect(standalone == "What is OpenClinic built with?")
+    }
+
+    @Test("Deterministic passage synthesis produces cited sentences that pass Grounding verification")
+    func deterministicSynthesisProducesGroundedSentences() {
+        let synthesized = Conversation.deterministicSynthesis(from: GroundingTests.sources)
+        #expect(synthesized.count == 2)
+        for item in synthesized {
+            let verdict = Grounding().verify(
+                sentence: item.text,
+                citedSource: item.source,
+                sources: GroundingTests.sources
+            )
+            #expect(verdict.citationResolves)
+            #expect(verdict.isGrounded)
+            #expect(verdict.score == 1.0)
+        }
+    }
 }

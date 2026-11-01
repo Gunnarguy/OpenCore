@@ -70,7 +70,7 @@ final class MCPStoreModel {
 }
 
 struct MCPStoreView: View {
-    @Environment(AppModel.self) private var model
+    @Environment(\.appModel) private var model
     @State private var store = MCPStoreModel()
 
     /// Called once a server has been recorded, so the screen can hand the reader back to the
@@ -204,7 +204,7 @@ private struct MCPStoreDetail: View {
     let server: RegistryServer
     @Bindable var store: MCPStoreModel
     let onAdded: () -> Void
-    @Environment(AppModel.self) private var model
+    @Environment(\.appModel) private var model
     @State private var adding = false
     @State private var outcome: String?
 

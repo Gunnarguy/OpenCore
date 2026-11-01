@@ -1,0 +1,48 @@
+{
+  "schema": "codemap-config/1",
+  "project": "OpenCore",
+  "script": "script/codemap.py",
+  "source_roots": [
+    "Sources",
+    "Apps/OpenCoreMac/Sources"
+  ],
+  "test_roots": [
+    "Tests"
+  ],
+  "source_extensions": [
+    ".swift",
+    ".sql"
+  ],
+  "resource_extensions": [
+    ".plist",
+    ".entitlements",
+    ".json"
+  ],
+  "ignore": [
+    ".DS_Store"
+  ],
+  "features": [
+    "store-floor",
+    "ingest",
+    "beliefs",
+    "connectors",
+    "source-sync",
+    "private-names",
+    "firewall",
+    "retrieval",
+    "time-windows",
+    "answers",
+    "chat",
+    "mcp-server",
+    "mcp-client",
+    "rebuild",
+    "home",
+    "browse",
+    "app-shell",
+    "cli",
+    "operator-console",
+    "hardware",
+    "monitors"
+  ],
+  "unmapped_notes": {}
+}
