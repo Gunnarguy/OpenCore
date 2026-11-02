@@ -744,7 +744,9 @@ final class AppModel {
         async let ecoTask = OperatorConsoleService.collectAgentEcosystem()
         let (cards, eco) = await (cardsTask, ecoTask)
         fleetSnapshot.record(cards)
-        if !cards.issues.isEmpty, failure == nil {
+        // One unreadable repository stays on the Projects screen with its card. Only a read that
+        // returned nothing is worth a banner over Ask, which is about the owner's day.
+        if !cards.issues.isEmpty, (cards.value ?? []).isEmpty, failure == nil {
             failure = AppFailure(message: cards.issues.joined(separator: " "), at: cards.finishedAt)
         }
         if agentEcosystem.map({ eco.checkedOrder >= $0.checkedOrder }) ?? true { agentEcosystem = eco }
