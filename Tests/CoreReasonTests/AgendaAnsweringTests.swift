@@ -171,3 +171,24 @@ func chatAnswersFromEvents() async throws {
     #expect(turn.receipt?.model == nil)
     #expect(turn.receipt?.stages.map(\.name) == ["agenda"])
 }
+
+// The Ask screen opens on this, so it is the first thing the owner reads each day.
+@Test("today splits today from tomorrow and what is due from what is overdue")
+func todaySplitsItsParts() async throws {
+    let fixture = try await Fixture.make(); defer { fixture.clean() }
+    _ = try await fixture.store.ingest([event("Tonight", at: "2026-10-30T18:00:00Z"), reminder("Due tomorrow", due: "2026-10-31T09:00:00Z")])
+    let owner = AdmissionPolicy(queryDomain: .personal)
+    let today = try #require(try await AgendaAnswering(store: fixture.store).today(policy: owner, now: now, calendar: calendar))
+    #expect(today.today.map(\.title) == ["Tonight"])
+    #expect(today.tomorrow.map(\.title).contains("Dentist QUILLBERRY"))
+    #expect(today.due.map(\.title) == ["Due tomorrow"])
+    #expect(today.overdue.map(\.title) == ["Pay the loan"])
+    #expect(today.notices.isEmpty)
+}
+
+@Test("today shows nothing to a surface without personal admission")
+func todayRespectsAdmission() async throws {
+    let fixture = try await Fixture.make(); defer { fixture.clean() }
+    let project = AdmissionPolicy(queryDomain: .project)
+    #expect(try await AgendaAnswering(store: fixture.store).today(policy: project, now: now, calendar: calendar) == nil)
+}

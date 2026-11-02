@@ -1050,7 +1050,7 @@ struct SourcesView: View {
                         .disabled(isWorking)
 
                         Button {
-                            model.navigate(to: .mcp)
+                            model.openConnections()
                         } label: {
                             Label("Manage MCP Servers", systemImage: "powerplug.fill")
                                 .font(.caption.weight(.medium))

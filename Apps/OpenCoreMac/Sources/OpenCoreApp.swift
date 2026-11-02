@@ -77,25 +77,25 @@ struct OpenCoreApp: App {
 
                 Divider()
 
-                Button("Command Center") { model.navigate(to: .home) }
+                Button("Ask") { model.navigate(to: .ask) }
                     .keyboardShortcut("1", modifiers: .command)
-                Button("Grounded Chat") { model.navigate(to: .chat) }
+                Button("Mac Overview") { model.navigate(to: .macOverview) }
                     .keyboardShortcut("2", modifiers: .command)
-                Button("Repo Fleet & Handoffs") { model.navigate(to: .repoFleet) }
+                Button("Projects") { model.navigate(to: .repoFleet) }
                     .keyboardShortcut("3", modifiers: .command)
-                Button("Coding Agents Hub") { model.navigate(to: .codingAgents) }
+                Button("Agents") { model.navigate(to: .codingAgents) }
                     .keyboardShortcut("4", modifiers: .command)
-                Button("Computer Use Studio") { model.navigate(to: .computerControl) }
+                Button("Computer Use") { model.navigate(to: .computerControl) }
                     .keyboardShortcut("5", modifiers: .command)
-                Button("AI Models & RAM (LM Studio)") { model.navigate(to: .aiModelsRAM) }
+                Button("Models") { model.navigate(to: .aiModelsRAM) }
                     .keyboardShortcut("6", modifiers: .command)
-                Button("Hardware, USB & Disk") { model.navigate(to: .hardwareUSB) }
+                Button("Hardware") { model.navigate(to: .hardwareUSB) }
                     .keyboardShortcut("7", modifiers: .command)
-                Button("Knowledge Graph") { model.navigate(to: .entities) }
+                Button("Topics") { model.navigate(to: .entities) }
                     .keyboardShortcut("8", modifiers: .command)
-                Button("Timeline & Time Travel") { model.navigate(to: .timeline) }
+                Button("Events") { model.navigate(to: .timeline) }
                     .keyboardShortcut("9", modifiers: .command)
-                Button("Connections & MCP") { model.navigate(to: .mcp) }
+                Button("Connections") { model.openConnections() }
                     .keyboardShortcut("0", modifiers: .command)
 
                 Divider()
@@ -145,69 +145,37 @@ struct OpenCoreApp: App {
 
 #endif
 
-/// The sidebar, organized into human-centered categories where each major domain gets its own clean workspace.
+/// Every screen. Three places hold them: Ask, Mac and Evidence, in `WorkspaceFamily`.
 enum Section: String, CaseIterable, Identifiable, Hashable {
-    // 1. Overview & Ask
-    case home = "Command Center"
-    case chat = "Grounded Chat"
+    case ask = "Ask"
 
-    // 2. Projects & Coding Agents
-    case repoFleet = "Repo Fleet & Handoffs"
-    case codingAgents = "Coding Agents Hub"
+    case macOverview = "Overview"
+    case repoFleet = "Projects"
+    case codingAgents = "Agents"
+    case computerControl = "Computer Use"
+    case aiModelsRAM = "Models"
+    case hardwareUSB = "Hardware"
 
-    // 3. Computer Use & Local AI
-    case computerControl = "Computer Use Studio"
-    case aiModelsRAM = "AI Models & RAM"
-
-    // 4. Hardware & System
-    case hardwareUSB = "Hardware, USB & Disk"
-
-    // 5. Knowledge & Connections
-    case entities = "Knowledge Graph"
-    case timeline = "Timeline & Time Travel"
-    case mcp = "Connections & MCP"
-    case settings = "Settings"
-
-    // 6. Developer Tables (Collapsible)
-    case contradictions = "Reality Checks & Diffs"
-    case claims = "Claims"
-    case beliefs = "Beliefs"
-    case passages = "Passages"
-    case receipts = "Receipts"
-    case timeTravel = "Time travel"
     case sources = "Sources"
-    case corpus = "Corpus"
-    case maintenance = "Maintenance"
+    case corpus = "Originals"
+    case passages = "Excerpts"
+    case claims = "Statements"
+    case beliefs = "Decisions"
+    case receipts = "Receipts"
+    case entities = "Topics"
+    case timeline = "Events"
+    case timeTravel = "Time Travel"
+    case contradictions = "Checks"
+    case maintenance = "Health"
+
+    case settings = "Settings"
 
     var id: String { rawValue }
 
-    /// Which band of the sidebar this belongs to.
-    enum Band: String, CaseIterable, Identifiable {
-        case overview = "Overview & Ask"
-        case projectsAndAgents = "Projects & Agents"
-        case computerUseAndAI = "Computer Use & Local AI"
-        case hardware = "Hardware & System"
-        case knowledgeAndConfig = "Knowledge & Connections"
-        case developer = "Evidence & Engine"
-
-        var id: String { rawValue }
-    }
-
-    var band: Band {
-        switch self {
-        case .home, .chat: .overview
-        case .repoFleet, .codingAgents: .projectsAndAgents
-        case .computerControl, .aiModelsRAM: .computerUseAndAI
-        case .hardwareUSB: .hardware
-        case .entities, .timeline, .mcp, .settings: .knowledgeAndConfig
-        case .contradictions, .claims, .beliefs, .passages, .receipts, .timeTravel, .sources, .corpus, .maintenance: .developer
-        }
-    }
-
     var symbol: String {
         switch self {
-        case .home: "sparkles.rectangle.stack"
-        case .chat: "bubble.left.and.bubble.right"
+        case .ask: "bubble.left.and.bubble.right"
+        case .macOverview: "sparkles.rectangle.stack"
         case .repoFleet: "folder.fill.badge.gearshape"
         case .codingAgents: "point.3.filled.connected.trianglepath.dotted"
         case .computerControl: "viewfinder.rectangular"
@@ -223,7 +191,6 @@ enum Section: String, CaseIterable, Identifiable, Hashable {
         case .contradictions: "checkmark.shield"
         case .receipts: "receipt"
         case .sources: "arrow.triangle.2.circlepath"
-        case .mcp: "powerplug"
         case .maintenance: "stethoscope"
         case .settings: "gearshape"
         }
@@ -232,47 +199,36 @@ enum Section: String, CaseIterable, Identifiable, Hashable {
 
 struct RootView: View {
     @Environment(\.appModel) private var model
-    @ObservedObject private var connectedDisplays = ConnectedDisplayInventory.shared
-    @AppStorage("sidebar.showDeveloper") private var showDeveloper = true
+    @AppStorage("sidebar.showEvidence") private var showEvidence = false
     @State private var isDropTargeted = false
 
     var body: some View {
         @Bindable var model = model
         NavigationSplitView {
             List(selection: Binding(get: { model.selectedSection }, set: { model.navigate(to: $0) })) {
-                ForEach(Section.Band.allCases) { band in
-                    if band != .developer {
-                        SwiftUI.Section(band.rawValue) {
-                            ForEach(Section.allCases.filter { $0.band == band }) { item in
-                                sidebarLabel(item)
-                                    .badge(badge(for: item))
-                                    .tag(item)
-                            }
-                        }
+                sidebarLabel(.ask).tag(Section.ask)
+
+                SwiftUI.Section(WorkspaceFamily.mac.rawValue) {
+                    ForEach(WorkspaceFamily.mac.sections) { item in
+                        sidebarLabel(item).tag(item)
                     }
                 }
 
                 SwiftUI.Section {
-                    if showDeveloper {
-                        ForEach(Section.evidenceSections) { item in
+                    if showEvidence {
+                        ForEach(WorkspaceFamily.evidence.sections) { item in
                             sidebarLabel(item)
-                                .badge(badge(for: item))
+                                .badge(item == .contradictions ? model.openContradictionCount : 0)
                                 .tag(item)
                         }
                     }
                 } header: {
                     Button {
-                        withAnimation(.easeOut(duration: 0.15)) { showDeveloper.toggle() }
-                        ActionFeedbackCenter.shared.record(
-                            button: "Toggle Evidence & Engine Workspaces",
-                            command: "sidebar.showDeveloper = \(showDeveloper)",
-                            outcome: showDeveloper ? "Expanded all \(Section.evidenceSections.count) Evidence & Engine workspaces." : "Collapsed Evidence & Engine workspaces.",
-                            status: .completed
-                        )
+                        withAnimation(.easeOut(duration: 0.15)) { showEvidence.toggle() }
                     } label: {
                         HStack(spacing: 4) {
-                            Text("Evidence & Engine")
-                            Image(systemName: showDeveloper ? "chevron.down" : "chevron.right")
+                            Text(WorkspaceFamily.evidence.rawValue)
+                            Image(systemName: showEvidence ? "chevron.down" : "chevron.right")
                                 .font(.caption2)
                             Spacer()
                         }
@@ -280,17 +236,15 @@ struct RootView: View {
                     }
                     .buttonStyle(.plain)
                 }
+
+                SwiftUI.Section {
+                    sidebarLabel(.settings).tag(Section.settings)
+                }
             }
             .navigationSplitViewColumnWidth(min: 215, ideal: 245, max: 300)
             .safeAreaInset(edge: .bottom) { StatusBar() }
             .onChange(of: model.selectedSection) { _, newSection in
-                if newSection.band == .developer { showDeveloper = true }
-                ActionFeedbackCenter.shared.record(
-                    button: "Switch Workspace -> \(newSection.rawValue)",
-                    command: "NavigationSplitView.select(\(newSection.id))",
-                    outcome: "Opened '\(newSection.rawValue)' (\(newSection.band.rawValue)) and refreshed view bindings.",
-                    status: .completed
-                )
+                if newSection.family == .evidence { showEvidence = true }
             }
         } detail: {
             // The automatic inspector entered an AppKit layout cycle on this Mac when opened.
@@ -302,7 +256,10 @@ struct RootView: View {
                     }
                     ComputerRunStopBar()
                     ActionFeedbackBar()
-                    WorkspaceOrientationView(section: model.selectedSection)
+                    // Evidence screens are the ones that need explaining. Ask and Mac speak for themselves.
+                    if model.selectedSection.family == .evidence {
+                        WorkspaceOrientationView(section: model.selectedSection)
+                    }
                     if let subject = model.knowledgeSubject(for: model.selectedSection) {
                         KnowledgeSubjectBanner(subject: subject) { model.navigate(to: model.selectedSection) }
                     }
@@ -389,97 +346,13 @@ struct RootView: View {
                         } label: {
                             HStack(spacing: 6) {
                                 Image(systemName: "magnifyingglass")
-                                Text("Quick Jump")
+                                Text("Search")
                                 Text("⌘K")
                                     .font(.caption2.monospaced())
                                     .foregroundStyle(.secondary)
                             }
                         }
                         .help("Jump to any entity, claim, passage, or command (⌘K)")
-                    }
-
-                    ToolbarItem(placement: .automatic) {
-                        Button {
-                            model.showingJarvisHUD = true
-                            ActionFeedbackCenter.shared.record(
-                                button: "J.A.R.V.I.S. HUD (⌘J)",
-                                command: "showingJarvisHUD = true",
-                                outcome: "Opened On-Device Executive Briefing, Speech & Vision HUD.",
-                                status: .completed
-                            )
-                        } label: {
-                            HStack(spacing: 6) {
-                                Image(systemName: "sparkles.tv.fill")
-                                Text("J.A.R.V.I.S.")
-                                Text("⌘J")
-                                    .font(.caption2.monospaced())
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                        .help("Open J.A.R.V.I.S. Executive Briefing, On-Device Voice & Vision HUD (⌘J)")
-                    }
-
-                    ToolbarItem(placement: .automatic) {
-                        Button {
-                            model.navigate(to: .hardwareUSB)
-                        } label: {
-                            HStack(spacing: 5) {
-                                Image(systemName: "cable.connector.horizontal")
-                                    .foregroundStyle(Pastel.aqua)
-                                Text("Hardware")
-                                    .font(.caption)
-                            }
-                        }
-                        .help("Inspect connected displays, USB, Thunderbolt and disks (⌘7)")
-                    }
-
-                    ToolbarItem(placement: .automatic) {
-                        Button {
-                            model.navigate(to: .computerControl)
-                        } label: {
-                            HStack(spacing: 5) {
-                                Image(systemName: "viewfinder.rectangular")
-                                    .foregroundStyle(Pastel.mint)
-                                Text("Computer Use")
-                                    .font(.caption)
-                            }
-                        }
-                        .help("Open supported Local Hub tasks, routines and planner previews (⌘5)")
-                    }
-
-                    ToolbarItem(placement: .automatic) {
-                        Button {
-                            model.navigate(to: .aiModelsRAM)
-                        } label: {
-                            HStack(spacing: 5) {
-                                Image(systemName: "cpu.fill")
-                                    .foregroundStyle(Pastel.lavender)
-                                Text("Models & RAM")
-                                    .font(.caption)
-                            }
-                        }
-                        .help("Check runtime support, load status, diagnostics and memory (⌘6)")
-                    }
-
-                    ToolbarItem(placement: .automatic) {
-                        Button {
-                            model.settings.toggleLightDarkMode()
-                            let modeName = model.settings.isEffectiveLightMode ? "Light Frost (☀️)" : "Dark Obsidian (🌙)"
-                            ActionFeedbackCenter.shared.record(
-                                button: "Toggle Light / Dark Theme",
-                                command: "NSApp.appearance = \(model.settings.isEffectiveLightMode ? ".aqua" : ".darkAqua")",
-                                outcome: "Switched entire window and Liquid Glass surfaces to \(modeName).",
-                                status: .completed
-                            )
-                        } label: {
-                            HStack(spacing: 5) {
-                                Image(systemName: model.settings.isEffectiveLightMode ? "sun.max.fill" : "moon.stars.fill")
-                                    .foregroundStyle(model.settings.isEffectiveLightMode ? Pastel.butter : Pastel.lavender)
-                                Text(model.settings.isEffectiveLightMode ? "Light" : "Dark")
-                                    .font(.caption.weight(.semibold))
-                            }
-                        }
-                        .help("Toggle between Light Frost and Dark Obsidian mode (⇧⌘L)")
                     }
 
                     ToolbarItem(placement: .primaryAction) {
@@ -534,8 +407,8 @@ struct RootView: View {
     private func detailView(for section: Section) -> some View {
         @Bindable var model = model
         switch section {
-        case .home: HomeView(section: Binding(get: { model.selectedSection }, set: { model.navigate(to: $0) }))
-        case .chat: ChatView()
+        case .ask: ChatView()
+        case .macOverview: HomeView(section: Binding(get: { model.selectedSection }, set: { model.navigate(to: $0) }))
         case .repoFleet: RepoFleetWorkspaceView()
         case .codingAgents: CodingAgentsWorkspaceView()
         case .computerControl: ComputerControlView()
@@ -551,38 +424,15 @@ struct RootView: View {
         case .contradictions: ContradictionsView()
         case .receipts: ReceiptsView()
         case .sources: SourcesView()
-        case .mcp: MCPView()
         case .maintenance: MaintenanceView()
         case .settings: SettingsView()
         }
     }
 
     private func sidebarLabel(_ item: Section) -> some View {
-        Label {
-            VStack(alignment: .leading, spacing: 1) {
-                Text(item.rawValue).lineLimit(1)
-                Text(item.guide.shortName == item.rawValue ? item.guide.role : item.guide.shortName)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-        } icon: {
-            Image(systemName: item.symbol)
-        }
-        .help(item.guide.purpose)
-    }
-
-    private func badge(for item: Section) -> Int {
-        switch item {
-        case .repoFleet: model.fleetCards.count
-        case .codingAgents: 3
-        case .aiModelsRAM: ComputerUseStudioController.shared.specialistCatalog.count
-        case .entities: model.entityCount
-        case .hardwareUSB: HardwareInspectorManager.shared.devices.count + connectedDisplays.displays.count
-        case .claims: model.claimCount
-        case .contradictions: model.openContradictionCount
-        default: 0
-        }
+        Label(item.rawValue, systemImage: item.symbol)
+            .lineLimit(1)
+            .help(item.guide.purpose)
     }
 }
 

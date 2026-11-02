@@ -2,117 +2,925 @@
   "schema": "codemap/1",
   "id": "app-shell",
   "name": "App shell and settings",
-  "aliases": ["OpenCoreApp", "AppModel", "Section", "sidebar", "navigation", "settings", "Quick Jump", "Spotlight", "App Intent", "theme", "glass"],
+  "aliases": [
+    "OpenCoreApp",
+    "AppModel",
+    "Section",
+    "sidebar",
+    "navigation",
+    "settings",
+    "Quick Jump",
+    "Spotlight",
+    "App Intent",
+    "theme",
+    "glass"
+  ],
   "purpose": "App entry, navigation and sections, the AppModel singleton, explicitly owned settings/theme state, Quick Jump, Spotlight and App Intents.",
   "revision": "08f4e80",
   "verified_on": "2026-11-01",
-  "entry_points": ["OpenCoreApp", "AppModel"],
+  "entry_points": [
+    "OpenCoreApp",
+    "AppModel"
+  ],
   "files": [
-    {"path": "Tests/CorePresentationTests/MCPPreferencePersistenceTests.swift", "role": "test", "blob": "4fa7214aa4671fb2e84e3a616db6e584a5195555"},
-    {"path": "Apps/OpenCoreMac/Sources/OpenCoreApp.swift", "role": "primary", "blob": "48b56f1ff325fec772a79e2970b866feea5e97c7"},
-    {"path": "Apps/OpenCoreMac/Sources/AppModel.swift", "role": "primary", "blob": "8ab8cc4a39993b6747de8ce531c0c89d1d410ee4"},
-    {"path": "Apps/OpenCoreMac/Sources/AppModel+Export.swift", "role": "primary", "blob": "2af954ae7dc7802761990d2ca5652775e17d365c"},
-    {"path": "Apps/OpenCoreMac/Sources/AppSettings.swift", "role": "primary", "blob": "781f15e482d077271ff40cb7fe703013661214a0"},
-    {"path": "Sources/CorePresentation/AppSettings.swift", "role": "primary", "blob": "876883b39b47ffb2eb8c117865f1512a6b44c3d7"},
-    {"path": "Sources/CorePresentation/Pastel.swift", "role": "primary", "blob": "f28d6bbded6cded1a0698b3554eabe8eda2cbd8f"},
-    {"path": "Tests/CorePresentationTests/AppSettingsTests.swift", "role": "test", "blob": "aac7fbc1e5d8a483e4443aaace0777fb26d345f4"},
-    {"path": "Apps/OpenCoreMac/Sources/SettingsView.swift", "role": "primary", "blob": "98176c44542474ef21c25d4f7e31ec2e5fccd2a1"},
-    {"path": "Apps/OpenCoreMac/Sources/WorkspaceGuide.swift", "role": "primary", "blob": "c33853843ba5ff6813710201c3ef401bc5987eab"},
-    {"path": "Apps/OpenCoreMac/Sources/WorkspaceOrientationView.swift", "role": "primary", "blob": "2c021c7e56ecceb17cf00cdb3773af1e078a45ac"},
-    {"path": "Apps/OpenCoreMac/Sources/QuickJumpSheet.swift", "role": "primary", "blob": "240f66f5b6a8f974411a1bf416acc32b0f0474cb"},
-    {"path": "Apps/OpenCoreMac/Sources/LiquidGlass.swift", "role": "primary", "blob": "ce1eddcc7c2b4395b1b13e1b9d88745071021bf1"},
-    {"path": "Apps/OpenCoreMac/Sources/SpotlightAndIntents.swift", "role": "primary", "blob": "6ef00f2d1b2ad96f459f6b24466ef4a602ae923d"},
-    {"path": "Sources/CoreTelemetry/ReviewSnapshotPolicy.swift", "role": "primary", "blob": "0651a756b83ad88ee433e437673ea7631be31029"},
-    {"path": "Apps/OpenCoreMac/Sources/OpenCoreReviewMain.swift", "role": "primary", "blob": "a585c101cbd402f508ff47f4748e71378b2069b8"},
-    {"path": "Tests/CoreGraphTests/ReviewBootstrapTests.swift", "role": "test", "blob": "77edc0189f66f2ac52f6b0537d6fd5aa38c73d68"},
-    {"path": "Apps/OpenCoreMac/project.yml", "role": "primary", "blob": "dcf989374e09e5bc8e944da243c7256887eede11"},
-    {"path": "script/build_and_run.sh", "role": "primary", "blob": "2db9c2595185ea13b2b27f7a3570d99d690285e8"},
-    {"path": "Package.swift", "role": "shared", "blob": "1e02f39727f4a5c986e0955f940e57266aad975e"}
+    {
+      "path": "Tests/CorePresentationTests/MCPPreferencePersistenceTests.swift",
+      "role": "test",
+      "blob": "4fa7214aa4671fb2e84e3a616db6e584a5195555"
+    },
+    {
+      "path": "Apps/OpenCoreMac/Sources/OpenCoreApp.swift",
+      "role": "primary",
+      "blob": "48b56f1ff325fec772a79e2970b866feea5e97c7"
+    },
+    {
+      "path": "Apps/OpenCoreMac/Sources/AppModel.swift",
+      "role": "primary",
+      "blob": "8ab8cc4a39993b6747de8ce531c0c89d1d410ee4"
+    },
+    {
+      "path": "Apps/OpenCoreMac/Sources/AppModel+Export.swift",
+      "role": "primary",
+      "blob": "2af954ae7dc7802761990d2ca5652775e17d365c"
+    },
+    {
+      "path": "Apps/OpenCoreMac/Sources/AppSettings.swift",
+      "role": "primary",
+      "blob": "781f15e482d077271ff40cb7fe703013661214a0"
+    },
+    {
+      "path": "Sources/CorePresentation/AppSettings.swift",
+      "role": "primary",
+      "blob": "876883b39b47ffb2eb8c117865f1512a6b44c3d7"
+    },
+    {
+      "path": "Sources/CorePresentation/Pastel.swift",
+      "role": "primary",
+      "blob": "f28d6bbded6cded1a0698b3554eabe8eda2cbd8f"
+    },
+    {
+      "path": "Tests/CorePresentationTests/AppSettingsTests.swift",
+      "role": "test",
+      "blob": "aac7fbc1e5d8a483e4443aaace0777fb26d345f4"
+    },
+    {
+      "path": "Apps/OpenCoreMac/Sources/SettingsView.swift",
+      "role": "primary",
+      "blob": "98176c44542474ef21c25d4f7e31ec2e5fccd2a1"
+    },
+    {
+      "path": "Apps/OpenCoreMac/Sources/WorkspaceGuide.swift",
+      "role": "primary",
+      "blob": "c33853843ba5ff6813710201c3ef401bc5987eab"
+    },
+    {
+      "path": "Apps/OpenCoreMac/Sources/WorkspaceOrientationView.swift",
+      "role": "primary",
+      "blob": "2c021c7e56ecceb17cf00cdb3773af1e078a45ac"
+    },
+    {
+      "path": "Apps/OpenCoreMac/Sources/QuickJumpSheet.swift",
+      "role": "primary",
+      "blob": "240f66f5b6a8f974411a1bf416acc32b0f0474cb"
+    },
+    {
+      "path": "Apps/OpenCoreMac/Sources/LiquidGlass.swift",
+      "role": "primary",
+      "blob": "ce1eddcc7c2b4395b1b13e1b9d88745071021bf1"
+    },
+    {
+      "path": "Apps/OpenCoreMac/Sources/SpotlightAndIntents.swift",
+      "role": "primary",
+      "blob": "6ef00f2d1b2ad96f459f6b24466ef4a602ae923d"
+    },
+    {
+      "path": "Sources/CoreTelemetry/ReviewSnapshotPolicy.swift",
+      "role": "primary",
+      "blob": "0651a756b83ad88ee433e437673ea7631be31029"
+    },
+    {
+      "path": "Apps/OpenCoreMac/Sources/OpenCoreReviewMain.swift",
+      "role": "primary",
+      "blob": "a585c101cbd402f508ff47f4748e71378b2069b8"
+    },
+    {
+      "path": "Tests/CoreGraphTests/ReviewBootstrapTests.swift",
+      "role": "test",
+      "blob": "77edc0189f66f2ac52f6b0537d6fd5aa38c73d68"
+    },
+    {
+      "path": "Apps/OpenCoreMac/project.yml",
+      "role": "primary",
+      "blob": "dcf989374e09e5bc8e944da243c7256887eede11"
+    },
+    {
+      "path": "script/build_and_run.sh",
+      "role": "primary",
+      "blob": "2db9c2595185ea13b2b27f7a3570d99d690285e8"
+    },
+    {
+      "path": "Package.swift",
+      "role": "shared",
+      "blob": "1e02f39727f4a5c986e0955f940e57266aad975e"
+    }
   ],
   "nodes": [
-    {"id": "OpenCoreApp", "kind": "entry", "path": "Apps/OpenCoreMac/Sources/OpenCoreApp.swift", "line": 9, "match": "struct OpenCoreApp: App {", "status": "VERIFIED", "note": ""},
-    {"id": "Section", "kind": "model", "path": "Apps/OpenCoreMac/Sources/OpenCoreApp.swift", "line": 149, "match": "enum Section: String, CaseIterable, Identifiable, Hashable {", "status": "VERIFIED", "note": "A new case needs WorkspaceFamily.sections and evidenceSections by hand."},
-    {"id": "WorkspaceFamily", "kind": "model", "path": "Apps/OpenCoreMac/Sources/WorkspaceGuide.swift", "line": 14, "match": "enum WorkspaceFamily: String, CaseIterable, Identifiable {", "status": "VERIFIED", "note": ""},
-    {"id": "AppModel", "kind": "view_model", "path": "Apps/OpenCoreMac/Sources/AppModel.swift", "line": 39, "match": "final class AppModel {", "status": "VERIFIED", "note": "Singleton."},
-    {"id": "AppSettings", "kind": "state", "path": "Sources/CorePresentation/AppSettings.swift", "line": 16, "match": "public final class AppSettings {", "status": "VERIFIED", "note": "Explicit defaults/effects; production callbacks supplied only by app bridge. A didSet does not fire in init."},
-    {"id": "FailureBanner", "kind": "view", "path": "Apps/OpenCoreMac/Sources/OpenCoreApp.swift", "line": 650, "match": "private struct FailureBanner: View {", "status": "VERIFIED", "note": ""},
-    {"id": "SpotlightIndexer", "kind": "integration", "path": "Apps/OpenCoreMac/Sources/SpotlightAndIntents.swift", "line": 20, "match": "enum SpotlightIndexer {", "status": "VERIFIED", "note": "Same gate as MCP."},
-    {"id": "AskOpenCoreIntent", "kind": "intent", "path": "Apps/OpenCoreMac/Sources/SpotlightAndIntents.swift", "line": 84, "match": "struct AskOpenCoreIntent: AppIntent {", "status": "VERIFIED", "note": ""},
-    {"id": "ReviewSnapshotPolicy", "kind": "service", "path": "Sources/CoreTelemetry/ReviewSnapshotPolicy.swift", "line": 5, "match": "public enum ReviewSnapshotPolicy {", "status": "VERIFIED", "note": "Separate identity, private self-contained copy admission; no production fallback."},
-    {"id": "OpenCoreReviewMain", "kind": "integration", "path": "Apps/OpenCoreMac/Sources/OpenCoreReviewMain.swift", "line": 9, "match": "struct OpenCoreReviewMain {", "status": "VERIFIED", "note": "Foundation-only internal bootstrap; actual screen review is pending."}
+    {
+      "id": "OpenCoreApp",
+      "kind": "entry",
+      "path": "Apps/OpenCoreMac/Sources/OpenCoreApp.swift",
+      "line": 9,
+      "match": "struct OpenCoreApp: App {",
+      "status": "VERIFIED",
+      "note": ""
+    },
+    {
+      "id": "Section",
+      "kind": "model",
+      "path": "Apps/OpenCoreMac/Sources/OpenCoreApp.swift",
+      "line": 149,
+      "match": "enum Section: String, CaseIterable, Identifiable, Hashable {",
+      "status": "VERIFIED",
+      "note": "A new case needs WorkspaceFamily.sections and evidenceSections by hand."
+    },
+    {
+      "id": "WorkspaceFamily",
+      "kind": "model",
+      "path": "Apps/OpenCoreMac/Sources/WorkspaceGuide.swift",
+      "line": 14,
+      "match": "enum WorkspaceFamily: String, CaseIterable, Identifiable {",
+      "status": "VERIFIED",
+      "note": ""
+    },
+    {
+      "id": "AppModel",
+      "kind": "view_model",
+      "path": "Apps/OpenCoreMac/Sources/AppModel.swift",
+      "line": 39,
+      "match": "final class AppModel {",
+      "status": "VERIFIED",
+      "note": "Singleton."
+    },
+    {
+      "id": "AppSettings",
+      "kind": "state",
+      "path": "Sources/CorePresentation/AppSettings.swift",
+      "line": 16,
+      "match": "public final class AppSettings {",
+      "status": "VERIFIED",
+      "note": "Explicit defaults/effects; production callbacks supplied only by app bridge. A didSet does not fire in init."
+    },
+    {
+      "id": "FailureBanner",
+      "kind": "view",
+      "path": "Apps/OpenCoreMac/Sources/OpenCoreApp.swift",
+      "line": 650,
+      "match": "private struct FailureBanner: View {",
+      "status": "VERIFIED",
+      "note": ""
+    },
+    {
+      "id": "SpotlightIndexer",
+      "kind": "integration",
+      "path": "Apps/OpenCoreMac/Sources/SpotlightAndIntents.swift",
+      "line": 20,
+      "match": "enum SpotlightIndexer {",
+      "status": "VERIFIED",
+      "note": "Same gate as MCP."
+    },
+    {
+      "id": "AskOpenCoreIntent",
+      "kind": "intent",
+      "path": "Apps/OpenCoreMac/Sources/SpotlightAndIntents.swift",
+      "line": 84,
+      "match": "struct AskOpenCoreIntent: AppIntent {",
+      "status": "VERIFIED",
+      "note": ""
+    },
+    {
+      "id": "ReviewSnapshotPolicy",
+      "kind": "service",
+      "path": "Sources/CoreTelemetry/ReviewSnapshotPolicy.swift",
+      "line": 5,
+      "match": "public enum ReviewSnapshotPolicy {",
+      "status": "VERIFIED",
+      "note": "Separate identity, private self-contained copy admission; no production fallback."
+    },
+    {
+      "id": "OpenCoreReviewMain",
+      "kind": "integration",
+      "path": "Apps/OpenCoreMac/Sources/OpenCoreReviewMain.swift",
+      "line": 9,
+      "match": "struct OpenCoreReviewMain {",
+      "status": "VERIFIED",
+      "note": "Foundation-only internal bootstrap; actual screen review is pending."
+    }
   ],
   "edges": [
-    {"from": "AppModel", "type": "calls", "to": "answers#Reasoner.answer", "status": "VERIFIED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/AppModel.swift", "line": 1119, "match": "let result = try await reasoner.answer(query)"}], "note": ""}
+    {
+      "from": "AppModel",
+      "type": "calls",
+      "to": "answers#Reasoner.answer",
+      "status": "VERIFIED",
+      "evidence": [
+        {
+          "path": "Apps/OpenCoreMac/Sources/AppModel.swift",
+          "line": 1119,
+          "match": "let result = try await reasoner.answer(query)"
+        }
+      ],
+      "note": ""
+    }
   ],
   "docs": [],
-  "unknowns": ["Native Settings scene exists; actual menu/window acceptance and real-view isolated review are pending."],
-  "related": ["home", "source-sync", "browse"],
+  "unknowns": [
+    "Native Settings scene exists; actual menu/window acceptance and real-view isolated review are pending."
+  ],
+  "related": [
+    "home",
+    "source-sync",
+    "browse"
+  ],
   "derived": {
     "generated_by": "codemap 1.1.0 derive: declarations, type references and test mentions; edges are INFERRED",
     "nodes": [
-      {"id": "RootView", "kind": "view", "path": "Apps/OpenCoreMac/Sources/OpenCoreApp.swift", "line": 233, "match": "struct RootView: View {", "status": "VERIFIED"},
-      {"id": "StatusBar", "kind": "view", "path": "Apps/OpenCoreMac/Sources/OpenCoreApp.swift", "line": 589, "match": "struct StatusBar: View {", "status": "VERIFIED"},
-      {"id": "Pastel", "kind": "model", "path": "Sources/CorePresentation/Pastel.swift", "line": 6, "match": "public enum Pastel {", "status": "VERIFIED"},
-      {"id": "SettingsView", "kind": "view", "path": "Apps/OpenCoreMac/Sources/SettingsView.swift", "line": 13, "match": "struct SettingsView: View {", "status": "VERIFIED"},
-      {"id": "AppearanceAndThemeTab", "kind": "view", "path": "Apps/OpenCoreMac/Sources/SettingsView.swift", "line": 165, "match": "private struct AppearanceAndThemeTab: View {", "status": "VERIFIED"},
-      {"id": "CommandCenterAndAITab", "kind": "view", "path": "Apps/OpenCoreMac/Sources/SettingsView.swift", "line": 398, "match": "private struct CommandCenterAndAITab: View {", "status": "VERIFIED"},
-      {"id": "HardwareAndUSBSettingsTab", "kind": "view", "path": "Apps/OpenCoreMac/Sources/SettingsView.swift", "line": 524, "match": "private struct HardwareAndUSBSettingsTab: View {", "status": "VERIFIED"},
-      {"id": "AutomationAndControlSettingsTab", "kind": "view", "path": "Apps/OpenCoreMac/Sources/SettingsView.swift", "line": 625, "match": "private struct AutomationAndControlSettingsTab: View {", "status": "VERIFIED"},
-      {"id": "Tuned", "kind": "model", "path": "Apps/OpenCoreMac/Sources/SettingsView.swift", "line": 679, "match": "private struct Tuned<Control: View>: View {", "status": "VERIFIED"},
-      {"id": "RetrievalTab", "kind": "view", "path": "Apps/OpenCoreMac/Sources/SettingsView.swift", "line": 703, "match": "private struct RetrievalTab: View {", "status": "VERIFIED"},
-      {"id": "SyncTab", "kind": "view", "path": "Apps/OpenCoreMac/Sources/SettingsView.swift", "line": 789, "match": "private struct SyncTab: View {", "status": "VERIFIED"},
-      {"id": "SecurityMCPAndDataTab", "kind": "view", "path": "Apps/OpenCoreMac/Sources/SettingsView.swift", "line": 907, "match": "private struct SecurityMCPAndDataTab: View {", "status": "VERIFIED"},
-      {"id": "StatusLine", "kind": "view", "path": "Apps/OpenCoreMac/Sources/SettingsView.swift", "line": 1110, "match": "private struct StatusLine: View {", "status": "VERIFIED"},
-      {"id": "MCPConfigSnippet", "kind": "view", "path": "Apps/OpenCoreMac/Sources/SettingsView.swift", "line": 1151, "match": "private struct MCPConfigSnippet: View {", "status": "VERIFIED"},
-      {"id": "WorkspaceGuide", "kind": "model", "path": "Apps/OpenCoreMac/Sources/WorkspaceGuide.swift", "line": 5, "match": "struct WorkspaceGuide {", "status": "VERIFIED"},
-      {"id": "WorkspaceOrientationView", "kind": "view", "path": "Apps/OpenCoreMac/Sources/WorkspaceOrientationView.swift", "line": 5, "match": "struct WorkspaceOrientationView: View {", "status": "VERIFIED"},
-      {"id": "WorkspaceMapView", "kind": "view", "path": "Apps/OpenCoreMac/Sources/WorkspaceOrientationView.swift", "line": 68, "match": "struct WorkspaceMapView: View {", "status": "VERIFIED"},
-      {"id": "QuickJumpSheet", "kind": "view", "path": "Apps/OpenCoreMac/Sources/QuickJumpSheet.swift", "line": 10, "match": "struct QuickJumpSheet: View {", "status": "VERIFIED"},
-      {"id": "ActionFeedbackCenter", "kind": "model", "path": "Apps/OpenCoreMac/Sources/LiquidGlass.swift", "line": 242, "match": "final class ActionFeedbackCenter {", "status": "VERIFIED"},
-      {"id": "ActionFeedbackBar", "kind": "view", "path": "Apps/OpenCoreMac/Sources/LiquidGlass.swift", "line": 393, "match": "struct ActionFeedbackBar: View {", "status": "VERIFIED"},
-      {"id": "PendingSection", "kind": "model", "path": "Apps/OpenCoreMac/Sources/SpotlightAndIntents.swift", "line": 74, "match": "final class PendingSection {", "status": "VERIFIED"}
+      {
+        "id": "RootView",
+        "kind": "view",
+        "path": "Apps/OpenCoreMac/Sources/OpenCoreApp.swift",
+        "line": 233,
+        "match": "struct RootView: View {",
+        "status": "VERIFIED"
+      },
+      {
+        "id": "StatusBar",
+        "kind": "view",
+        "path": "Apps/OpenCoreMac/Sources/OpenCoreApp.swift",
+        "line": 589,
+        "match": "struct StatusBar: View {",
+        "status": "VERIFIED"
+      },
+      {
+        "id": "Pastel",
+        "kind": "model",
+        "path": "Sources/CorePresentation/Pastel.swift",
+        "line": 6,
+        "match": "public enum Pastel {",
+        "status": "VERIFIED"
+      },
+      {
+        "id": "SettingsView",
+        "kind": "view",
+        "path": "Apps/OpenCoreMac/Sources/SettingsView.swift",
+        "line": 13,
+        "match": "struct SettingsView: View {",
+        "status": "VERIFIED"
+      },
+      {
+        "id": "AppearanceAndThemeTab",
+        "kind": "view",
+        "path": "Apps/OpenCoreMac/Sources/SettingsView.swift",
+        "line": 165,
+        "match": "private struct AppearanceAndThemeTab: View {",
+        "status": "VERIFIED"
+      },
+      {
+        "id": "CommandCenterAndAITab",
+        "kind": "view",
+        "path": "Apps/OpenCoreMac/Sources/SettingsView.swift",
+        "line": 398,
+        "match": "private struct CommandCenterAndAITab: View {",
+        "status": "VERIFIED"
+      },
+      {
+        "id": "HardwareAndUSBSettingsTab",
+        "kind": "view",
+        "path": "Apps/OpenCoreMac/Sources/SettingsView.swift",
+        "line": 524,
+        "match": "private struct HardwareAndUSBSettingsTab: View {",
+        "status": "VERIFIED"
+      },
+      {
+        "id": "AutomationAndControlSettingsTab",
+        "kind": "view",
+        "path": "Apps/OpenCoreMac/Sources/SettingsView.swift",
+        "line": 625,
+        "match": "private struct AutomationAndControlSettingsTab: View {",
+        "status": "VERIFIED"
+      },
+      {
+        "id": "Tuned",
+        "kind": "model",
+        "path": "Apps/OpenCoreMac/Sources/SettingsView.swift",
+        "line": 679,
+        "match": "private struct Tuned<Control: View>: View {",
+        "status": "VERIFIED"
+      },
+      {
+        "id": "RetrievalTab",
+        "kind": "view",
+        "path": "Apps/OpenCoreMac/Sources/SettingsView.swift",
+        "line": 703,
+        "match": "private struct RetrievalTab: View {",
+        "status": "VERIFIED"
+      },
+      {
+        "id": "SyncTab",
+        "kind": "view",
+        "path": "Apps/OpenCoreMac/Sources/SettingsView.swift",
+        "line": 789,
+        "match": "private struct SyncTab: View {",
+        "status": "VERIFIED"
+      },
+      {
+        "id": "SecurityMCPAndDataTab",
+        "kind": "view",
+        "path": "Apps/OpenCoreMac/Sources/SettingsView.swift",
+        "line": 907,
+        "match": "private struct SecurityMCPAndDataTab: View {",
+        "status": "VERIFIED"
+      },
+      {
+        "id": "StatusLine",
+        "kind": "view",
+        "path": "Apps/OpenCoreMac/Sources/SettingsView.swift",
+        "line": 1110,
+        "match": "private struct StatusLine: View {",
+        "status": "VERIFIED"
+      },
+      {
+        "id": "MCPConfigSnippet",
+        "kind": "view",
+        "path": "Apps/OpenCoreMac/Sources/SettingsView.swift",
+        "line": 1151,
+        "match": "private struct MCPConfigSnippet: View {",
+        "status": "VERIFIED"
+      },
+      {
+        "id": "WorkspaceGuide",
+        "kind": "model",
+        "path": "Apps/OpenCoreMac/Sources/WorkspaceGuide.swift",
+        "line": 5,
+        "match": "struct WorkspaceGuide {",
+        "status": "VERIFIED"
+      },
+      {
+        "id": "WorkspaceOrientationView",
+        "kind": "view",
+        "path": "Apps/OpenCoreMac/Sources/WorkspaceOrientationView.swift",
+        "line": 5,
+        "match": "struct WorkspaceOrientationView: View {",
+        "status": "VERIFIED"
+      },
+      {
+        "id": "WorkspaceMapView",
+        "kind": "view",
+        "path": "Apps/OpenCoreMac/Sources/WorkspaceOrientationView.swift",
+        "line": 68,
+        "match": "struct WorkspaceMapView: View {",
+        "status": "VERIFIED"
+      },
+      {
+        "id": "QuickJumpSheet",
+        "kind": "view",
+        "path": "Apps/OpenCoreMac/Sources/QuickJumpSheet.swift",
+        "line": 10,
+        "match": "struct QuickJumpSheet: View {",
+        "status": "VERIFIED"
+      },
+      {
+        "id": "ActionFeedbackCenter",
+        "kind": "model",
+        "path": "Apps/OpenCoreMac/Sources/LiquidGlass.swift",
+        "line": 242,
+        "match": "final class ActionFeedbackCenter {",
+        "status": "VERIFIED"
+      },
+      {
+        "id": "ActionFeedbackBar",
+        "kind": "view",
+        "path": "Apps/OpenCoreMac/Sources/LiquidGlass.swift",
+        "line": 393,
+        "match": "struct ActionFeedbackBar: View {",
+        "status": "VERIFIED"
+      },
+      {
+        "id": "PendingSection",
+        "kind": "model",
+        "path": "Apps/OpenCoreMac/Sources/SpotlightAndIntents.swift",
+        "line": 74,
+        "match": "final class PendingSection {",
+        "status": "VERIFIED"
+      }
     ],
     "edges": [
-      {"from": "OpenCoreApp", "type": "depends_on", "to": "AppModel", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/OpenCoreApp.swift", "line": 10, "match": "@State private var model: AppModel"}]},
-      {"from": "OpenCoreApp", "type": "depends_on", "to": "ReviewSnapshotPolicy", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/OpenCoreApp.swift", "line": 13, "match": "do { try ReviewSnapshotPolicy.requireProductionArguments(Array(CommandLine.arguments.dropFirst())) }"}]},
-      {"from": "OpenCoreApp", "type": "depends_on", "to": "SettingsView", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/OpenCoreApp.swift", "line": 121, "match": "SettingsView()"}]},
-      {"from": "RootView", "type": "depends_on", "to": "ActionFeedbackCenter", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/OpenCoreApp.swift", "line": 266, "match": "ActionFeedbackCenter.shared.record("}]},
-      {"from": "RootView", "type": "depends_on", "to": "ActionFeedbackBar", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/OpenCoreApp.swift", "line": 304, "match": "ActionFeedbackBar()"}]},
-      {"from": "RootView", "type": "depends_on", "to": "WorkspaceOrientationView", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/OpenCoreApp.swift", "line": 305, "match": "WorkspaceOrientationView(section: model.selectedSection)"}]},
-      {"from": "RootView", "type": "depends_on", "to": "Pastel", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/OpenCoreApp.swift", "line": 428, "match": ".foregroundStyle(Pastel.aqua)"}]},
-      {"from": "RootView", "type": "depends_on", "to": "QuickJumpSheet", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/OpenCoreApp.swift", "line": 507, "match": "QuickJumpSheet()"}]},
-      {"from": "RootView", "type": "depends_on", "to": "WorkspaceMapView", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/OpenCoreApp.swift", "line": 512, "match": "WorkspaceMapView()"}]},
-      {"from": "RootView", "type": "depends_on", "to": "SpotlightIndexer", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/OpenCoreApp.swift", "line": 527, "match": "if let entityID = SpotlightIndexer.entityID(from: activity) {"}]},
-      {"from": "RootView", "type": "depends_on", "to": "SettingsView", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/OpenCoreApp.swift", "line": 556, "match": "case .settings: SettingsView()"}]},
-      {"from": "StatusBar", "type": "depends_on", "to": "Pastel", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/OpenCoreApp.swift", "line": 627, "match": ".foregroundStyle(settings.isEffectiveLightMode ? Pastel.butter : Pastel.lavender)"}]},
-      {"from": "FailureBanner", "type": "depends_on", "to": "AppModel", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/OpenCoreApp.swift", "line": 651, "match": "let failure: AppModel.AppFailure"}]},
-      {"from": "AppModel", "type": "depends_on", "to": "AppSettings", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/AppModel.swift", "line": 50, "match": "let settings = AppSettings.shared"}]},
-      {"from": "AppModel", "type": "depends_on", "to": "Section", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/AppModel.swift", "line": 102, "match": "var selectedSection: Section = .home"}]},
-      {"from": "AppModel", "type": "depends_on", "to": "ActionFeedbackCenter", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/AppModel.swift", "line": 451, "match": "ActionFeedbackCenter.shared.record(button: \"Resolve Contradiction\", command: \"BeliefEngine.correct\","}]},
-      {"from": "AppModel", "type": "depends_on", "to": "SpotlightIndexer", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/AppModel.swift", "line": 608, "match": "await SpotlightIndexer.indexEntities(from: opened)"}]},
-      {"from": "AppModel", "type": "depends_on", "to": "PendingSection", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/AppModel.swift", "line": 641, "match": "if let wantedSection = PendingSection.shared.take() {"}]},
-      {"from": "AppSettings", "type": "depends_on", "to": "Pastel", "status": "INFERRED", "evidence": [{"path": "Sources/CorePresentation/AppSettings.swift", "line": 72, "match": "case .sky: return Pastel.sky"}]},
-      {"from": "SettingsView", "type": "depends_on", "to": "Pastel", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/SettingsView.swift", "line": 45, "match": "case .appearance: return Pastel.lavender"}]},
-      {"from": "AppearanceAndThemeTab", "type": "depends_on", "to": "AppSettings", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/SettingsView.swift", "line": 187, "match": "ForEach(AppSettings.PastelAccentChoice.allCases) { choice in"}]},
-      {"from": "AppearanceAndThemeTab", "type": "depends_on", "to": "Pastel", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/SettingsView.swift", "line": 234, "match": ".foregroundStyle(Pastel.aqua)"}]},
-      {"from": "CommandCenterAndAITab", "type": "depends_on", "to": "Pastel", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/SettingsView.swift", "line": 412, "match": ".foregroundStyle(Pastel.sky)"}]},
-      {"from": "HardwareAndUSBSettingsTab", "type": "depends_on", "to": "Pastel", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/SettingsView.swift", "line": 537, "match": ".foregroundStyle(Pastel.aqua)"}]},
-      {"from": "AutomationAndControlSettingsTab", "type": "depends_on", "to": "Pastel", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/SettingsView.swift", "line": 640, "match": ".foregroundStyle(Pastel.mint)"}]},
-      {"from": "Tuned", "type": "depends_on", "to": "Pastel", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/SettingsView.swift", "line": 695, "match": ".openCorePastelBadge(Pastel.peach)"}]},
-      {"from": "RetrievalTab", "type": "depends_on", "to": "Pastel", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/SettingsView.swift", "line": 717, "match": ".foregroundStyle(Pastel.butter)"}]},
-      {"from": "RetrievalTab", "type": "depends_on", "to": "AppSettings", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/SettingsView.swift", "line": 765, "match": "racters per token.\", isDefault: settings.chunkTargetSize == AppSettings.defaultChunkTargetSize, defaultText: \"1200\") {"}]},
-      {"from": "SyncTab", "type": "depends_on", "to": "Pastel", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/SettingsView.swift", "line": 807, "match": ".foregroundStyle(Pastel.peach)"}]},
-      {"from": "SecurityMCPAndDataTab", "type": "depends_on", "to": "Pastel", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/SettingsView.swift", "line": 933, "match": ".foregroundStyle(Pastel.mint)"}]},
-      {"from": "StatusLine", "type": "depends_on", "to": "Pastel", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/SettingsView.swift", "line": 1127, "match": "case .absent: Pastel.peach"}]},
-      {"from": "MCPConfigSnippet", "type": "depends_on", "to": "AppSettings", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/SettingsView.swift", "line": 1157, "match": "AppSettings.mcpClientConfiguration(command: FileManager.default.homeDirectoryForCurrentUser"}]},
-      {"from": "MCPConfigSnippet", "type": "depends_on", "to": "Pastel", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/SettingsView.swift", "line": 1165, "match": ".foregroundStyle(Pastel.ice)"}]},
-      {"from": "WorkspaceGuide", "type": "depends_on", "to": "Section", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/WorkspaceGuide.swift", "line": 10, "match": "let next: Section"}]},
-      {"from": "WorkspaceFamily", "type": "depends_on", "to": "Section", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/WorkspaceGuide.swift", "line": 24, "match": "var sections: [Section] {"}]},
-      {"from": "WorkspaceFamily", "type": "depends_on", "to": "Pastel", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/WorkspaceGuide.swift", "line": 37, "match": "case .overview: Pastel.ice"}]},
-      {"from": "WorkspaceOrientationView", "type": "depends_on", "to": "Section", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/WorkspaceOrientationView.swift", "line": 7, "match": "let section: Section"}]},
-      {"from": "WorkspaceMapView", "type": "depends_on", "to": "AppModel", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/WorkspaceOrientationView.swift", "line": 73, "match": "private var project: AppModel.ProjectBrief? {"}]},
-      {"from": "WorkspaceMapView", "type": "depends_on", "to": "WorkspaceFamily", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/WorkspaceOrientationView.swift", "line": 95, "match": "ForEach(WorkspaceFamily.allCases.filter { $0 != .knowledge && $0 != .overview }) { family in"}]},
-      {"from": "WorkspaceMapView", "type": "depends_on", "to": "Pastel", "status": "INFERRED", "evidence": [{"path": "Apps/OpenCoreMac/Sources/WorkspaceOrientationView.swift", "line": 162, "match": ".openCoreGlassCard(cornerRadius: 12, tint: Pastel.sky)"}]}
+      {
+        "from": "OpenCoreApp",
+        "type": "depends_on",
+        "to": "AppModel",
+        "status": "INFERRED",
+        "evidence": [
+          {
+            "path": "Apps/OpenCoreMac/Sources/OpenCoreApp.swift",
+            "line": 10,
+            "match": "@State private var model: AppModel"
+          }
+        ]
+      },
+      {
+        "from": "OpenCoreApp",
+        "type": "depends_on",
+        "to": "ReviewSnapshotPolicy",
+        "status": "INFERRED",
+        "evidence": [
+          {
+            "path": "Apps/OpenCoreMac/Sources/OpenCoreApp.swift",
+            "line": 13,
+            "match": "do { try ReviewSnapshotPolicy.requireProductionArguments(Array(CommandLine.arguments.dropFirst())) }"
+          }
+        ]
+      },
+      {
+        "from": "OpenCoreApp",
+        "type": "depends_on",
+        "to": "SettingsView",
+        "status": "INFERRED",
+        "evidence": [
+          {
+            "path": "Apps/OpenCoreMac/Sources/OpenCoreApp.swift",
+            "line": 121,
+            "match": "SettingsView()"
+          }
+        ]
+      },
+      {
+        "from": "RootView",
+        "type": "depends_on",
+        "to": "ActionFeedbackCenter",
+        "status": "INFERRED",
+        "evidence": [
+          {
+            "path": "Apps/OpenCoreMac/Sources/OpenCoreApp.swift",
+            "line": 266,
+            "match": "ActionFeedbackCenter.shared.record("
+          }
+        ]
+      },
+      {
+        "from": "RootView",
+        "type": "depends_on",
+        "to": "ActionFeedbackBar",
+        "status": "INFERRED",
+        "evidence": [
+          {
+            "path": "Apps/OpenCoreMac/Sources/OpenCoreApp.swift",
+            "line": 304,
+            "match": "ActionFeedbackBar()"
+          }
+        ]
+      },
+      {
+        "from": "RootView",
+        "type": "depends_on",
+        "to": "WorkspaceOrientationView",
+        "status": "INFERRED",
+        "evidence": [
+          {
+            "path": "Apps/OpenCoreMac/Sources/OpenCoreApp.swift",
+            "line": 305,
+            "match": "WorkspaceOrientationView(section: model.selectedSection)"
+          }
+        ]
+      },
+      {
+        "from": "RootView",
+        "type": "depends_on",
+        "to": "QuickJumpSheet",
+        "status": "INFERRED",
+        "evidence": [
+          {
+            "path": "Apps/OpenCoreMac/Sources/OpenCoreApp.swift",
+            "line": 507,
+            "match": "QuickJumpSheet()"
+          }
+        ]
+      },
+      {
+        "from": "RootView",
+        "type": "depends_on",
+        "to": "WorkspaceMapView",
+        "status": "INFERRED",
+        "evidence": [
+          {
+            "path": "Apps/OpenCoreMac/Sources/OpenCoreApp.swift",
+            "line": 512,
+            "match": "WorkspaceMapView()"
+          }
+        ]
+      },
+      {
+        "from": "RootView",
+        "type": "depends_on",
+        "to": "SpotlightIndexer",
+        "status": "INFERRED",
+        "evidence": [
+          {
+            "path": "Apps/OpenCoreMac/Sources/OpenCoreApp.swift",
+            "line": 527,
+            "match": "if let entityID = SpotlightIndexer.entityID(from: activity) {"
+          }
+        ]
+      },
+      {
+        "from": "RootView",
+        "type": "depends_on",
+        "to": "SettingsView",
+        "status": "INFERRED",
+        "evidence": [
+          {
+            "path": "Apps/OpenCoreMac/Sources/OpenCoreApp.swift",
+            "line": 556,
+            "match": "case .settings: SettingsView()"
+          }
+        ]
+      },
+      {
+        "from": "StatusBar",
+        "type": "depends_on",
+        "to": "Pastel",
+        "status": "INFERRED",
+        "evidence": [
+          {
+            "path": "Apps/OpenCoreMac/Sources/OpenCoreApp.swift",
+            "line": 627,
+            "match": ".foregroundStyle(settings.isEffectiveLightMode ? Pastel.butter : Pastel.lavender)"
+          }
+        ]
+      },
+      {
+        "from": "FailureBanner",
+        "type": "depends_on",
+        "to": "AppModel",
+        "status": "INFERRED",
+        "evidence": [
+          {
+            "path": "Apps/OpenCoreMac/Sources/OpenCoreApp.swift",
+            "line": 651,
+            "match": "let failure: AppModel.AppFailure"
+          }
+        ]
+      },
+      {
+        "from": "AppModel",
+        "type": "depends_on",
+        "to": "AppSettings",
+        "status": "INFERRED",
+        "evidence": [
+          {
+            "path": "Apps/OpenCoreMac/Sources/AppModel.swift",
+            "line": 50,
+            "match": "let settings = AppSettings.shared"
+          }
+        ]
+      },
+      {
+        "from": "AppModel",
+        "type": "depends_on",
+        "to": "Section",
+        "status": "INFERRED",
+        "evidence": [
+          {
+            "path": "Apps/OpenCoreMac/Sources/AppModel.swift",
+            "line": 102,
+            "match": "var selectedSection: Section = .ask"
+          }
+        ]
+      },
+      {
+        "from": "AppModel",
+        "type": "depends_on",
+        "to": "ActionFeedbackCenter",
+        "status": "INFERRED",
+        "evidence": [
+          {
+            "path": "Apps/OpenCoreMac/Sources/AppModel.swift",
+            "line": 451,
+            "match": "ActionFeedbackCenter.shared.record(button: \"Resolve Contradiction\", command: \"BeliefEngine.correct\","
+          }
+        ]
+      },
+      {
+        "from": "AppModel",
+        "type": "depends_on",
+        "to": "SpotlightIndexer",
+        "status": "INFERRED",
+        "evidence": [
+          {
+            "path": "Apps/OpenCoreMac/Sources/AppModel.swift",
+            "line": 608,
+            "match": "await SpotlightIndexer.indexEntities(from: opened)"
+          }
+        ]
+      },
+      {
+        "from": "AppModel",
+        "type": "depends_on",
+        "to": "PendingSection",
+        "status": "INFERRED",
+        "evidence": [
+          {
+            "path": "Apps/OpenCoreMac/Sources/AppModel.swift",
+            "line": 641,
+            "match": "if let wantedSection = PendingSection.shared.take() {"
+          }
+        ]
+      },
+      {
+        "from": "AppSettings",
+        "type": "depends_on",
+        "to": "Pastel",
+        "status": "INFERRED",
+        "evidence": [
+          {
+            "path": "Sources/CorePresentation/AppSettings.swift",
+            "line": 72,
+            "match": "case .sky: return Pastel.sky"
+          }
+        ]
+      },
+      {
+        "from": "SettingsView",
+        "type": "depends_on",
+        "to": "Pastel",
+        "status": "INFERRED",
+        "evidence": [
+          {
+            "path": "Apps/OpenCoreMac/Sources/SettingsView.swift",
+            "line": 45,
+            "match": "case .appearance: return Pastel.lavender"
+          }
+        ]
+      },
+      {
+        "from": "AppearanceAndThemeTab",
+        "type": "depends_on",
+        "to": "AppSettings",
+        "status": "INFERRED",
+        "evidence": [
+          {
+            "path": "Apps/OpenCoreMac/Sources/SettingsView.swift",
+            "line": 187,
+            "match": "ForEach(AppSettings.PastelAccentChoice.allCases) { choice in"
+          }
+        ]
+      },
+      {
+        "from": "AppearanceAndThemeTab",
+        "type": "depends_on",
+        "to": "Pastel",
+        "status": "INFERRED",
+        "evidence": [
+          {
+            "path": "Apps/OpenCoreMac/Sources/SettingsView.swift",
+            "line": 234,
+            "match": ".foregroundStyle(Pastel.aqua)"
+          }
+        ]
+      },
+      {
+        "from": "CommandCenterAndAITab",
+        "type": "depends_on",
+        "to": "Pastel",
+        "status": "INFERRED",
+        "evidence": [
+          {
+            "path": "Apps/OpenCoreMac/Sources/SettingsView.swift",
+            "line": 412,
+            "match": ".foregroundStyle(Pastel.sky)"
+          }
+        ]
+      },
+      {
+        "from": "HardwareAndUSBSettingsTab",
+        "type": "depends_on",
+        "to": "Pastel",
+        "status": "INFERRED",
+        "evidence": [
+          {
+            "path": "Apps/OpenCoreMac/Sources/SettingsView.swift",
+            "line": 537,
+            "match": ".foregroundStyle(Pastel.aqua)"
+          }
+        ]
+      },
+      {
+        "from": "AutomationAndControlSettingsTab",
+        "type": "depends_on",
+        "to": "Pastel",
+        "status": "INFERRED",
+        "evidence": [
+          {
+            "path": "Apps/OpenCoreMac/Sources/SettingsView.swift",
+            "line": 640,
+            "match": ".foregroundStyle(Pastel.mint)"
+          }
+        ]
+      },
+      {
+        "from": "Tuned",
+        "type": "depends_on",
+        "to": "Pastel",
+        "status": "INFERRED",
+        "evidence": [
+          {
+            "path": "Apps/OpenCoreMac/Sources/SettingsView.swift",
+            "line": 695,
+            "match": ".openCorePastelBadge(Pastel.peach)"
+          }
+        ]
+      },
+      {
+        "from": "RetrievalTab",
+        "type": "depends_on",
+        "to": "Pastel",
+        "status": "INFERRED",
+        "evidence": [
+          {
+            "path": "Apps/OpenCoreMac/Sources/SettingsView.swift",
+            "line": 717,
+            "match": ".foregroundStyle(Pastel.butter)"
+          }
+        ]
+      },
+      {
+        "from": "RetrievalTab",
+        "type": "depends_on",
+        "to": "AppSettings",
+        "status": "INFERRED",
+        "evidence": [
+          {
+            "path": "Apps/OpenCoreMac/Sources/SettingsView.swift",
+            "line": 765,
+            "match": "racters per token.\", isDefault: settings.chunkTargetSize == AppSettings.defaultChunkTargetSize, defaultText: \"1200\") {"
+          }
+        ]
+      },
+      {
+        "from": "SyncTab",
+        "type": "depends_on",
+        "to": "Pastel",
+        "status": "INFERRED",
+        "evidence": [
+          {
+            "path": "Apps/OpenCoreMac/Sources/SettingsView.swift",
+            "line": 807,
+            "match": ".foregroundStyle(Pastel.peach)"
+          }
+        ]
+      },
+      {
+        "from": "SecurityMCPAndDataTab",
+        "type": "depends_on",
+        "to": "Pastel",
+        "status": "INFERRED",
+        "evidence": [
+          {
+            "path": "Apps/OpenCoreMac/Sources/SettingsView.swift",
+            "line": 933,
+            "match": ".foregroundStyle(Pastel.mint)"
+          }
+        ]
+      },
+      {
+        "from": "StatusLine",
+        "type": "depends_on",
+        "to": "Pastel",
+        "status": "INFERRED",
+        "evidence": [
+          {
+            "path": "Apps/OpenCoreMac/Sources/SettingsView.swift",
+            "line": 1127,
+            "match": "case .absent: Pastel.peach"
+          }
+        ]
+      },
+      {
+        "from": "MCPConfigSnippet",
+        "type": "depends_on",
+        "to": "AppSettings",
+        "status": "INFERRED",
+        "evidence": [
+          {
+            "path": "Apps/OpenCoreMac/Sources/SettingsView.swift",
+            "line": 1157,
+            "match": "AppSettings.mcpClientConfiguration(command: FileManager.default.homeDirectoryForCurrentUser"
+          }
+        ]
+      },
+      {
+        "from": "MCPConfigSnippet",
+        "type": "depends_on",
+        "to": "Pastel",
+        "status": "INFERRED",
+        "evidence": [
+          {
+            "path": "Apps/OpenCoreMac/Sources/SettingsView.swift",
+            "line": 1165,
+            "match": ".foregroundStyle(Pastel.ice)"
+          }
+        ]
+      },
+      {
+        "from": "WorkspaceGuide",
+        "type": "depends_on",
+        "to": "Section",
+        "status": "INFERRED",
+        "evidence": [
+          {
+            "path": "Apps/OpenCoreMac/Sources/WorkspaceGuide.swift",
+            "line": 10,
+            "match": "let next: Section"
+          }
+        ]
+      },
+      {
+        "from": "WorkspaceFamily",
+        "type": "depends_on",
+        "to": "Section",
+        "status": "INFERRED",
+        "evidence": [
+          {
+            "path": "Apps/OpenCoreMac/Sources/WorkspaceGuide.swift",
+            "line": 24,
+            "match": "var sections: [Section] {"
+          }
+        ]
+      },
+      {
+        "from": "WorkspaceFamily",
+        "type": "depends_on",
+        "to": "Pastel",
+        "status": "INFERRED",
+        "evidence": [
+          {
+            "path": "Apps/OpenCoreMac/Sources/WorkspaceGuide.swift",
+            "line": 37,
+            "match": "case .ask: Pastel.ice"
+          }
+        ]
+      },
+      {
+        "from": "WorkspaceOrientationView",
+        "type": "depends_on",
+        "to": "Section",
+        "status": "INFERRED",
+        "evidence": [
+          {
+            "path": "Apps/OpenCoreMac/Sources/WorkspaceOrientationView.swift",
+            "line": 7,
+            "match": "let section: Section"
+          }
+        ]
+      },
+      {
+        "from": "WorkspaceMapView",
+        "type": "depends_on",
+        "to": "AppModel",
+        "status": "INFERRED",
+        "evidence": [
+          {
+            "path": "Apps/OpenCoreMac/Sources/WorkspaceOrientationView.swift",
+            "line": 73,
+            "match": "private var project: AppModel.ProjectBrief? {"
+          }
+        ]
+      },
+      {
+        "from": "WorkspaceMapView",
+        "type": "depends_on",
+        "to": "WorkspaceFamily",
+        "status": "INFERRED",
+        "evidence": [
+          {
+            "path": "Apps/OpenCoreMac/Sources/WorkspaceOrientationView.swift",
+            "line": 95,
+            "match": "ForEach(WorkspaceFamily.allCases.filter { $0 != .evidence && $0 != .ask }) { family in"
+          }
+        ]
+      },
+      {
+        "from": "WorkspaceMapView",
+        "type": "depends_on",
+        "to": "Pastel",
+        "status": "INFERRED",
+        "evidence": [
+          {
+            "path": "Apps/OpenCoreMac/Sources/WorkspaceOrientationView.swift",
+            "line": 162,
+            "match": ".openCoreGlassCard(cornerRadius: 12, tint: Pastel.sky)"
+          }
+        ]
+      }
     ],
     "edges_omitted": 67
   }

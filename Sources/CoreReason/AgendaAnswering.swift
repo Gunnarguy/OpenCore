@@ -37,6 +37,20 @@ public struct AgendaAnswer: Sendable {
     }
 }
 
+/// What the Ask screen opens on. Read for the owner, under the same admission as a question.
+public struct AgendaToday: Sendable {
+    public var today: [AgendaItem] = []
+    public var tomorrow: [AgendaItem] = []
+    /// Open reminders due today or tomorrow, soonest first.
+    public var due: [AgendaItem] = []
+    /// Open reminders whose date has passed, most recent first.
+    public var overdue: [AgendaItem] = []
+    /// A source's sentence when it is stale or has never synced.
+    public var notices: [String] = []
+
+    public var isEmpty: Bool { today.isEmpty && tomorrow.isEmpty && due.isEmpty && overdue.isEmpty }
+}
+
 /// Answers an `AgendaQuestion`. See `AgendaIntent` for why this does not go through claims.
 ///
 /// Runs under the caller's admission like every other read: with no `.personal` it declines, so a
@@ -77,6 +91,27 @@ public struct AgendaAnswering: Sendable {
             let day = item.when.map { TemporalIntent.day($0, in: calendar) } ?? ""
             return seen.insert("\(day)|\(item.title.lowercased())").inserted
         }
+    }
+
+    /// Nil without `.personal`, so a surface opened under narrower admission shows nothing of it.
+    public func today(policy: AdmissionPolicy, now: Date, calendar: Calendar) async throws -> AgendaToday? {
+        guard policy.admits(.personal) else { return nil }
+        let start = calendar.startOfDay(for: now)
+        guard let second = calendar.date(byAdding: .day, value: 1, to: start),
+              let third = calendar.date(byAdding: .day, value: 2, to: start)
+        else { return nil }
+        let events = Self.distinct(try await store.agendaEvents(from: start, to: third, domains: policy.admitted), calendar: calendar)
+        let open = try await store.agendaReminders(completed: false, domains: policy.admitted)
+        var result = AgendaToday()
+        result.today = events.filter { ($0.when ?? start) < second }
+        result.tomorrow = events.filter { ($0.when ?? start) >= second }
+        result.due = open.filter { ($0.when ?? .distantPast) >= start && ($0.when ?? .distantPast) < third }
+            .sorted { ($0.when ?? .distantFuture, $0.title) < ($1.when ?? .distantFuture, $1.title) }
+        result.overdue = open.filter { ($0.when ?? .distantFuture) < start }
+            .sorted { ($0.when ?? .distantPast, $1.title) > ($1.when ?? .distantPast, $0.title) }
+        result.notices = await staleLine("Apple Calendar", handle: "calendar", now: now, calendar: calendar)
+            + staleLine("Apple Reminders", handle: "reminders", now: now, calendar: calendar)
+        return result
     }
 
     private func readReminders(_ question: AgendaQuestion, policy: AdmissionPolicy, now: Date) async throws -> [AgendaItem] {

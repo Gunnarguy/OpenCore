@@ -398,12 +398,12 @@ public final class AppSettings {
         truncateLongRepoText = false
         // Home leads with what changed in your history. The operator decks are off by default
         // and stay one toggle away in Settings.
-        showJarvisDeck = false
-        showHardwareAndControlDeck = false
+        showJarvisDeck = true
+        showHardwareAndControlDeck = true
         showCrossAgentHub = false
         showVisualFleetMatrix = false
         showOptionalConnectorsBanner = true
-        showOperatorWorkspaces = false
+        showOperatorWorkspaces = true
     }
 
     // MARK: - Storage
@@ -441,12 +441,12 @@ public final class AppSettings {
 
         // Off by default under new keys. The old keys held `true` for everyone who had ever
         // opened the app, so a changed default alone would have changed nothing here.
-        showJarvisDeck = boolean("cc.home2.showJarvisDeck", false)
-        showHardwareAndControlDeck = boolean("cc.home2.showHardwareDeck", false)
+        showJarvisDeck = boolean("cc.home2.showJarvisDeck", true)
+        showHardwareAndControlDeck = boolean("cc.home2.showHardwareDeck", true)
         showCrossAgentHub = boolean("cc.home2.showCrossAgentHub", false)
         showVisualFleetMatrix = boolean("cc.home2.showVisualFleetMatrix", false)
         showOptionalConnectorsBanner = boolean("cc.showConnectorsBanner", true)
-        showOperatorWorkspaces = boolean("cc.home2.showOperatorWorkspaces", false)
+        showOperatorWorkspaces = boolean("cc.home2.showOperatorWorkspaces", true)
 
         jarvisSpeechRate = double("jarvis.speechRate", 0.51)
         jarvisAutoSpeakBriefings = boolean("jarvis.autoSpeak", false)

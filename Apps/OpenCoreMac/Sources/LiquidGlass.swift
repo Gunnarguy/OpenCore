@@ -289,18 +289,7 @@ final class ActionFeedbackCenter {
     var isHistoryExpanded: Bool = false
     private var lastExplicitTimestamp: Date = .distantPast
 
-    private init() {
-        let welcome = Event(
-            timestamp: Date(),
-            buttonTitle: "Live Action Telemetry Ready",
-            commandOrQuery: "Action feedback",
-            outcomeExplanation: "Instrumented operations report their results here. A received click alone does not confirm that an operation completed.",
-            status: .received,
-            durationMs: nil
-        )
-        currentEvent = welcome
-        history = [welcome]
-    }
+    private init() {}
 
     func notifyRawTap(label: String?) {
         totalInteractionsCount += 1
@@ -400,7 +389,8 @@ struct ActionFeedbackBar: View {
     }()
 
     var body: some View {
-        if let ev = center.currentEvent {
+        // A received click says nothing yet. This bar is for work that ran, or is running.
+        if let ev = center.currentEvent, ev.status != .received {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 10) {
                     if ev.status == .running {

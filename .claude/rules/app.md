@@ -20,8 +20,9 @@ view is `[source]` until someone has run it.
 
 ## Sections
 
-A new `Section` needs an entry in `WorkspaceFamily.sections` and, if it is evidence, in
-`Section.evidenceSections`. Miss one and it vanishes with no compile error.
+The app is three places: Ask, Mac and Evidence, plus Settings. A new `Section` needs an entry in
+`WorkspaceFamily.sections`. Miss it and it vanishes with no compile error. Add to Ask last: it is the
+first screen, and its job is one box and the owner's day.
 
 ## Data and failures
 

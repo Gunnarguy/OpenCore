@@ -99,7 +99,9 @@ final class AppModel {
     var dataGeneration = 0
 
     // Navigation & global overlays
-    var selectedSection: Section = .home
+    var selectedSection: Section = .ask
+    /// Set to open a Settings tab from elsewhere. SettingsView takes it and clears it.
+    var requestedSettingsTab: SettingsView.Tab?
     var activeEntityID: EntityID?
     var pendingEntityID: EntityID?
     var pendingEntityName: String?
@@ -366,7 +368,13 @@ final class AppModel {
         pushHistoryBeforeJumping()
         pendingQuestion = trimmed
         PendingQuestion.shared.text = trimmed
-        selectedSection = .chat
+        selectedSection = .ask
+    }
+
+    /// Connections live in Settings. Sources and Receipts both link here when a service is missing.
+    func openConnections() {
+        requestedSettingsTab = .connections
+        navigate(to: .settings)
     }
 
     func openPassages(query: String) {

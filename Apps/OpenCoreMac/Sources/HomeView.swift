@@ -6,25 +6,14 @@ import CoreSearch
 import CoreStore
 import SwiftUI
 
-/// The Command Center.
-///
-/// The rule this screen is built to: **every line either says something specific about your
-/// data, or it is not here.**
+/// Mac Overview: this machine, its hardware and the projects that need attention. Asking lives in
+/// `ChatView`, which opens the app. This screen had a second ask box of its own, with its own answer.
 struct HomeView: View {
     @Environment(\.appModel) private var model
     @Environment(\.appSettings) private var settings
     @Binding var section: Section
 
     @State private var snapshot: HomeSnapshot?
-    @State private var draft = ""
-    @State private var inlinePassages: [AppModel.PassageRow] = []
-    @State private var inlineFMSentences: [(text: String, source: Int?)] = []
-    @State private var inlineFMVerdicts: [Grounding.Verdict] = []
-    @State private var inlineFMInsufficient = false
-    @State private var isSynthesizingInlineFM = false
-    @State private var isSearchingInline = false
-    @State private var inlineSearchTask: Task<Void, Never>?
-    @State private var inlineRequestID = UUID()
     @State private var copiedResumeRepo: String?
     @State private var fleetFilter: FleetFilter = .all
     @State private var showingGuidePopover = false
@@ -53,25 +42,14 @@ struct HomeView: View {
             VStack(alignment: .leading, spacing: 16) {
                 if settings.showJarvisDeck {
                     JarvisCommandDeckCard { spokenQuery in
-                        draft = spokenQuery
-                        runInlineSearchAndReason()
+                        model.askInChat(spokenQuery)
                     }
-                }
-                ask
-                if model.answer != nil || !inlinePassages.isEmpty || isSearchingInline || isSynthesizingInlineFM {
-                    inlineResultsPanel
-                }
-                if let snapshot {
-                    WhatChangedCard(snapshot: snapshot, previousVisit: model.previousVisit)
                 }
                 compactStatusAndTelemetryBar
                 hazardAlertBanner
                 if settings.showOptionalConnectorsBanner, let snapshot {
                     attention(snapshot)
                 }
-                // Everything below is the operator console. It stays one toggle away in
-                // Settings and is off by default, because this screen answers "what changed
-                // in my history" and these answer a different question.
                 if settings.showHardwareAndControlDeck {
                     visualHardwareAndControlDeck
                 }
@@ -95,7 +73,7 @@ struct HomeView: View {
             .frame(maxWidth: settings.commandCenterMaxWidth, alignment: .leading)
             .frame(maxWidth: .infinity)
         }
-        .navigationTitle("Command Center")
+        .navigationTitle("Mac Overview")
         .sheet(item: $machineCheck, onDismiss: {
             if let destination = pendingMachineDestination {
                 pendingMachineDestination = nil
@@ -443,7 +421,7 @@ struct HomeView: View {
                 symbol: "powerplug.fill",
                 tint: .purple,
                 helpText: "Stored MCP sources; this count does not verify connectivity. OpenCore separately exposes an 8-tool outbound server"
-            ) { model.navigate(to: .mcp) }
+            ) { model.openConnections() }
 
             if let health = model.machineHealth {
                 let onlinePeers = health.tailnetPeers.filter(\.reachable).map(\.alias).joined(separator: "·")
@@ -815,198 +793,6 @@ struct HomeView: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    // MARK: - Unified Ask & Search (Fact Graph + Hybrid Passages + On-Device /usr/bin/fm)
-
-    private var ask: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "magnifyingglass").foregroundStyle(.tertiary)
-            TextField("Ask anything across your repos, Claude/Codex memories & notes (runs /usr/bin/fm on-device) or press ⌘K…", text: $draft)
-                .textFieldStyle(.plain)
-                .font(.callout)
-                .onSubmit(runInlineSearchAndReason)
-            if !draft.isEmpty {
-                Button {
-                    draft = ""
-                    clearInlineResults()
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-            }
-            Button(action: runInlineSearchAndReason) {
-                Label("Ask On-Device (/usr/bin/fm)", systemImage: "sparkles")
-                    .font(.caption.weight(.semibold))
-                    .lineLimit(1)
-            }
-            .controlSize(.small)
-            .openCoreGlassButton(prominent: true)
-            .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            .help("Retrieves hybrid passages + structured claims and synthesizes a cited answer on-device via Apple Foundation Models (/usr/bin/fm)")
-
-            Button(action: handOff) {
-                Label("Multi-Turn Chat", systemImage: "bubble.left.and.bubble.right.fill")
-                    .font(.caption.weight(.medium))
-                    .lineLimit(1)
-            }
-            .controlSize(.small)
-            .openCoreGlassButton()
-            .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            .help("Hand off this question to multi-turn Grounded Chat")
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .openCoreGlassCard(cornerRadius: 12)
-    }
-
-    private func clearInlineResults() {
-        inlineSearchTask?.cancel()
-        inlineRequestID = UUID()
-        model.clearAnswer()
-        inlinePassages = []
-        inlineFMSentences = []
-        inlineFMVerdicts = []
-        inlineFMInsufficient = false
-        isSynthesizingInlineFM = false
-        isSearchingInline = false
-    }
-
-    private var inlineResultsPanel: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                Label("On-Device Answer & Evidence", systemImage: "sparkles")
-                    .font(.subheadline.weight(.semibold))
-                if isSearchingInline || isSynthesizingInlineFM {
-                    ProgressView().controlSize(.small)
-                    Text(isSynthesizingInlineFM ? "Synthesizing with Apple Foundation Model (/usr/bin/fm)…" : "Searching passages & claims…")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                if !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    Button("Continue in Multi-Turn Chat →") {
-                        handOff()
-                    }
-                    .buttonStyle(.link)
-                    .font(.caption)
-                }
-                Button("Clear") {
-                    clearInlineResults()
-                }
-                .controlSize(.mini)
-            }
-
-            if let answer = model.answer, let activity = answer.activity, activity.totalEvents > 0 {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(answer.summary).font(.caption.weight(.semibold))
-                    ActivityRows(activity: activity)
-                }
-            }
-
-            // 1. On-Device Foundation Model (/usr/bin/fm) Synthesized Answer
-            if !inlineFMSentences.isEmpty || inlineFMInsufficient {
-                let groundedCount = inlineFMVerdicts.filter(\.isGrounded).count
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack(spacing: 8) {
-                        Label("ON-DEVICE FOUNDATION MODEL SYNTHESIS", systemImage: "cpu.fill")
-                            .font(.caption2.weight(.bold))
-                            .foregroundStyle(Pastel.mint)
-                        Text("[/usr/bin/fm · GroundedAnswer schema · \(groundedCount)/\(inlineFMVerdicts.count) sentences grounded · on-device synthesis]")
-                            .font(.caption2.monospaced())
-                            .foregroundStyle(.secondary)
-                    }
-                    if inlineFMInsufficient && inlineFMSentences.isEmpty {
-                        Text("The retrieved passages do not directly state the answer to that question.")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        ForEach(Array(inlineFMSentences.enumerated()), id: \.offset) { idx, item in
-                            let verdict = idx < inlineFMVerdicts.count ? inlineFMVerdicts[idx] : nil
-                            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                                Image(systemName: (verdict?.isGrounded ?? true) ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                                    .font(.caption2)
-                                    .foregroundStyle((verdict?.isGrounded ?? true) ? .green : .orange)
-                                Text(item.text)
-                                    .font(.callout)
-                                    .textSelection(.enabled)
-                                if let src = item.source, src >= 1, src <= inlinePassages.count {
-                                    let hit = inlinePassages[src - 1]
-                                    Button("[\(src)] \(hit.title)") {
-                                        model.inspectObject(hit.objectID, highlight: item.text)
-                                    }
-                                    .buttonStyle(.link)
-                                    .font(.caption2.monospaced())
-                                }
-                            }
-                        }
-                    }
-                }
-                .padding(12)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .openCoreGlassCard(cornerRadius: 10, tint: .green)
-            }
-
-            // 2. Deterministic Fact Graph Answer (Reasoner)
-            if let answer = model.answer {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack(spacing: 8) {
-                        Text("DIRECT FACT GRAPH ANSWER (DETERMINISTIC REASONER)")
-                            .font(.caption2.weight(.bold))
-                            .foregroundStyle(Color.accentColor)
-                        Text("[queryClass: \(answer.receipt.queryClass.rawValue) · \(answer.receipt.objectsSearched) objects scanned · \(answer.receipt.claimsConsulted) claims checked]")
-                            .font(.caption2.monospaced())
-                            .foregroundStyle(.secondary)
-                    }
-                    Text(answer.summary)
-                        .font(.callout)
-                        .textSelection(.enabled)
-                }
-                .padding(12)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .openCoreGlassCard(cornerRadius: 10, tint: .accentColor)
-            }
-
-            // 3. Top Retrieved Passages
-            if !inlinePassages.isEmpty {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("CITED SOURCE PARAGRAPHS (PASSAGES · \(inlinePassages.count))")
-                        .font(.caption2.weight(.bold))
-                        .foregroundStyle(.secondary)
-                    ForEach(Array(inlinePassages.prefix(4).enumerated()), id: \.element.id) { idx, hit in
-                        HStack(alignment: .top, spacing: 10) {
-                            Text("[\(idx + 1)]")
-                                .font(.caption.monospaced().weight(.bold))
-                                .foregroundStyle(Color.accentColor)
-                            VStack(alignment: .leading, spacing: 3) {
-                                HStack(spacing: 6) {
-                                    Text(hit.title)
-                                        .font(.caption.weight(.semibold))
-                                        .lineLimit(1)
-                                    Chip(hit.kind)
-                                    Chip(hit.authority)
-                                }
-                                Text(hit.text)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(2)
-                            }
-                            Spacer()
-                            Button("Inspect Source") {
-                                model.inspectObject(hit.objectID, highlight: draft)
-                            }
-                            .controlSize(.mini)
-                            .openCoreGlassButton()
-                        }
-                        .padding(10)
-                        .openCoreGlassCard(cornerRadius: 8)
-                    }
-                }
-            }
-        }
-        .padding(16)
-        .openCoreGlassCard(cornerRadius: 14)
     }
 
     // MARK: - Visual Hardware, USB Topology & Computer Control Deck
@@ -1418,70 +1204,6 @@ struct HomeView: View {
         }
     }
 
-    private func runInlineSearchAndReason() {
-        let query = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return }
-        clearInlineResults()
-        let requestID = UUID()
-        inlineRequestID = requestID
-        isSearchingInline = true
-        inlineFMSentences = []
-        inlineFMVerdicts = []
-        inlineFMInsufficient = false
-        inlineSearchTask = Task {
-            await model.ask(query)
-            guard !Task.isCancelled, inlineRequestID == requestID else { return }
-            let rows: [AppModel.PassageRow]
-            if let result = await model.searchPassages(query) {
-                guard !Task.isCancelled, inlineRequestID == requestID else { return }
-                rows = result.rows
-                inlinePassages = rows
-            } else {
-                guard !Task.isCancelled, inlineRequestID == requestID else { return }
-                rows = []
-                inlinePassages = []
-            }
-            isSearchingInline = false
-
-            guard !rows.isEmpty else { return }
-            isSynthesizingInlineFM = true
-            let sources: [GroundingSource] = rows.prefix(6).enumerated().map { idx, hit in
-                GroundingSource(
-                    index: idx + 1,
-                    title: hit.title,
-                    text: hit.text,
-                    objectID: hit.objectID,
-                    authority: Authority.allCases.first { $0.label == hit.authority } ?? .authoredArtifact,
-                    uri: nil
-                )
-            }
-            let grounding = Grounding()
-            if let fm = await Conversation.generateWithFoundationModelsCLI(question: query, sources: sources) {
-                guard !Task.isCancelled, inlineRequestID == requestID else { return }
-                inlineFMInsufficient = fm.insufficient
-                inlineFMSentences = fm.sentences
-                inlineFMVerdicts = fm.sentences.map {
-                    grounding.verify(sentence: $0.text, citedSource: $0.source, sources: sources)
-                }
-            } else {
-                guard !Task.isCancelled, inlineRequestID == requestID else { return }
-                let fallback = Conversation.deterministicSynthesis(from: sources)
-                inlineFMSentences = fallback
-                inlineFMVerdicts = fallback.map {
-                    grounding.verify(sentence: $0.text, citedSource: $0.source, sources: sources)
-                }
-            }
-            isSynthesizingInlineFM = false
-        }
-    }
-
-    private func handOff() {
-        let question = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !question.isEmpty else { return }
-        draft = ""
-        model.askInChat(question)
-    }
-
     /// Compact single-line banner for optional unconfigured sources (never wraps 12 MCP server names across 3 lines).
     @ViewBuilder
     private func attention(_ snapshot: HomeSnapshot) -> some View {
@@ -1527,7 +1249,7 @@ struct HomeView: View {
 /// Three questions, in the order a person asks them: what have I been doing, what does OpenCore
 /// now believe differently, and what does it know it does not know. An empty column says so
 /// rather than disappearing, because "nothing changed" is an answer.
-private struct WhatChangedCard: View {
+struct WhatChangedCard: View {
     @Environment(\.appModel) private var model
     let snapshot: HomeSnapshot
     let previousVisit: Date?
@@ -1539,8 +1261,6 @@ private struct WhatChangedCard: View {
 
     private var subheading: String {
         var parts: [String] = []
-        if let events = snapshot.eventsSinceVisit { parts.append("\(events) event\(events == 1 ? "" : "s")") }
-        if let beliefs = snapshot.beliefChangesSinceVisit { parts.append("\(beliefs) belief change\(beliefs == 1 ? "" : "s")") }
         if let synced = snapshot.lastSyncedAt {
             parts.append("newest sync \(synced.formatted(.relative(presentation: .named)))")
         } else {
@@ -1555,10 +1275,7 @@ private struct WhatChangedCard: View {
                 Text(heading).font(.headline)
                 Text(subheading).font(.caption).foregroundStyle(.secondary)
             }
-            ViewThatFits(in: .horizontal) {
-                HStack(alignment: .top, spacing: 12) { columns }
-                VStack(alignment: .leading, spacing: 12) { columns }
-            }
+            columns
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1568,7 +1285,7 @@ private struct WhatChangedCard: View {
     @ViewBuilder private var columns: some View {
         Column(title: "Recent activity", detail: "last \(snapshot.windowDays) days", symbol: "clock.arrow.circlepath", tint: Pastel.mint,
                emptyText: "Nothing recorded in this window.", isEmpty: snapshot.work.isEmpty && snapshot.other.isEmpty) {
-            ForEach((snapshot.work + snapshot.other).prefix(6)) { row in
+            ForEach((snapshot.work + snapshot.other).prefix(4)) { row in
                 Button { model.openEntity(named: row.subject) } label: {
                     HStack(spacing: 8) {
                         Text(row.subject).font(.caption.weight(.semibold)).lineLimit(1)
@@ -1585,43 +1302,17 @@ private struct WhatChangedCard: View {
             }
         }
 
-        Column(title: "Belief changes", detail: "\(snapshot.beliefChanges.count) in window", symbol: "arrow.triangle.branch", tint: Pastel.lavender,
-               emptyText: "No beliefs changed in this window.", isEmpty: snapshot.beliefChanges.isEmpty) {
-            ForEach(snapshot.beliefChanges.prefix(6)) { change in
-                Button { model.navigate(to: .beliefs) } label: {
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("\(change.subject) \(change.predicate.replacingOccurrences(of: "_", with: " "))")
-                            .font(.caption.weight(.semibold))
-                            .lineLimit(1)
-                        Text(change.reason)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(2)
-                    }
-                    .contentShape(.rect)
-                }
-                .buttonStyle(.plain)
+        // Decisions and conflicts are one tap away. Ask only says that they exist.
+        HStack(spacing: 14) {
+            if !snapshot.beliefChanges.isEmpty {
+                Button("\(snapshot.beliefChanges.count) decisions changed") { model.navigate(to: .beliefs) }
+            }
+            if snapshot.openContradictions > 0 {
+                Button("\(snapshot.openContradictions) open conflicts") { model.navigate(to: .contradictions) }
             }
         }
-
-        Column(title: "Open contradictions", detail: "\(snapshot.openContradictions)", symbol: "exclamationmark.bubble", tint: Pastel.peach,
-               emptyText: "Nothing is contradicted right now.", isEmpty: snapshot.contradictionRows.isEmpty) {
-            ForEach(snapshot.contradictionRows.prefix(6)) { row in
-                Button { model.navigate(to: .contradictions) } label: {
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("\(row.subject) \(row.predicate.replacingOccurrences(of: "_", with: " "))")
-                            .font(.caption.weight(.semibold))
-                            .lineLimit(1)
-                        Text(row.reason)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(2)
-                    }
-                    .contentShape(.rect)
-                }
-                .buttonStyle(.plain)
-            }
-        }
+        .buttonStyle(.link)
+        .font(.caption)
     }
 
     private struct Column<Content: View>: View {
@@ -2044,7 +1735,7 @@ private struct FleetRepoCardView: View {
                 }
                 .controlSize(.mini)
                 .openCoreGlassButton()
-                .help("Ask Grounded Chat about \(card.name)")
+                .help("Ask about \(card.name)")
             }
         }
         .padding(13)

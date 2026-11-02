@@ -169,7 +169,7 @@ struct ChatView: View {
             Divider()
             composer
         }
-        .navigationTitle("Chat")
+        .navigationTitle("Ask")
         .toolbar {
             ToolbarItem(placement: .primaryAction) { historyMenu }
             ToolbarItem(placement: .primaryAction) {
@@ -273,7 +273,7 @@ struct ChatView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 24) {
-                    if chat.turns.isEmpty { ChatEmptyState(draft: $chat.draft) }
+                    if chat.turns.isEmpty { TodayPanel(draft: $chat.draft) }
                     ForEach(chat.turns) { turn in
                         TurnView(turn: turn, chat: chat).id(turn.id)
                     }
@@ -301,31 +301,8 @@ struct ChatView: View {
                 }
             }.pickerStyle(.menu).disabled(chat.sending)
                 .help("Personal includes calendar, reminders and journals. This choice applies only to your questions.")
-            HStack(spacing: 8) {
-                Label(chat.telemetry.modelVariant, systemImage: "cpu.fill")
-                    .font(.caption2.monospaced().weight(.semibold))
-                    .foregroundStyle(.green)
-                if let ctx = chat.telemetry.contextWindowTokens {
-                    Text("· \(ctx.formatted()) ctx")
-                        .font(.caption2.monospaced())
-                        .foregroundStyle(.secondary)
-                }
-                if !chat.telemetry.capabilities.isEmpty {
-                    Text("· \(chat.telemetry.capabilities.joined(separator: " + "))")
-                        .font(.caption2.monospaced())
-                        .foregroundStyle(Color.accentColor)
-                }
-                Spacer()
-                if chat.draftTokens > 0 {
-                    Text("\(chat.draftTokens) prompt token\(chat.draftTokens == 1 ? "" : "s")")
-                        .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .padding(.horizontal, 4)
-
             HStack(alignment: .bottom, spacing: 10) {
-                TextField("Ask about your own history", text: $chat.draft, axis: .vertical)
+                TextField("Ask anything about your life and work", text: $chat.draft, axis: .vertical)
                     .textFieldStyle(.plain)
                     .font(.body)
                     .lineLimit(1...6)
@@ -540,7 +517,7 @@ private struct TurnView: View {
                     .font(.caption)
                 }
                 if turn.receipt != nil {
-                    Button("Audit Receipt (Why & How)") { chat.showingReceipt = turn }
+                    Button("Why?") { chat.showingReceipt = turn }
                         .buttonStyle(.link).font(.caption)
                 }
             }
@@ -797,40 +774,6 @@ private struct StructuredAnswerCard: View {
 
 // MARK: - Empty state
 
-private struct ChatEmptyState: View {
-    @Binding var draft: String
-
-    private let examples = [
-        "What have I been building lately?",
-        "What is the current objective and verify command for OpenCore?",
-        "Which projects use Swift?",
-        "What changed in OpenIntelligence recently?",
-    ]
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Grounded Chat Over Your Own History")
-                .font(.title3.weight(.semibold))
-            Text("OpenCore retrieves passages from your indexed history for an on-device answer. It shows source references, sentence grounding checks, structured claims and counter-evidence alongside the response.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            VStack(alignment: .leading, spacing: 6) {
-                Text("TRY A QUESTION")
-                    .font(.caption2.weight(.bold))
-                    .foregroundStyle(.tertiary)
-                ForEach(examples, id: \.self) { example in
-                    Button(example) { draft = example }
-                        .buttonStyle(.link)
-                        .font(.callout)
-                }
-            }
-            .padding(.top, 4)
-        }
-        .padding(.vertical, 40)
-    }
-}
 
 // MARK: - Receipt
 

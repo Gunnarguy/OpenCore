@@ -106,7 +106,7 @@ final class JarvisController: NSObject, AVSpeechSynthesizerDelegate {
         items.append(BriefingItem(category: "FLEET SNAPSHOT", symbol: "folder.fill.badge.gearshape",
             tint: captured?.isComplete == true && attempt?.isComplete == true && !model.isLoadingFleet ? .cyan : .orange,
             title: "\(fleet.count) repository cards · \(dirty.count) dirty among \(measured.count) measured trees",
-            detail: fleetDetail, actionLabel: "Open fleet", repoName: nil, sectionTarget: .home))
+            detail: fleetDetail, actionLabel: "Open fleet", repoName: nil, sectionTarget: .macOverview))
 
         if let eco = model.agentEcosystem {
             let details = eco.readIssues.isEmpty
@@ -130,7 +130,7 @@ final class JarvisController: NSObject, AVSpeechSynthesizerDelegate {
             items.append(BriefingItem(category: "MAC & TAILNET SNAPSHOT", symbol: "desktopcomputer",
                 tint: health.isDiskSpaceLow(thresholdGiB: AppSettings.shared.lowDiskWarningThresholdGiB) || health.dataVolumeFreeGiB == nil || health.simulatorCheckError != nil || health.numberedFileScanError != nil ? .orange : .cyan,
                 title: "\(health.freeSpaceSummary) · \(health.simulatorSummary)", detail: details.joined(separator: " "),
-                actionLabel: "Open Mac checks", repoName: nil, sectionTarget: .home))
+                actionLabel: "Open Mac checks", repoName: nil, sectionTarget: .macOverview))
         }
         items.append(BriefingItem(category: "STORED HISTORY", symbol: "books.vertical.fill", tint: .green,
             title: "Inspect beliefs and their source records",
@@ -703,7 +703,7 @@ struct JarvisHUDView: View {
                         submitVoiceQuery()
                     }
 
-                Button("Ask in Grounded Chat →") {
+                Button("Ask →") {
                     submitVoiceQuery()
                 }
                 .controlSize(.small)

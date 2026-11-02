@@ -362,7 +362,7 @@ Stated plainly, because the whole project is an argument for doing that:
 - **Password-protected notes are left out,** and the app shows no count of them. Domain for the rest
   comes from a guess at the folder name.
 - **The operator console is not part of the evidence store.** Fleet, hardware, monitor and
-  computer-use screens write no objects or receipts, are off Home by default, and have no tests
+  computer-use screens write no objects or receipts, live under Mac rather than Ask, and have no tests
   of their own.
 - **Dense search is brute force.** Linear cosine over every vector. Deliberate at personal
   corpus scale: an ANN index adds a tuning surface and a recall cliff before anything has

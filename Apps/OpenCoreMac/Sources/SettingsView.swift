@@ -15,15 +15,17 @@ struct SettingsView: View {
     @Environment(\.appSettings) private var settings
     @State private var tab: Tab = .appearance
 
+    /// The order here is the order on screen: what people change most, first.
     enum Tab: String, CaseIterable, Identifiable {
-        case appearance = "Appearance & Theme"
-        case commandCenter = "Command Center & AI"
-        case hardware = "Hardware & USB"
-        case automation = "Automation & Control"
-        case retrieval = "Retrieval & Graph"
-        case sync = "Sync & Agents"
-        case security = "Security, MCP & Data"
-        case phone = "iPhone Companion"
+        case appearance = "Appearance"
+        case commandCenter = "Ask & AI"
+        case phone = "iPhone"
+        case connections = "Connections"
+        case sync = "Sync"
+        case retrieval = "Search"
+        case hardware = "Hardware"
+        case automation = "Computer Use"
+        case security = "Privacy & Data"
 
         var id: String { rawValue }
 
@@ -37,6 +39,7 @@ struct SettingsView: View {
             case .sync: return "arrow.triangle.2.circlepath"
             case .security: return "lock.shield.fill"
             case .phone: return "iphone"
+            case .connections: return "powerplug"
             }
         }
 
@@ -50,15 +53,75 @@ struct SettingsView: View {
             case .sync: return Pastel.peach
             case .security: return Pastel.rose
             case .phone: return Pastel.aqua
+            case .connections: return Pastel.sky
             }
         }
     }
 
+    @State private var confirmingReset = false
+
     var body: some View {
+        HStack(spacing: 0) {
+            tabList
+            Divider()
+            // Connections fills the pane with lists of its own, which a scroll view would flatten.
+            if tab == .connections {
+                MCPView().frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                scrollingTab
+            }
+        }
+        .navigationTitle("Settings")
+        .task(id: model.requestedSettingsTab) {
+            if let requested = model.requestedSettingsTab {
+                tab = requested
+                model.requestedSettingsTab = nil
+            }
+        }
+        .confirmationDialog("Reset appearance, layout and search settings?", isPresented: $confirmingReset, titleVisibility: .visible) {
+            Button("Reset to Defaults", role: .destructive) {
+                settings.resetAppearanceAndLayout()
+                settings.resetRetrieval()
+                settings.resetChunking()
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Your data, connections and paired devices are not touched.")
+        }
+    }
+
+    /// A list down the side shows every section at once. A sideways strip hid the last ones.
+    private var tabList: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            ForEach(Tab.allCases) { item in
+                Button { tab = item } label: {
+                    Label(item.rawValue, systemImage: item.symbol)
+                        .font(.callout.weight(tab == item ? .semibold : .regular))
+                        .foregroundStyle(tab == item ? .primary : .secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 7)
+                        .background(tab == item ? item.accent.opacity(0.22) : .clear, in: .rect(cornerRadius: 8))
+                        .contentShape(.rect)
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(tab == item ? .isSelected : [])
+            }
+            Spacer()
+            Button("Reset to Defaults…") { confirmingReset = true }
+                .buttonStyle(.link)
+                .font(.caption)
+                .padding(.horizontal, 10)
+        }
+        .padding(12)
+        .frame(width: 180)
+        .frame(maxHeight: .infinity)
+    }
+
+    private var scrollingTab: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                headerBanner
-                tabStrip
+                Text(tab.rawValue).font(.title2.weight(.semibold))
 
                 switch tab {
                 case .appearance:
@@ -77,86 +140,14 @@ struct SettingsView: View {
                     SecurityMCPAndDataTab()
                 case .phone:
                     CompanionSettingsView()
+                case .connections:
+                    EmptyView()
                 }
             }
             .padding(24)
-            .frame(maxWidth: 1360, alignment: .leading)
-            .frame(maxWidth: .infinity)
+            .frame(maxWidth: 1000, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .navigationTitle("Settings & Customization Studio")
-    }
-
-    private var headerBanner: some View {
-        HStack(alignment: .center, spacing: 14) {
-            Image(systemName: "slider.horizontal.2.gobackward")
-                .font(.system(size: 26, weight: .bold))
-                .foregroundStyle(settings.pastelAccent.color)
-                .frame(width: 48, height: 48)
-                .background(settings.pastelAccent.color.opacity(0.16), in: .rect(cornerRadius: 12))
-
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 8) {
-                    Text("OpenCore Customization & System Control Center")
-                        .font(.title3.weight(.bold))
-                    Text("Accent: \(settings.pastelAccent.rawValue) (\(settings.pastelAccent.hexLabel))")
-                        .openCorePastelBadge(settings.pastelAccent.color)
-                    Text(settings.appearanceMode.rawValue)
-                        .openCorePastelBadge(Pastel.ice)
-                }
-                Text("Every visual surface, Pastel color token, Liquid Glass physics parameter, Command Center deck, J.A.R.V.I.S. voice setting, USB polling rate, Local Automation Hub guardrail, and hybrid retrieval weight in one live-reactive studio.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            Spacer()
-
-            Button {
-                settings.resetAppearanceAndLayout()
-                settings.resetRetrieval()
-                settings.resetChunking()
-            } label: {
-                Label("Reset All to Defaults", systemImage: "arrow.counterclockwise")
-                    .font(.caption.weight(.semibold))
-            }
-            .openCoreGlassButton(tint: Pastel.peach)
-        }
-        .padding(16)
-        .openCoreGlassCard(cornerRadius: 16, tint: settings.pastelAccent.color)
-    }
-
-    private var tabStrip: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(Tab.allCases) { item in
-                    let selected = tab == item
-                    Button {
-                        tab = item
-                    } label: {
-                        HStack(spacing: 7) {
-                            Image(systemName: item.symbol)
-                                .foregroundStyle(selected ? item.accent : .secondary)
-                            Text(item.rawValue)
-                                .font(.system(size: 12.5, weight: selected ? .bold : .medium))
-                                .foregroundStyle(selected ? .primary : .secondary)
-                        }
-                        .padding(.horizontal, 13)
-                        .padding(.vertical, 8)
-                        .background(
-                            selected ? item.accent.opacity(0.22) : Color.white.opacity(0.04),
-                            in: .capsule
-                        )
-                        .overlay {
-                            Capsule()
-                                .strokeBorder(selected ? item.accent.opacity(0.65) : Color.white.opacity(0.10), lineWidth: 1)
-                        }
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(6)
-        }
-        .openCoreGlassBar(cornerRadius: 18)
     }
 }
 
@@ -347,7 +338,7 @@ private struct AppearanceAndThemeTab: View {
 
                     VStack(alignment: .leading, spacing: 4) {
                         HStack {
-                            Text("Command Center Max Content Width")
+                            Text("Mac Overview Max Content Width")
                                 .font(.caption.weight(.semibold))
                             Spacer()
                             Text("\(Int(settings.commandCenterMaxWidth)) pt")
@@ -355,7 +346,7 @@ private struct AppearanceAndThemeTab: View {
                                 .foregroundStyle(Pastel.mint)
                         }
                         Slider(value: $settings.commandCenterMaxWidth, in: 1120...2200, step: 40)
-                        Text("Controls how wide the Command Center expands on large displays.")
+                        Text("Controls how wide Mac Overview expands on large displays.")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
@@ -398,7 +389,7 @@ private struct AppearanceAndThemeTab: View {
 private struct CommandCenterAndAITab: View {
     @Environment(\.appModel) private var model
     @Environment(\.appSettings) private var settings
-    @AppStorage("sidebar.showDeveloper") private var showDeveloper = false
+    @AppStorage("sidebar.showEvidence") private var showDeveloper = false
     @State private var jarvis = JarvisController.shared
 
     var body: some View {

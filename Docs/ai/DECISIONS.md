@@ -1646,3 +1646,12 @@ agenda answer has no evidence rows to link, so its receipt names the stage and t
 and the passages lead. Claims stay in the answer as context, because `technologyDoesNotCaptureTheQuestion`
 pins that a passage about a project brings that project's claims.
 
+## 2026-11-02: Ask, Mac and Evidence
+
+[design] The owner said the app had become confusing: 20 screens in 6 groups, with Chat sixth under
+"Follow the evidence". The app now opens on Ask, which merges Home and Chat around one box and the
+owner's day. The old Home is Mac Overview, with its operator decks on by default because that is the
+screen they belong to. The eleven evidence screens are folded in the sidebar and reached from Why? on an
+answer. Connections moved into Settings. No feature was removed. Engine names stay in each screen's
+guide, so searching "claims" still finds Statements.
+

@@ -14,6 +14,14 @@ Phone coverage/acceptance: PHONE.md.
 
 ## Exact Next Action
 
+[measured, 2026-11-02] The app is now three places: Ask, Mac and Evidence, plus Settings. Ask opens the
+app and merges Home and Chat around one box, today, what is due and what changed. The old Home is Mac
+Overview with its decks on by default, Evidence is folded, Connections is a Settings tab, and Why? on an
+answer opens its receipt. Nothing was removed. Installed and running, with the Ask screen checked from a
+window capture on real data. 931 package tests passed before the last app-only edits. Mac Overview,
+Evidence, Connections and asking a question in the app were not exercised, and the phone keeps its old
+layout. This change is uncommitted.
+
 [measured, 2026-11-02] Three steps are the owner's, in this order. Sync Apple Calendar once from
 Sources and allow it: the schedule record says Calendar was never allowed, so it last synced
 2026-08-14. Do the same for Notes, which holds no objects. Then turn Tailscale on and pair the phone.

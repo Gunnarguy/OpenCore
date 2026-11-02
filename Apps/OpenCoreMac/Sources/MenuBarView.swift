@@ -209,7 +209,7 @@ struct MenuBarView: View {
                     .font(.caption2.monospaced())
                     .foregroundStyle(.tertiary)
                 Spacer()
-                Button("Continue in Grounded Chat →") {
+                Button("Continue in Ask →") {
                     let q = query
                     NSApp.activate(ignoringOtherApps: true)
                     model.askInChat(q)
@@ -395,11 +395,11 @@ struct MenuBarView: View {
                 Button {
                     openWindow(id: "main", value: "workspace")
                     NSApp.activate(ignoringOtherApps: true)
-                    model.selectedSection = .home
+                    model.selectedSection = .ask
                 } label: {
                     HStack(spacing: 6) {
                         Image(systemName: "macwindow")
-                        Text("Open Command Center")
+                        Text("Open OpenCore")
                             .fixedSize(horizontal: true, vertical: false)
                     }
                     .font(.caption.weight(.semibold))

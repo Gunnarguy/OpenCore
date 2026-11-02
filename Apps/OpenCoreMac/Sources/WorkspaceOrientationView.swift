@@ -92,7 +92,7 @@ struct WorkspaceMapView: View {
                     currentWorkspace
                     projectExample
                     evidenceRoutes
-                    ForEach(WorkspaceFamily.allCases.filter { $0 != .knowledge && $0 != .overview }) { family in
+                    ForEach(WorkspaceFamily.allCases.filter { $0 != .evidence && $0 != .ask }) { family in
                         familyCard(family)
                     }
                 }
@@ -117,7 +117,7 @@ struct WorkspaceMapView: View {
             Text(model.selectedSection.guide.useWhen).foregroundStyle(.secondary)
             HStack {
                 Button(model.selectedSection.guide.nextAction) { open(model.selectedSection.guide.next, followingSubject: true) }
-                Button("Command Center") { open(.home) }
+                Button("Ask") { open(.ask) }
             }
             .controlSize(.small)
         }
@@ -194,7 +194,7 @@ struct WorkspaceMapView: View {
             }
             Divider()
             HStack {
-                routeButton(.chat)
+                routeButton(.ask)
                 Image(systemName: "arrow.right").foregroundStyle(.secondary)
                 routeButton(.receipts)
             }
