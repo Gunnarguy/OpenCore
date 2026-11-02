@@ -6,18 +6,30 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MODE="${1:-run}"
 STAGING_ROOT="/private/tmp/OpenCore-review-source"
 DERIVED_ROOT="/private/tmp/opencore-review-dd"
-APP_BUNDLE="$DERIVED_ROOT/Build/Products/Debug/OpenCore.app"
+SCHEME="${2:-OpenCore}"
+APP_BUNDLE="$DERIVED_ROOT/Build/Products/Debug/$SCHEME.app"
 case "$MODE" in
   run|--verify|--debug|--logs|--telemetry|--build-only) ;;
-  *) echo "usage: $0 [--build-only|--verify|--debug|--logs|--telemetry]" >&2; exit 2 ;;
+  *) echo "usage: $0 [--build-only|--verify|--debug|--logs|--telemetry] [OpenCore|OpenCoreReview]" >&2; exit 2 ;;
+esac
+
+case "$SCHEME" in
+  OpenCore) ;;
+  OpenCoreReview)
+    if [[ "$MODE" != --build-only ]]; then echo "Review builds are build-only; never install as production" >&2; exit 2; fi
+    ;;
+  *) echo "Unknown app scheme" >&2; exit 2 ;;
 esac
 
 # Refuse a redirected staging directory before rsync's bounded cleanup.
 if [[ -L "$STAGING_ROOT" || -L "$DERIVED_ROOT" ]]; then
   echo "Build directories must not be symlinks" >&2; exit 1
 fi
+mkdir /private/tmp/opencore-xcodebuild.lock 2>/dev/null || { echo "Another OpenCore Xcode build is active" >&2; exit 75; }
+trap 'rmdir /private/tmp/opencore-xcodebuild.lock' EXIT
+if pgrep -x xcodebuild >/dev/null; then echo "Wait for the active xcodebuild to finish" >&2; exit 75; fi
 mkdir "$STAGING_ROOT.lock" 2>/dev/null || { echo "Another OpenCore app build is active" >&2; exit 75; }
-trap 'rmdir "$STAGING_ROOT.lock"' EXIT
+trap 'rmdir "$STAGING_ROOT.lock"; rmdir /private/tmp/opencore-xcodebuild.lock' EXIT
 mkdir -p "$STAGING_ROOT/Sources" "$STAGING_ROOT/Tests" "$STAGING_ROOT/Apps/OpenCoreMac"
 cp "$ROOT_DIR/Package.swift" "$STAGING_ROOT/Package.swift"
 rsync -a --delete "$ROOT_DIR/Sources/" "$STAGING_ROOT/Sources/"
@@ -26,7 +38,7 @@ rsync -a --delete --exclude '*.xcodeproj' --exclude '*.xcworkspace' --exclude Ge
   "$ROOT_DIR/Apps/OpenCoreMac/" "$STAGING_ROOT/Apps/OpenCoreMac/"
 (cd "$STAGING_ROOT/Apps/OpenCoreMac" && /opt/homebrew/bin/xcodegen generate)
 xcodebuild -project "$STAGING_ROOT/Apps/OpenCoreMac/OpenCore.xcodeproj" \
-  -scheme OpenCore -configuration Debug -derivedDataPath "$DERIVED_ROOT" \
+  -scheme "$SCHEME" -configuration Debug -derivedDataPath "$DERIVED_ROOT" \
   -destination 'platform=macOS,arch=arm64' build
 codesign --verify --deep --strict "$APP_BUNDLE"
 if [[ "$MODE" == --build-only ]]; then exit 0; fi

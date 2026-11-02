@@ -8,6 +8,18 @@ public struct ID<Scope>: Hashable, Sendable, Codable, CustomStringConvertible, E
     public init(_ value: String) { self.value = value }
     public init(stringLiteral value: String) { self.value = value }
 
+    // SQLite's default BINARY identity distinguishes UTF-8 byte sequences. Swift String
+    // equality uses Unicode canonical equivalence, so synthesized Hashable would collapse
+    // distinct stored rows in sets and dictionaries.
+    public static func == (lhs: ID<Scope>, rhs: ID<Scope>) -> Bool {
+        lhs.value.utf8.elementsEqual(rhs.value.utf8)
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(value.utf8.count)
+        for byte in value.utf8 { hasher.combine(byte) }
+    }
+
     public var description: String { value }
 
     public init(from decoder: any Decoder) throws {

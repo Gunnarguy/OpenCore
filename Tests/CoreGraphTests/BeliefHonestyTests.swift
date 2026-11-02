@@ -1,4 +1,5 @@
 import CoreModel
+import CoreReason
 import CoreStore
 import Foundation
 import Testing
@@ -905,4 +906,26 @@ func modelProposalCannotDisplaceDerivedPattern() async throws {
     _ = try await BeliefEngine(store: store, now: now).reconcile()
     #expect(try await store.claim(derived.id)?.validity.isCurrent == true)
     #expect(try await store.claim(proposed.id)?.validity.isCurrent == false)
+}
+
+// The bug: with no project named, `status` only ranked whatever the passages touched, so "which of
+// my projects are dormant" opened with active ones.
+@Test("which projects are dormant lists the dormant ones by their current belief")
+func dormantProjectsAreListed() async throws {
+    let store = try await temporaryStore()
+    try await store.upsert(github)
+    let pushed = Date().addingTimeInterval(-300 * day)
+    let object = repository(pushed: pushed, created: pushed.addingTimeInterval(-500 * day))
+    _ = try await IngestPipeline(store: store, now: pushed.addingTimeInterval(day)).run(objects: [object])
+    let reasoner = Reasoner(store: store)
+
+    // Active first: a claim that lost its slot must not be listed under the value it used to hold.
+    #expect(try await reasoner.answer("Which of my projects are dormant?", persistReceipt: false).points.isEmpty)
+    #expect(try await reasoner.answer("Which of my projects are active?", persistReceipt: false).summary.hasPrefix("1 project is active."))
+
+    _ = try await IngestPipeline(store: store, now: pushed.addingTimeInterval(200 * day)).run(objects: [object])
+    let dormant = try await reasoner.answer("Which of my projects are dormant?", persistReceipt: false)
+    #expect(dormant.summary.hasPrefix("1 project is dormant."))
+    #expect(dormant.points.map(\.statement) == ["Atlas is dormant."])
+    #expect(try await reasoner.answer("Which of my projects are active?", persistReceipt: false).points.isEmpty)
 }

@@ -358,7 +358,7 @@ struct MenuBarView: View {
                 .openCoreGlassButton(tint: Pastel.butter)
 
                 Button {
-                    openWindow(id: "main")
+                    openWindow(id: "main", value: "workspace")
                     NSApp.activate(ignoringOtherApps: true)
                     model.showingJarvisHUD = true
                     Task { await JarvisController.shared.generateMorningBriefing(using: model) }
@@ -377,7 +377,7 @@ struct MenuBarView: View {
 
             HStack(spacing: 8) {
                 Button {
-                    openWindow(id: "main")
+                    openWindow(id: "main", value: "workspace")
                     NSApp.activate(ignoringOtherApps: true)
                     model.selectedSection = .aiModelsRAM
                 } label: {
@@ -393,7 +393,7 @@ struct MenuBarView: View {
                 .openCoreGlassButton(tint: Pastel.aqua)
 
                 Button {
-                    openWindow(id: "main")
+                    openWindow(id: "main", value: "workspace")
                     NSApp.activate(ignoringOtherApps: true)
                     model.selectedSection = .home
                 } label: {

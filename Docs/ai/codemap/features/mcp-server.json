@@ -4,18 +4,19 @@
   "name": "MCP server",
   "aliases": ["core_ask", "core_search", "core_claims", "core_trace", "core_dossier", "core_timeline", "core_changed", "core_contradictions", "opencore mcp", "tools"],
   "purpose": "Serves the store to other agents as eight read tools over stdio, where a caller is not the user and sensitive domains stay closed.",
-  "revision": "e801208",
-  "verified_on": "2026-10-31",
+  "revision": "08f4e80",
+  "verified_on": "2026-11-01",
   "entry_points": ["MCPServer.handle"],
   "files": [
-    {"path": "Sources/CoreMCP/MCPServer.swift", "role": "primary", "blob": "002bee3f36ed89b8912ca01238b6bc44554dea1c"},
-    {"path": "Tests/CoreMCPTests/ProtocolNegotiationTests.swift", "role": "test", "blob": "029e930d2de6a69573d14bc0c154fbeda88b2d7b"}
+    {"path": "Sources/CoreMCP/MCPServer.swift", "role": "primary", "blob": "c716ec6bb4eb0f812fc2017d4b7a8b089c7bb16c"},
+    {"path": "Tests/CoreMCPTests/ProtocolNegotiationTests.swift", "role": "test", "blob": "029e930d2de6a69573d14bc0c154fbeda88b2d7b"},
+    {"path": "Tests/CoreMCPTests/ReceiptDisclosureTests.swift", "role": "test", "blob": "8a43156784d84d056843446bb52ecbfdf3a47a19"}
   ],
   "nodes": [
     {"id": "MCPServer.handle", "kind": "function", "path": "Sources/CoreMCP/MCPServer.swift", "line": 108, "match": "public func handle(_ request: RPCRequest) async throws -> JSONValue {", "status": "VERIFIED", "note": "Nothing but MCP messages may reach stdout."},
     {"id": "MCPServer.ask", "kind": "function", "path": "Sources/CoreMCP/MCPServer.swift", "line": 338, "match": "private func ask(_ arguments: JSONValue) async throws -> String {", "status": "VERIFIED", "note": ""},
-    {"id": "MCPServer.admittedReason", "kind": "function", "path": "Sources/CoreMCP/MCPServer.swift", "line": 848, "match": "private func admittedReason(_ belief: Belief, policy: AdmissionPolicy) async throws -> String {", "status": "VERIFIED", "note": "Withholds a reason that names a replaced value."},
-    {"id": "MCPServer.boundedLimit", "kind": "function", "path": "Sources/CoreMCP/MCPServer.swift", "line": 477, "match": "private static func boundedLimit(_ value: JSONValue?, default fallback: Int) -> Int {", "status": "VERIFIED", "note": "A limit comes from a model, so it is clamped."}
+    {"id": "MCPServer.admittedReason", "kind": "function", "path": "Sources/CoreMCP/MCPServer.swift", "line": 854, "match": "private func admittedReason(_ belief: Belief, policy: AdmissionPolicy) async throws -> String {", "status": "VERIFIED", "note": "Withholds a reason that names a replaced value."},
+    {"id": "MCPServer.boundedLimit", "kind": "function", "path": "Sources/CoreMCP/MCPServer.swift", "line": 478, "match": "private static func boundedLimit(_ value: JSONValue?, default fallback: Int) -> Int {", "status": "VERIFIED", "note": "A limit comes from a model, so it is clamped."}
   ],
   "edges": [
     {"from": "MCPServer.ask", "type": "calls", "to": "answers#Reasoner.answer", "status": "VERIFIED", "evidence": [{"path": "Sources/CoreMCP/MCPServer.swift", "line": 50, "match": "self.reasoner = Reasoner(store: store, search: PassageSearch(store: store, embedder: embedder), now: now(), calendar: calendar())"}], "note": "externalCaller is true unless the unsafe flag was passed."}
@@ -31,15 +32,15 @@
     "edges": [
       {"from": "MCPServer", "type": "depends_on", "to": "feature:store-floor", "status": "INFERRED", "evidence": [{"path": "Sources/CoreMCP/MCPServer.swift", "line": 27, "match": "private let store: Store"}], "note": "via Store, CoreClaim, CoreEntity"},
       {"from": "MCPServer", "type": "depends_on", "to": "feature:retrieval", "status": "INFERRED", "evidence": [{"path": "Sources/CoreMCP/MCPServer.swift", "line": 28, "match": "private let search: PassageSearch"}], "note": "via PassageSearch"},
-      {"from": "MCPServer", "type": "depends_on", "to": "feature:answers", "status": "INFERRED", "evidence": [{"path": "Sources/CoreMCP/MCPServer.swift", "line": 29, "match": "private let reasoner: Reasoner"}], "note": "via Reasoner, QueryClassifier"},
+      {"from": "MCPServer", "type": "depends_on", "to": "feature:answers", "status": "INFERRED", "evidence": [{"path": "Sources/CoreMCP/MCPServer.swift", "line": 29, "match": "private let reasoner: Reasoner"}], "note": "via Reasoner, QueryClassifier, Receipt"},
       {"from": "MCPServer", "type": "depends_on", "to": "feature:ingest", "status": "INFERRED", "evidence": [{"path": "Sources/CoreMCP/MCPServer.swift", "line": 41, "match": "embedder: (any EmbeddingProvider)? = nil,"}], "note": "via EmbeddingProvider"},
       {"from": "MCPServer", "type": "depends_on", "to": "feature:mcp-client", "status": "INFERRED", "evidence": [{"path": "Sources/CoreMCP/MCPServer.swift", "line": 70, "match": "let request: RPCRequest"}], "note": "via RPCRequest, RPCResponse, RPCError, JSONValue"},
       {"from": "MCPServer", "type": "depends_on", "to": "feature:hardware", "status": "INFERRED", "evidence": [{"path": "Sources/CoreMCP/MCPServer.swift", "line": 109, "match": "try await Telemetry.span(\"mcp \\(request.method)\", .mcp) { scope in"}], "note": "via Telemetry"},
       {"from": "MCPServer", "type": "depends_on", "to": "feature:chat", "status": "INFERRED", "evidence": [{"path": "Sources/CoreMCP/MCPServer.swift", "line": 434, "match": "var sources: [GroundingSource] = []"}], "note": "via GroundingSource, Conversation"},
-      {"from": "MCPServer", "type": "depends_on", "to": "feature:time-windows", "status": "INFERRED", "evidence": [{"path": "Sources/CoreMCP/MCPServer.swift", "line": 494, "match": "let window = TemporalIntent.window(in: query, now: currentDate(), calendar: calendar)"}], "note": "via TemporalIntent"},
-      {"from": "MCPServer", "type": "depends_on", "to": "feature:beliefs", "status": "INFERRED", "evidence": [{"path": "Sources/CoreMCP/MCPServer.swift", "line": 588, "match": "var history: [Belief] = []"}], "note": "via Belief, Contradiction"},
-      {"from": "MCPServer", "type": "depends_on", "to": "feature:browse", "status": "INFERRED", "evidence": [{"path": "Sources/CoreMCP/MCPServer.swift", "line": 729, "match": "var admittedClaims: [DossierClaim] = []"}], "note": "via DossierClaim"},
-      {"from": "MCPServer", "type": "depends_on", "to": "feature:firewall", "status": "INFERRED", "evidence": [{"path": "Sources/CoreMCP/MCPServer.swift", "line": 827, "match": "private func policy(for query: String) async throws -> AdmissionPolicy {"}], "note": "via AdmissionPolicy, Domain"}
+      {"from": "MCPServer", "type": "depends_on", "to": "feature:time-windows", "status": "INFERRED", "evidence": [{"path": "Sources/CoreMCP/MCPServer.swift", "line": 495, "match": "let window = TemporalIntent.window(in: query, now: currentDate(), calendar: calendar)"}], "note": "via TemporalIntent"},
+      {"from": "MCPServer", "type": "depends_on", "to": "feature:firewall", "status": "INFERRED", "evidence": [{"path": "Sources/CoreMCP/MCPServer.swift", "line": 554, "match": "guard try await ClaimAdmission.admits(claim, policy: activePolicy, store: store) else { continue }"}], "note": "via ClaimAdmission, AdmissionPolicy"},
+      {"from": "MCPServer", "type": "depends_on", "to": "feature:beliefs", "status": "INFERRED", "evidence": [{"path": "Sources/CoreMCP/MCPServer.swift", "line": 589, "match": "var history: [Belief] = []"}], "note": "via Belief, Contradiction"},
+      {"from": "MCPServer", "type": "depends_on", "to": "feature:browse", "status": "INFERRED", "evidence": [{"path": "Sources/CoreMCP/MCPServer.swift", "line": 736, "match": "var admittedClaims: [DossierClaim] = []"}], "note": "via DossierClaim"}
     ],
     "edges_omitted": 0
   }

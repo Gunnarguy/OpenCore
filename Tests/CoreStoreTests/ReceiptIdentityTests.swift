@@ -64,6 +64,34 @@ struct ReceiptIdentityTests {
         #expect(fetched?.shortCode == original.shortCode)
     }
 
+    @Test("nontext and missing receipt scopes fail closed instead of becoming empty")
+    func malformedReceiptDomainTypesAreRestricted() async throws {
+        let store = try await Self.temporaryStore()
+        let original = Self.receipt("scope fixture", at: Date(timeIntervalSince1970: 1_800_000_000))
+        try await store.save(original)
+        // Duplicate aliases override the selected columns only in this synthetic result row.
+        let rows = try await store.database.query(
+            "SELECT *, NULL AS domains_admitted, X'70726F6A656374' AS domains_blocked FROM receipt WHERE id = ?",
+            [.text(original.id.value)]
+        )
+        let decoded = Receipt(row: try #require(rows.first))
+        #expect(decoded.domainsAdmitted == [.restricted])
+        #expect(decoded.domainsBlocked == [.restricted])
+
+        let missingRows = try await store.database.query(
+            """
+            SELECT id, query, query_class, stages, objects_searched, objects_retrieved,
+                   evidence_admitted, claims_consulted, contradictions_surfaced, model,
+                   objects_transmitted, confidence, created_at
+            FROM receipt WHERE id = ?
+            """,
+            [.text(original.id.value)]
+        )
+        let missing = Receipt(row: try #require(missingRows.first))
+        #expect(missing.domainsAdmitted == [.restricted])
+        #expect(missing.domainsBlocked == [.restricted])
+    }
+
     @Test("a short code stays unique enough to identify one receipt among many")
     func shortCodesDoNotCollideInPractice() {
         // `shortCode` is the first six hex characters, which is what a person actually types

@@ -1,5 +1,6 @@
 import CoreIngest
 import CoreModel
+import CorePresentation
 import CoreReason
 import SwiftUI
 
@@ -915,7 +916,7 @@ private struct ContradictionSideRow: View {
     }
 }
 
-// MARK: - 4. Receipts (Zero-Egress Audit Log)
+// MARK: - 4. Receipts (Recorded Answer Activity)
 
 struct ReceiptsView: View {
     @Environment(\.appModel) private var model
@@ -973,7 +974,7 @@ struct ReceiptsView: View {
                             ActionFeedbackCenter.shared.record(
                                 button: "Generate Sample Audited Query Receipt",
                                 command: "Reasoner.answer -> receipt \(answer.receipt.shortCode)",
-                                outcome: "Saved receipt \(answer.receipt.shortCode) in \(ms) ms; \(answer.receipt.objectsTransmitted) source objects transmitted by the answer path.",
+                                outcome: "Saved receipt \(answer.receipt.shortCode) in \(ms) ms; \(answer.receipt.outboundDescription)",
                                 status: .completed,
                                 durationMs: ms
                             )

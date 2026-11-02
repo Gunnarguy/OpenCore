@@ -1,4 +1,5 @@
 import CoreModel
+import CorePresentation
 import CoreReason
 import CoreStore
 import SwiftUI
@@ -19,6 +20,8 @@ final class EntityModel {
     var extractingClaims = false
     var lastProposalSummary: String?
     var loadError: String?
+    /// Retained for refresh/retry until a manual selection replaces the explicit jump.
+    var navigationTarget: EntityNavigationRead.Target?
     private(set) var selectionRevision = 0
     @ObservationIgnored private var listRequestID = UUID()
     @ObservationIgnored private var dossierRequestID = UUID()
@@ -37,28 +40,79 @@ final class EntityModel {
         }
     }
 
-    func load(store: Store) async {
+    func load(store: Store, selectDefault: Bool = true) async {
         guard !Task.isCancelled else { return }
         let requestID = UUID()
         let selectionAtStart = selected
+        let revisionAtStart = selectionRevision
+        let dossierRequestAtStart = dossierRequestID
         listRequestID = requestID
         do {
             let fetched = try await store.entitiesByActivity()
             guard !Task.isCancelled, listRequestID == requestID else { return }
             entities = fetched
+            // A list reply does not own a dossier/error from a read that began after it.
+            guard selected == selectionAtStart, selectionRevision == revisionAtStart,
+                  dossierRequestID == dossierRequestAtStart else { return }
             loadError = nil
             // A selection made while the list was loading owns its own dossier request.
-            guard selected == selectionAtStart else { return }
+            guard selectDefault, selected == selectionAtStart else { return }
             if let selected { await select(selected, store: store) }
             else if let first = fetched.first?.0.id { await select(first, store: store) }
         } catch {
-            guard !Task.isCancelled, listRequestID == requestID else { return }
+            guard !Task.isCancelled, listRequestID == requestID, selected == selectionAtStart,
+                  selectionRevision == revisionAtStart, dossierRequestID == dossierRequestAtStart else { return }
             loadError = "Entities could not load: \(error.localizedDescription)"
         }
     }
 
+    func prepareNavigation() {
+        selectionRevision += 1
+        cancelGeneratedWork()
+        selected = nil
+        dossier = nil
+        fmBrief = nil
+        lastProposalSummary = nil
+        dossierRequestID = UUID()
+        historyRequestID = UUID()
+        showingHistoryFor = nil
+        history = []
+        loadError = nil
+        loading = true
+    }
+
+    /// Explicit navigation cannot fall back to a prior/default dossier when its target is missing.
+    func navigate(to target: EntityNavigationRead.Target, store: Store,
+                  isCurrent: () -> Bool) async -> EntityNavigationRead.Outcome {
+        guard !Task.isCancelled else { return .discarded }
+        navigationTarget = target
+        prepareNavigation()
+        let requestID = dossierRequestID
+        let outcome = await EntityNavigationRead.run(
+            target: target,
+            knownEntities: entities.map(\.0),
+            resolve: { try await store.resolve(surface: $0).map(\.0) },
+            read: { try await store.dossier(for: $0) },
+            isCurrent: { self.dossierRequestID == requestID && self.navigationTarget == target && isCurrent() }
+        )
+        guard dossierRequestID == requestID, navigationTarget == target, isCurrent() else { return .discarded }
+        loading = false
+        switch outcome {
+        case .loaded(let fetched):
+            selected = fetched.entity.id
+            dossier = fetched
+        case .notFound:
+            loadError = "The requested entity was not found. No dossier was loaded."
+        case .failed(let message):
+            loadError = "Dossier could not load: \(message)"
+        case .discarded: break
+        }
+        return outcome
+    }
+
     func select(_ id: EntityID, store: Store) async {
         guard !Task.isCancelled else { return }
+        navigationTarget = nil
         if selected != id {
             selectionRevision += 1
             cancelGeneratedWork()
@@ -130,8 +184,7 @@ final class EntityModel {
 
 private struct EntityLoadTrigger: Equatable {
     let dataGeneration: Int
-    let pendingID: EntityID?
-    let pendingName: String?
+    let navigationRevision: Int
 }
 
 struct EntityView: View {
@@ -141,6 +194,7 @@ struct EntityView: View {
     @AppStorage("entity.viewMode") private var viewMode: ViewMode = .split
     @State private var workspaceTab: WorkspaceTab = .entities
     @State private var selectionTask: Task<Void, Never>?
+    @State private var lastNavigationRevision: Int?
 
     enum WorkspaceTab: String, CaseIterable, Identifiable {
         case entities = "Entities & Dossier"
@@ -250,31 +304,54 @@ struct EntityView: View {
         .task(
             id: EntityLoadTrigger(
                 dataGeneration: model.dataGeneration,
-                pendingID: model.pendingEntityID,
-                pendingName: model.pendingEntityName
+                navigationRevision: model.entityNavigationRevision
             )
         ) {
             guard let store = model.store else { return }
-            await entities.load(store: store)
-            guard !Task.isCancelled else { return }
-
-            if let wantedID = model.pendingEntityID {
-                workspaceTab = .entities
-                await entities.select(wantedID, store: store)
-                guard !Task.isCancelled else { return }
-                if model.pendingEntityID == wantedID { model.pendingEntityID = nil }
-            } else if let wantedName = model.pendingEntityName ?? PendingEntity.shared.take() {
-                workspaceTab = .entities
-                if let match = entities.entities.first(where: {
-                    $0.0.canonicalName.caseInsensitiveCompare(wantedName) == .orderedSame
-                })?.0.id {
-                    await entities.select(match, store: store)
-                } else if let resolved = (try? await store.resolve(surface: wantedName))?.first?.0.id {
-                    guard !Task.isCancelled else { return }
-                    await entities.select(resolved, store: store)
+            let revision = model.entityNavigationRevision
+            let target: EntityNavigationRead.Target?
+            var legacyNavigation = false
+            if let id = model.pendingEntityID { target = .id(id) }
+            else if let name = model.pendingEntityName { target = .name(name) }
+            else if let name = PendingEntity.shared.take() { target = .name(name); legacyNavigation = true }
+            else { target = model.entityNavigationTarget }
+            let presentDossier = lastNavigationRevision != revision || legacyNavigation
+            lastNavigationRevision = revision
+            let feedbackButton = presentDossier ? "Open Entity" : "Refresh Entity"
+            if let target {
+                if presentDossier { workspaceTab = .entities }
+                model.entityNavigationTarget = target
+                entities.navigationTarget = target
+                entities.prepareNavigation()
+                model.activeEntityID = nil
+            }
+            let selectionBeforeList = entities.selectionRevision
+            await entities.load(store: store, selectDefault: target == nil)
+            guard !Task.isCancelled, model.entityNavigationRevision == revision else { return }
+            if let target {
+                guard entities.selectionRevision == selectionBeforeList,
+                      entities.navigationTarget == target, model.entityNavigationTarget == target else { return }
+                ActionFeedbackCenter.shared.record(button: feedbackButton, command: "Read entity dossier",
+                    outcome: "Loading the requested entity dossier.", status: .running)
+                let result = await entities.navigate(to: target, store: store,
+                    isCurrent: { model.entityNavigationRevision == revision && model.entityNavigationTarget == target })
+                guard !Task.isCancelled, model.entityNavigationRevision == revision else { return }
+                switch result {
+                case .loaded(let dossier):
+                    ActionFeedbackCenter.shared.record(button: feedbackButton, command: "Read entity dossier",
+                        outcome: "Loaded '\(dossier.entity.canonicalName)': \(dossier.claims.count) statement rows, \(dossier.events.count) recent events and \(dossier.contradictions.count) contradictions.", status: .completed)
+                case .notFound:
+                    ActionFeedbackCenter.shared.record(button: feedbackButton, command: "Read entity dossier",
+                        outcome: "The requested entity was not found. No dossier was loaded.", status: .warning)
+                case .failed(let message):
+                    ActionFeedbackCenter.shared.record(button: feedbackButton, command: "Read entity dossier",
+                        outcome: "The requested dossier could not load: \(message)", status: .warning)
+                    let prior = model.failure.map { "\n" + $0.message } ?? ""
+                    model.failure = .init(message: "Entity navigation failed: \(message)" + prior, at: Date())
+                case .discarded: return
                 }
-                guard !Task.isCancelled else { return }
-                if model.pendingEntityName == wantedName { model.pendingEntityName = nil }
+                model.pendingEntityID = nil
+                model.pendingEntityName = nil
             }
             guard !Task.isCancelled else { return }
             model.activeEntityID = entities.selected
@@ -291,6 +368,10 @@ struct EntityView: View {
             get: { entities.selected },
             set: { id in
                 guard let id, let store = model.store else { return }
+                model.pendingEntityID = nil
+                model.pendingEntityName = nil
+                entities.navigationTarget = nil
+                model.entityNavigationTarget = .id(id)
                 model.activeEntityID = id
                 selectionTask?.cancel()
                 selectionTask = Task { await entities.select(id, store: store) }
@@ -326,6 +407,13 @@ struct EntityView: View {
                 Label(error, systemImage: "exclamationmark.triangle")
                 Button("Retry") {
                     guard let store = model.store else { return }
+                    if let target = entities.navigationTarget {
+                        switch target {
+                        case .id(let id): model.openEntity(id: id)
+                        case .name(let name): model.openEntity(named: name)
+                        }
+                        return
+                    }
                     selectionTask?.cancel()
                     selectionTask = Task { await entities.load(store: store) }
                 }

@@ -223,7 +223,20 @@ extension Store {
         // Receipts deliberately survive. They are referenced by `receipt_evidence` and reached
         // by `opencore trace`, and the turn's foreign key is ON DELETE SET NULL rather than
         // CASCADE for that reason.
-        try await database.execute("DELETE FROM conversation WHERE id = ?", [.text(id)])
+        if id.hasPrefix("phone-v1:") {
+            let tombstone = Self.companionTombstoneKey(id)
+            try await database.write { connection in
+                try connection.execute("""
+                    INSERT INTO companion_thread_tombstone (id, deleted_at, pending_delete_id) VALUES (?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET pending_delete_id = excluded.pending_delete_id
+                    """, [.text(tombstone), .real(Date().timeIntervalSince1970), .text(id)])
+                try connection.execute("DELETE FROM conversation WHERE id = ?", [.text(id)])
+                // A missing conversation fires no trigger, so clear its authorization too.
+                try connection.execute("UPDATE companion_thread_tombstone SET pending_delete_id = NULL WHERE id = ?", [.text(tombstone)])
+            }
+        } else {
+            try await database.execute("DELETE FROM conversation WHERE id = ?", [.text(id)])
+        }
     }
 
     public func renameConversation(id: String, title: String) async throws {

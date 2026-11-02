@@ -20,7 +20,7 @@ private func tool(_ server: MCPServer, _ name: String, _ arguments: [String: JSO
         "jsonrpc": .string("2.0"), "id": .number(1), "method": .string("tools/call"),
         "params": .object(["name": .string(name), "arguments": .object(arguments)]),
     ])
-    let request = try JSONDecoder().decode(RPCRequest.self, from: JSONEncoder().encode(payload))
+    let request = try RPCRequest.decode(JSONEncoder().encode(payload))
     let result = try await server.handle(request)
     guard case .object(let dict) = result, case .array(let content)? = dict["content"],
           case .object(let first)? = content.first, case .string(let text)? = first["text"]
@@ -623,7 +623,8 @@ func claimsAreNotPassages() async throws {
     #expect(passages < retrieved.sources.count, "the fixture must hold a claim source or this proves nothing")
     #expect(filed.objectsRetrieved == passages)
     #expect(filed.answeredFromClaims)
-    #expect(filed.evidenceAdmitted == retrieved.reading.evidence.count)
+    let evidenceIDs = Set(retrieved.reading.evidence.map(\.0) + retrieved.reading.passages.map { $0.0.id })
+    #expect(filed.evidenceAdmitted == evidenceIDs.count, "claim support and retrieved passage spans are both traceable")
 }
 
 // The bug: `persist` saved the receipt with no links, so a chat turn reported N claims while

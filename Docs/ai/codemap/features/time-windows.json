@@ -4,15 +4,15 @@
   "name": "Time-aware questions",
   "aliases": ["recently", "last week", "since", "TemporalIntent", "QueryTimeWindow", "WindowReport", "freshness", "stale", "activity", "as_of"],
   "purpose": "Reads a time phrase into a window, answers what happened from the event log, and states the days read and how fresh each source is.",
-  "revision": "e801208",
-  "verified_on": "2026-10-31",
+  "revision": "08f4e80",
+  "verified_on": "2026-11-01",
   "entry_points": ["TemporalIntent.window"],
   "files": [
     {"path": "Sources/CoreSearch/TemporalIntent.swift", "role": "primary", "blob": "78aae1c5751dcc88db66051bd7da082c01b84270"},
     {"path": "Sources/CoreReason/WindowReport.swift", "role": "primary", "blob": "1ced245c15c9fdcba60a4f6fe852da6e7e72e770"},
     {"path": "Sources/CoreStore/Activity.swift", "role": "primary", "blob": "267825c67b9b2238c0fcfa21df830cb68789c8c3"},
     {"path": "Tests/CoreSearchTests/TemporalIntentTests.swift", "role": "test", "blob": "4e5401c03169db322be5f4d68fb40d9f9a979911"},
-    {"path": "Tests/CoreMCPTests/TimeAwareAnswerTests.swift", "role": "test", "blob": "cb679892238e1302c61ae1c7ff09cd205e129555"}
+    {"path": "Tests/CoreMCPTests/TimeAwareAnswerTests.swift", "role": "test", "blob": "03e52f9f3ee65e5cb833bbe2cbb7ee2a592eec13"}
   ],
   "nodes": [
     {"id": "TemporalIntent.window", "kind": "function", "path": "Sources/CoreSearch/TemporalIntent.swift", "line": 106, "match": "public static func window(", "status": "VERIFIED", "note": "Clock and calendar are injected."},
@@ -22,8 +22,8 @@
     {"id": "Store.freshness", "kind": "persistence", "path": "Sources/CoreStore/Activity.swift", "line": 89, "match": "public func freshness(domains: Set<Domain>, notAfter: Date) async throws -> StoreFreshness {", "status": "VERIFIED", "note": "Only sources the caller may read."}
   ],
   "edges": [
-    {"from": "feature:answers", "type": "calls", "to": "TemporalIntent.window", "status": "VERIFIED", "evidence": [{"path": "Sources/CoreReason/Reasoner.swift", "line": 173, "match": "let window = TemporalIntent.window(in: query, now: asOfWorld ?? asOfKnowledge ?? currentDate(), calendar: calendar)"}], "note": ""},
-    {"from": "feature:answers", "type": "reads", "to": "Store.activity", "status": "VERIFIED", "evidence": [{"path": "Sources/CoreReason/Reasoner.swift", "line": 263, "match": "let summary = try await store.activity("}], "note": ""}
+    {"from": "feature:answers", "type": "calls", "to": "TemporalIntent.window", "status": "VERIFIED", "evidence": [{"path": "Sources/CoreReason/Reasoner.swift", "line": 197, "match": "let window = TemporalIntent.window(in: query, now: asOfWorld ?? asOfKnowledge ?? currentDate(), calendar: calendar)"}], "note": ""},
+    {"from": "feature:answers", "type": "reads", "to": "Store.activity", "status": "VERIFIED", "evidence": [{"path": "Sources/CoreReason/Reasoner.swift", "line": 286, "match": "let summary = try await store.activity("}], "note": ""}
   ],
   "docs": [],
   "unknowns": ["No test covers the window through core_ask synthesize, the CLI's fm summary, the App Intent or AppModel.searchPassages, because each needs a model or the app."],

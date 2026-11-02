@@ -8,8 +8,8 @@ import Glibc
 
 /// Typed persistence for every OpenCore primitive.
 ///
-/// Every SQL string in the project lives in this file or in `Search.swift`. Nothing above
-/// this layer knows that SQLite exists, which is what makes the storage substrate
+/// Every SQL string in the project lives in CoreStore. Nothing above this layer knows that
+/// SQLite exists, which is what makes the storage substrate
 /// replaceable and the derived layers rebuildable.
 public struct Store: Sendable {
     public let database: Database
@@ -21,6 +21,24 @@ public struct Store: Sendable {
     public static func open(at path: URL? = nil) async throws -> Store {
         let database = try Database(path: path ?? Database.defaultPath())
         try await database.migrate()
+        return Store(database: database)
+    }
+
+    /// Inspection of an existing snapshot without migrations, writes or file creation.
+    public static func openReadOnly(at path: URL) async throws -> Store {
+        try await verifiedReadOnly(Database(path: path, readOnly: true))
+    }
+
+    /// Caller supplies a self-contained, unchanging copy. Immutable mode prevents SQLite from
+    /// consulting live/aliased sidecars or creating WAL/SHM files; never use for a live database.
+    public static func openReadOnlySnapshot(at path: URL) async throws -> Store {
+        try await verifiedReadOnly(Database(path: path, readOnly: true, immutableSnapshot: true))
+    }
+
+    private static func verifiedReadOnly(_ database: Database) async throws -> Store {
+        let version = try await database.scalarInt("SELECT COALESCE(MAX(version),0) FROM schema_migration")
+        guard version <= Database.schemaVersion else { throw StoreError.newerSchema(found: version, supported: Database.schemaVersion) }
+        guard version == Database.schemaVersion else { throw StoreError.open("this snapshot needs migration before it can be inspected by this build") }
         return Store(database: database)
     }
 }
@@ -79,7 +97,7 @@ extension Source {
             handle: row.requireString("handle"),
             displayName: row.requireString("display_name"),
             defaultAuthority: Authority(rawValue: row.requireInt("default_authority")) ?? .thirdPartyRecord,
-            defaultDomain: Domain(rawValue: row.requireString("default_domain")) ?? .project,
+            defaultDomain: Domain(rawValue: row.requireString("default_domain")) ?? .restricted,
             lastSyncedAt: row.date("last_synced_at"),
             syncCursor: row.string("sync_cursor"),
             config: row.string("config")
@@ -746,7 +764,7 @@ extension CoreObject {
             uri: row.string("uri"),
             authoredAt: row.date("authored_at"),
             ingestedAt: row.requireDate("ingested_at"),
-            domain: Domain(rawValue: row.requireString("domain")) ?? .project,
+            domain: Domain(rawValue: row.requireString("domain")) ?? .restricted,
             authority: Authority(rawValue: row.requireInt("authority")) ?? .thirdPartyRecord,
             metadata: metadata
         )
@@ -759,7 +777,12 @@ extension Store {
     public func save(_ evidence: [Evidence]) async throws {
         guard !evidence.isEmpty else { return }
         try await database.write { connection in
-            for item in evidence {
+            try Self.saveEvidence(evidence, connection: connection)
+        }
+    }
+
+    private static func saveEvidence(_ evidence: [Evidence], connection: Connection) throws {
+        for item in evidence {
                 try connection.execute(
                     """
                     INSERT INTO evidence (id, object_id, range_start, range_end, snippet, authority)
@@ -772,7 +795,6 @@ extension Store {
                         .text(item.snippet), .integer(Int64(item.authority.rawValue)),
                     ]
                 )
-            }
         }
     }
 
@@ -977,7 +999,7 @@ extension CoreEntity {
         self.init(
             kind: EntityKind(rawValue: row.requireString("kind")) ?? .concept,
             canonicalName: row.requireString("canonical_name"),
-            domain: Domain(rawValue: row.requireString("domain")) ?? .project,
+            domain: Domain(rawValue: row.requireString("domain")) ?? .restricted,
             firstSeenAt: row.requireDate("first_seen_at"),
             lastSeenAt: row.requireDate("last_seen_at")
         )
@@ -1169,7 +1191,7 @@ extension CoreClaim {
                 observedAt: row.requireDate("observed_at"),
                 retractedAt: row.date("retracted_at")
             ),
-            domain: Domain(rawValue: row.requireString("domain")) ?? .project
+            domain: Domain(rawValue: row.requireString("domain")) ?? .restricted
         )
     }
 }
@@ -1411,7 +1433,7 @@ extension CoreEvent {
             verb: row.requireString("verb"),
             detail: row.requireString("detail"),
             occurredAt: row.requireDate("occurred_at"),
-            domain: Domain(rawValue: row.requireString("domain")) ?? .project,
+            domain: Domain(rawValue: row.requireString("domain")) ?? .restricted,
             authority: Authority(rawValue: row.requireInt("authority")) ?? .thirdPartyRecord
         )
     }
@@ -1420,40 +1442,48 @@ extension CoreEvent {
 // MARK: - Receipts
 
 extension Store {
-    public func save(_ receipt: Receipt, evidence: [(EvidenceID, Double)] = [], claims: [ClaimID] = []) async throws {
-        let stagesJSON = (try? JSONEncoder().encode(receipt.stages)).flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+    public func save(_ receipt: Receipt, evidence: [(EvidenceID, Double)] = [], claims: [ClaimID] = [], additionalEvidence: [Evidence] = []) async throws {
         try await database.write { connection in
+            try Self.saveReceipt(receipt, evidence: evidence, claims: claims, additionalEvidence: additionalEvidence, connection: connection)
+        }
+    }
+
+    /// Shared transaction primitive: callers that save other rows with a receipt must use the
+    /// same connection and commit or roll back the whole exchange together.
+    static func saveReceipt(_ receipt: Receipt, evidence: [(EvidenceID, Double)], claims: [ClaimID],
+                            additionalEvidence: [Evidence], connection: Connection) throws {
+        let stagesJSON = (try? JSONEncoder().encode(receipt.stages)).flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+        try Self.saveEvidence(additionalEvidence, connection: connection)
+        try connection.execute(
+            """
+            INSERT INTO receipt (id, query, query_class, domains_admitted, domains_blocked, stages,
+                                 objects_searched, objects_retrieved, evidence_admitted, claims_consulted,
+                                 contradictions_surfaced, model, objects_transmitted, confidence, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                .text(receipt.id.value), .text(receipt.query), .text(receipt.queryClass.rawValue),
+                .text(receipt.domainsAdmitted.map(\.rawValue).joined(separator: ",")),
+                .text(receipt.domainsBlocked.map(\.rawValue).joined(separator: ",")),
+                .text(stagesJSON),
+                .integer(Int64(receipt.objectsSearched)), .integer(Int64(receipt.objectsRetrieved)),
+                .integer(Int64(receipt.evidenceAdmitted)), .integer(Int64(receipt.claimsConsulted)),
+                .integer(Int64(receipt.contradictionsSurfaced)), SQLValue(text: receipt.model),
+                .integer(Int64(receipt.objectsTransmitted)), SQLValue(double: receipt.confidence),
+                .real(receipt.createdAt.timeIntervalSince1970),
+            ]
+        )
+        for (rank, item) in evidence.enumerated() {
             try connection.execute(
-                """
-                INSERT INTO receipt (id, query, query_class, domains_admitted, domains_blocked, stages,
-                                     objects_searched, objects_retrieved, evidence_admitted, claims_consulted,
-                                     contradictions_surfaced, model, objects_transmitted, confidence, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    .text(receipt.id.value), .text(receipt.query), .text(receipt.queryClass.rawValue),
-                    .text(receipt.domainsAdmitted.map(\.rawValue).joined(separator: ",")),
-                    .text(receipt.domainsBlocked.map(\.rawValue).joined(separator: ",")),
-                    .text(stagesJSON),
-                    .integer(Int64(receipt.objectsSearched)), .integer(Int64(receipt.objectsRetrieved)),
-                    .integer(Int64(receipt.evidenceAdmitted)), .integer(Int64(receipt.claimsConsulted)),
-                    .integer(Int64(receipt.contradictionsSurfaced)), SQLValue(text: receipt.model),
-                    .integer(Int64(receipt.objectsTransmitted)), SQLValue(double: receipt.confidence),
-                    .real(receipt.createdAt.timeIntervalSince1970),
-                ]
+                "INSERT INTO receipt_evidence (receipt_id, evidence_id, rank, score) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
+                [.text(receipt.id.value), .text(item.0.value), .integer(Int64(rank)), .real(item.1)]
             )
-            for (rank, item) in evidence.enumerated() {
-                try connection.execute(
-                    "INSERT INTO receipt_evidence (receipt_id, evidence_id, rank, score) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
-                    [.text(receipt.id.value), .text(item.0.value), .integer(Int64(rank)), .real(item.1)]
-                )
-            }
-            for claim in claims {
-                try connection.execute(
-                    "INSERT INTO receipt_claim (receipt_id, claim_id) VALUES (?, ?) ON CONFLICT DO NOTHING",
-                    [.text(receipt.id.value), .text(claim.value)]
-                )
-            }
+        }
+        for claim in claims {
+            try connection.execute(
+                "INSERT INTO receipt_claim (receipt_id, claim_id) VALUES (?, ?) ON CONFLICT DO NOTHING",
+                [.text(receipt.id.value), .text(claim.value)]
+            )
         }
     }
 
@@ -1495,7 +1525,7 @@ extension Store {
                 uri: row.string("o_uri"),
                 authoredAt: row.date("o_authored_at"),
                 ingestedAt: row.requireDate("o_ingested_at"),
-                domain: Domain(rawValue: row.requireString("o_domain")) ?? .project,
+                domain: Domain(rawValue: row.requireString("o_domain")) ?? .restricted,
                 authority: Authority(rawValue: row.requireInt("o_authority")) ?? .thirdPartyRecord
             )
             return (Evidence(row: row), object, row.requireDouble("score"))
@@ -1510,7 +1540,12 @@ extension Receipt {
             .flatMap { try? JSONDecoder().decode([ReceiptStage].self, from: $0) } ?? []
 
         func domains(_ column: String) -> [Domain] {
-            (row.string(column) ?? "").split(separator: ",").compactMap { Domain(rawValue: String($0)) }
+            // Unknown or malformed stored scopes must not disappear: doing so could make a
+            // receipt look safe to a phone whose grant excludes the unrecognised domain.
+            guard let raw = row.string(column) else { return [.restricted] }
+            guard !raw.isEmpty else { return [] }
+            return raw.split(separator: ",", omittingEmptySubsequences: false)
+                .map { Domain(rawValue: String($0)) ?? .restricted }
         }
 
         self.init(

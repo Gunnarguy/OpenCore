@@ -67,6 +67,15 @@ public struct Answer: Sendable {
     /// for. A caller running its own retrieval for this answer must use this and `window`, or it
     /// searches all of time beneath an answer that says it did not.
     public var searchedText: String?
+
+    /// Set when the question was about the owner's calendar or reminders. The list is `summary`,
+    /// read from objects, with no claims or passages behind it. See `AgendaIntent`.
+    public var agenda: AgendaAnswer?
+
+    /// True when the passages are the answer and the claims are only about the projects those
+    /// passages came from. With no subject named, a claim like "a project is built with CloudKit" is
+    /// context, and leading with it answered a question nobody asked.
+    public var passagesLead = false
 }
 
 extension Answer {
@@ -83,15 +92,36 @@ extension Answer {
         if let brief {
             var parts = [brief]
             if !points.isEmpty {
-                parts.append("Believed claims:\n• \(points.prefix(4).map(\.statement).joined(separator: "\n• "))")
+                parts.append("Stored claims:\n\(shortcutClaims(limit: 4))")
             }
             if let report { parts.append(report.text) }
             return parts.joined(separator: "\n\n") + "\n\(code)"
         }
         if let insufficientEvidence { return "Not enough evidence: \(insufficientEvidence) \(code)" }
 
-        let statements = points.prefix(5).map(\.statement).joined(separator: "\n• ")
-        return statements.isEmpty ? "\(summary) \(code)" : "\(summary)\n• \(statements)\n\(code)"
+        let statements = shortcutClaims(limit: 5)
+        return statements.isEmpty ? "\(summary) \(code)" : "\(summary)\nStored claims:\n\(statements)\n\(code)"
+    }
+
+    private func shortcutClaims(limit: Int) -> String {
+        points.prefix(limit).map { point in
+            var lines = ["• \(point.statement) (\(point.authority.label))"]
+            if point.derivation == .inferred { lines.append("  Inferred by OpenCore from other records. No source states this.") }
+            for evidence in point.counter.prefix(Conversation.caveatsShown) {
+                let quote = evidence.snippet.replacingOccurrences(of: "\n", with: " ").prefix(Conversation.caveatLength)
+                lines.append("  Counter-evidence: \(quote)")
+            }
+            let rows = Set(point.claimRows + (point.claimID.map { [$0] } ?? []))
+            let standing = contradictions.filter { Reasoner.standsAgainst($0, rows: rows) }.sorted {
+                ($0.resolution == .unresolved ? 0 : 1, $0.id.value) < ($1.resolution == .unresolved ? 0 : 1, $1.id.value)
+            }
+            for contradiction in standing.prefix(Conversation.caveatsShown) {
+                let label = contradiction.resolution == .unresolved ? "Open contradiction" : "Overruled"
+                let reason = contradiction.reason.replacingOccurrences(of: "\n", with: " ").prefix(Conversation.caveatLength)
+                lines.append("  \(label): \(reason)")
+            }
+            return lines.joined(separator: "\n")
+        }.joined(separator: "\n")
     }
 }
 
@@ -106,7 +136,7 @@ extension Answer {
 /// model can be added later to write the prose; it would enter at `Authority.modelInference`
 /// and would not be permitted to introduce a claim that is not already in the store.
 public struct Reasoner: Sendable {
-    private let store: Store
+    let store: Store
     private let search: PassageSearch
     private let classifier = QueryClassifier()
     /// Read once per answer, not once per `Reasoner`. `MCPServer` holds one of these for the life
@@ -161,7 +191,10 @@ public struct Reasoner: Sendable {
         externalCaller: Bool = false,
         asOfWorld: Date? = nil,
         asOfKnowledge: Date? = nil,
-        persistReceipt: Bool = true
+        persistReceipt: Bool = true,
+        maximumDomains: Set<Domain>? = nil,
+        ownerDomain: Domain? = nil,
+        retrievalQuery: String? = nil
     ) async throws -> Answer {
         try await Telemetry.span("answer", .reason, attributes: ["externalCaller": String(externalCaller)]) { answer in
         let recorder = ReceiptRecorder()
@@ -171,22 +204,18 @@ public struct Reasoner: Sendable {
         // checkout rather than the week before today.
         let calendar = currentCalendar()
         let window = TemporalIntent.window(in: query, now: asOfWorld ?? asOfKnowledge ?? currentDate(), calendar: calendar)
-        let (rawDomain, requested) = AdmissionPolicy.classifyDomain(
-            query,
-            knownEntitySurfaces: try await store.aliasSurfaces()
-        )
-        let domain = (externalCaller && rawDomain.isSensitive) ? .project : rawDomain
-        let policy = AdmissionPolicy(
-            queryDomain: domain,
-            explicitlyRequested: externalCaller ? [] : requested
-        )
+        let surfaces = try await store.aliasSurfaces()
+        let (rawDomain, _) = AdmissionPolicy.classifyDomain(query, knownEntitySurfaces: surfaces)
+        let policy = AdmissionPolicy.forQuestion(query, knownEntitySurfaces: surfaces, externalCaller: externalCaller,
+                                                 ownerDomain: ownerDomain, maximumDomains: maximumDomains)
+        let domain = policy.queryDomain
         answer.attribute("queryClass", classification.queryClass.rawValue)
         answer.attribute("matchedOn", classification.matchedOn)
         answer.attribute("domain", domain.rawValue)
         // Downgrading a sensitive query because the caller came in over MCP is a security
         // decision, and one that changes the answer. It is recorded as an event so it appears
         // in the tree rather than only as a differing `domain` attribute nobody compares.
-        if externalCaller && rawDomain.isSensitive {
+        if externalCaller && rawDomain != domain {
             Telemetry.event("domain.downgraded", .reason, attributes: ["from": rawDomain.rawValue, "to": "project"])
         }
 
@@ -234,10 +263,37 @@ public struct Reasoner: Sendable {
             )
         }
 
+        // After the count, so "how many doctor appointments do I have" stays a count. Calendar and
+        // reminders hold dates and flags, and no claims, so this reads them directly.
+        // Never for an external caller, whose wording is not the owner's. `ownerDomain` wins when
+        // the owner chose a scope, and a limited phone's ceiling still applies through
+        // `maximumDomains`: `AgendaAnswering` declines without `.personal`, and the path below runs.
+        if !externalCaller, asOfWorld == nil, asOfKnowledge == nil,
+           let question = AgendaIntent.read(query, now: currentDate(), calendar: calendar) {
+            let owner = AdmissionPolicy.forQuestion(query, ownerDomain: ownerDomain ?? .personal, maximumDomains: maximumDomains)
+            let started = DispatchTime.now().uptimeNanoseconds
+            if let agenda = try await AgendaAnswering(store: store).answer(question, policy: owner, now: currentDate(), calendar: calendar) {
+                let receipt = agenda.receipt(
+                    query: query, queryClass: classification.queryClass,
+                    domainsAdmitted: owner.admitted.sorted { $0.rawValue < $1.rawValue },
+                    domainsBlocked: owner.blocked.sorted { $0.rawValue < $1.rawValue },
+                    milliseconds: Int((DispatchTime.now().uptimeNanoseconds - started) / 1_000_000)
+                )
+                if persistReceipt { try await store.save(receipt) }
+                answer.attribute("agenda", "true")
+                return Answer(summary: agenda.sentence, points: [], passages: [], contradictions: [], receipt: receipt,
+                              insufficientEvidence: nil, window: question.window, agenda: agenda)
+            }
+        }
+
         // What the question is about, read before retrieval so a name in the question can pull
         // its entity in even when no retrieved passage happens to mention it.
-        let residual = window?.residualQuery ?? query
+        // Retrieval anchors carry context, never consent. Admission above always uses the
+        // current raw question or the owner's explicit selection. External callers cannot add anchors.
+        let retrievalText = externalCaller ? query : retrievalQuery ?? query
+        let residual = window.map { TemporalIntent.residual(of: retrievalText, removing: [$0.phrase]) } ?? retrievalText
         let focus = try await QueryFocus.read(from: residual, store: store, policy: policy, externalCaller: externalCaller)
+        let listedStatus = focus.entities.isEmpty && window == nil ? QueryFocus.statusAsked(in: residual) : nil
 
         let report = if let window {
             try await store.windowReport(window, domains: policy.admitted, calendar: calendar)
@@ -312,6 +368,7 @@ public struct Reasoner: Sendable {
                 focus: hasTopic ? focus : .none,
                 window: window,
                 policy: policy,
+                listedStatus: listedStatus,
                 asOfWorld: asOfWorld,
                 asOfKnowledge: asOfKnowledge
             )
@@ -323,7 +380,8 @@ public struct Reasoner: Sendable {
             return (touching, ["surfaced": touching.count, "unresolved": touching.filter { $0.resolution == .unresolved }.count])
         }
 
-        let rankedEvidence = Self.rankedEvidence(points)
+        let passageEvidence = Self.passageEvidence(relevant)
+        let rankedEvidence = Self.linkedEvidence(Self.rankedEvidence(points), passages: passageEvidence)
 
         let receipt = Receipt(
             query: query,
@@ -346,7 +404,8 @@ public struct Reasoner: Sendable {
         )
 
         if persistReceipt {
-            try await store.save(receipt, evidence: rankedEvidence, claims: claimIDs.sorted { $0.value < $1.value })
+            try await store.save(receipt, evidence: rankedEvidence, claims: claimIDs.sorted { $0.value < $1.value },
+                                 additionalEvidence: passageEvidence.map(\.0))
         }
 
         var insufficient: String?
@@ -382,7 +441,7 @@ public struct Reasoner: Sendable {
 
         let summary = summarise(
             points: points, passages: relevant, outcome: outcome, window: window, activity: activity,
-            uncounted: uncounted, calendar: calendar
+            uncounted: uncounted, listedStatus: listedStatus, focus: hasTopic ? focus : .none, calendar: calendar
         )
         return Answer(
             summary: report.map { "\(summary)\n\($0.text)" } ?? summary,
@@ -394,7 +453,8 @@ public struct Reasoner: Sendable {
             window: window,
             activity: activity,
             report: report,
-            searchedText: window == nil ? nil : (hasTopic ? residual : "")
+            searchedText: window == nil ? nil : (hasTopic ? residual : ""),
+            passagesLead: listedStatus == nil && activity == nil && focus.entities.isEmpty && !relevant.isEmpty
         )
         }
     }
@@ -406,15 +466,20 @@ public struct Reasoner: Sendable {
         focus: QueryFocus,
         window: QueryTimeWindow?,
         policy: AdmissionPolicy,
+        listedStatus: String? = nil,
         asOfWorld: Date? = nil,
         asOfKnowledge: Date? = nil
     ) async throws -> ([AnswerPoint], Set<ClaimID>) {
         // A question that names a subject is about that subject. Pooling every entity that any
         // passage touched is what buried "OpenClinic is active" under a page of other
         // repositories' languages.
+        //
+        // With no name, the best passages say what it is about and the rest are only near it.
+        // Pooling all twelve answered "what did I decide about iCloud" with 50 claims from every
+        // project they touched, measured 2026-11-02.
         var subjects = Set(focus.entities)
-        if focus.entities.isEmpty {
-            for hit in hits {
+        if focus.entities.isEmpty, listedStatus == nil {
+            for hit in hits.prefix(Self.subjectPassages) {
                 subjects.formUnion(try await entities(in: hit.object, policy: policy))
             }
         }
@@ -425,7 +490,7 @@ public struct Reasoner: Sendable {
         for subject in subjects.sorted(by: { $0.value < $1.value }) {
             guard let entity = try await store.entity(subject), policy.admits(entity.domain) else { continue }
             for claim in try await store.claims(subject: subject, currentOnly: currentOnly, asOfWorld: asOfWorld, asOfKnowledge: asOfKnowledge) {
-                guard try await isClaimAdmitted(claim, policy: policy) else { continue }
+                guard try await ClaimAdmission.admits(claim, policy: policy, store: store) else { continue }
                 rows.append((claim, entity))
                 if focus.names(subject) { namedWithClaims.insert(subject) }
             }
@@ -440,8 +505,20 @@ public struct Reasoner: Sendable {
         // about OpenCore, and every other Swift repository is not part of the answer.
         for named in focus.entities where namedWithClaims.subtracting([named]).isEmpty {
             for claim in try await store.claims(pointingAt: named, currentOnly: currentOnly, asOfWorld: asOfWorld, asOfKnowledge: asOfKnowledge) {
-                guard try await isClaimAdmitted(claim, policy: policy),
+                guard try await ClaimAdmission.admits(claim, policy: policy, store: store),
                       let entity = try await store.entity(claim.subject)
+                else { continue }
+                rows.append((claim, entity))
+            }
+        }
+
+        // A claim row can lose its slot and stay current, so the belief says who holds the value now.
+        if let listedStatus {
+            for claim in try await store.currentClaims(predicate: Predicate.status, literal: listedStatus) {
+                guard let belief = try await store.currentBelief(key: "\(claim.subject.value)|\(claim.predicate)"),
+                      try await store.claim(belief.claimID)?.literal == listedStatus,
+                      try await ClaimAdmission.admits(claim, policy: policy, store: store),
+                      let entity = try await store.entity(claim.subject), policy.admits(entity.domain)
                 else { continue }
                 rows.append((claim, entity))
             }
@@ -570,8 +647,8 @@ public struct Reasoner: Sendable {
         for item in try await store.contradictions() where claimIDs.contains(item.claimA) || claimIDs.contains(item.claimB) {
             guard let claimA = try await store.claim(item.claimA),
                   let claimB = try await store.claim(item.claimB),
-                  try await isClaimAdmitted(claimA, policy: policy),
-                  try await isClaimAdmitted(claimB, policy: policy)
+                  try await ClaimAdmission.admits(claimA, policy: policy, store: store),
+                  try await ClaimAdmission.admits(claimB, policy: policy, store: store)
             else { continue }
             touching.append(item)
         }
@@ -606,10 +683,8 @@ public struct Reasoner: Sendable {
     /// The score is the row's position scaled to 0...1 and says nothing about relevance. It used
     /// to assume about 3 rows per line, which collapsing repeated rows broke: a fact re-observed
     /// five times gives one line and five rows, and `core_trace` printed `[-1.333]`.
-    static func rankedEvidence(_ points: [AnswerPoint]) -> [(EvidenceID, Double)] {
-        var seen = Set<EvidenceID>()
-        let rows = points.flatMap { $0.supporting + $0.counter }.map(\.id).filter { seen.insert($0).inserted }
-        return rows.enumerated().map { ($0.element, 1.0 - Double($0.offset) / Double(rows.count)) }
+    public static func rankedEvidence(_ points: [AnswerPoint]) -> [(EvidenceID, Double)] {
+        rankEvidenceIDs(points.flatMap { $0.supporting + $0.counter }.map(\.id))
     }
 
     /// The order an answer's lines are shown in, and a total order, so the same store gives the
@@ -647,25 +722,7 @@ public struct Reasoner: Sendable {
             }
     }
 
-    private func isClaimAdmitted(_ claim: CoreClaim, policy: AdmissionPolicy) async throws -> Bool {
-        guard policy.admits(claim.domain),
-              let subject = try await store.entity(claim.subject),
-              policy.admits(subject.domain)
-        else { return false }
-        if let objectEntity = claim.objectEntity,
-           let target = try await store.entity(objectEntity),
-           !policy.admits(target.domain) {
-            return false
-        }
-        let supporting = try await store.evidence(for: claim.id, stance: .supports)
-        guard !supporting.isEmpty else { return false }
-        for (evidence, _, _) in supporting {
-            if let object = try await store.object(evidence.objectID), policy.admits(object.domain) {
-                return true
-            }
-        }
-        return false
-    }
+
 
     /// Names worth trying against the entity index for one object.
     static func candidateSurfaces(for object: CoreObject) -> [String] {
@@ -724,6 +781,11 @@ public struct Reasoner: Sendable {
         return "Not a count of '\(terms.joined(separator: " "))': the event log can only count every event in the window."
     }
 
+    /// How many of the best passages decide what a question naming nothing is about.
+    /// **Chosen, not measured:** one passage can be a coincidence, and past two the subjects stop
+    /// being what the question asked.
+    static let subjectPassages = 2
+
     private func summarise(
         points: [AnswerPoint],
         passages: [PassageHit],
@@ -731,8 +793,14 @@ public struct Reasoner: Sendable {
         window: QueryTimeWindow?,
         activity: ActivitySummary?,
         uncounted: [String],
+        listedStatus: String? = nil,
+        focus: QueryFocus,
         calendar: Calendar
     ) -> String {
+        if let listedStatus {
+            return points.isEmpty ? "No projects are \(listedStatus)."
+                : "\(points.count) project\(points.count == 1 ? " is" : "s are") \(listedStatus)."
+        }
         if let window, let activity, activity.totalEvents > 0 {
             let floor = activity.isTruncated ? "At least " : ""
             var summary = Self.notCountedLine(uncounted).map { "\($0) " } ?? ""
@@ -749,6 +817,10 @@ public struct Reasoner: Sendable {
             return "\(passages.count) passage\(passages.count == 1 ? "" : "s") match. No claims have been derived from them."
         }
         guard !points.isEmpty else { return "No claims in the store bear on this question." }
+        if focus.entities.isEmpty, !passages.isEmpty, listedStatus == nil {
+            return "\(passages.count) passage\(passages.count == 1 ? "" : "s") match, and \(points.count) "
+                + "claim\(points.count == 1 ? " is" : "s are") known about where they came from."
+        }
 
         let observed = points.filter { $0.derivation == .observed }.count
         let inferred = points.filter { $0.derivation == .inferred }.count

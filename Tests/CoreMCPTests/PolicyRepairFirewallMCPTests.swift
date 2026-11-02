@@ -11,7 +11,7 @@ private func repairFirewallStore() async throws -> Store {
 }
 private func repairTool(_ server: MCPServer, name: String, arguments: [String: JSONValue] = [:]) async throws -> String {
     let payload: JSONValue = .object(["jsonrpc": .string("2.0"), "id": .number(1), "method": .string("tools/call"), "params": .object(["name": .string(name), "arguments": .object(arguments)])])
-    let request = try JSONDecoder().decode(RPCRequest.self, from: JSONEncoder().encode(payload))
+    let request = try RPCRequest.decode(JSONEncoder().encode(payload))
     let result = try await server.handle(request)
     guard case .object(let dict) = result, case .array(let content)? = dict["content"], case .object(let first)? = content.first, case .string(let text)? = first["text"] else { Issue.record("unexpected MCP result"); return "" }
     return text

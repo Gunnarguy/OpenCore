@@ -85,44 +85,101 @@ public enum JSONValue: Sendable, Codable, Hashable {
     }
 }
 
-public struct RPCRequest: Decodable, Sendable {
+public struct RPCRequest: Sendable {
     public let jsonrpc: String
-    public let id: JSONValue?
+    public let id: RPCID?
     public let method: String
     public let params: JSONValue?
 
-    /// A request with no `id` is a notification: it gets no response, ever. Replying to
-    /// one is a protocol violation that some clients treat as a fatal error.
+    /// Decode the original wire bytes. A Foundation Decodable route would lose numeric IDs
+    /// before validation, so this is the only inbound request constructor.
+    public static func decode(_ data: Data) throws -> Self {
+        let wire = try RPCWireObject.decode(data)
+        guard wire.fields["jsonrpc"] == .string("2.0"),
+              let method = wire.fields["method"]?.stringValue else {
+            throw RPCError(code: -32600, message: "Invalid MCP request envelope")
+        }
+        guard wire.id != .null else { throw RPCError(code: -32600, message: "Invalid MCP request id") }
+        if let params = wire.fields["params"], params.objectValue == nil {
+            throw RPCError(code: -32600, message: "Invalid MCP request params")
+        }
+        return .init(jsonrpc: "2.0", id: wire.id, method: method, params: wire.fields["params"])
+    }
+
+    /// Only a valid request whose ID is absent is a notification.
     public var isNotification: Bool { id == nil }
 }
 
-public struct RPCError: Error, Sendable {
+public struct RPCError: Error, Sendable, Codable, CustomStringConvertible, CustomDebugStringConvertible, LocalizedError {
     public let code: Int
     public let message: String
+    /// Protocol data is available to negotiation logic, never automatically to logs/descriptions.
+    /// nil means omitted; .some(.null) preserves an explicit JSON null.
+    public let data: JSONValue?
+
+    public init(code: Int, message: String, data: JSONValue? = nil) {
+        self.code = code
+        self.message = message
+        self.data = data
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        code = try container.decode(Int.self, forKey: .code)
+        message = try container.decode(String.self, forKey: .message)
+        data = container.contains(.data) ? try container.decode(JSONValue.self, forKey: .data) : nil
+    }
+
+    public var description: String { "JSON-RPC error \(code): \(message)" }
+    public var debugDescription: String { description }
+    public var errorDescription: String? { description }
+
+    /// Common mapping for recognized transport error envelopes. Keep existing code/message
+    /// fallbacks; response validation belongs to the transport rather than this value mapper.
+    static func remoteError(in envelope: JSONValue) -> RPCError? {
+        guard let error = envelope["error"] else { return nil }
+        return RPCError(code: error["code"]?.intValue ?? -1,
+                        message: error["message"]?.stringValue ?? "unknown", data: error["data"])
+    }
+
+    private enum CodingKeys: String, CodingKey { case code, message, data }
 
     public static func methodNotFound(_ method: String) -> RPCError { RPCError(code: -32601, message: "method not found: \(method)") }
     public static func invalidParams(_ detail: String) -> RPCError { RPCError(code: -32602, message: "invalid params: \(detail)") }
     public static func internalError(_ detail: String) -> RPCError { RPCError(code: -32603, message: "internal error: \(detail)") }
 }
 
-public struct RPCResponse: Encodable, Sendable {
+public struct RPCResponse: Sendable {
     public let jsonrpc = "2.0"
-    public let id: JSONValue
-    public var result: JSONValue?
-    public var error: ErrorBody?
+    public let id: RPCID
+    public let result: JSONValue?
+    public let error: ErrorBody?
 
     public struct ErrorBody: Encodable, Sendable {
         public let code: Int
         public let message: String
+        public let data: JSONValue?
     }
 
-    public static func success(id: JSONValue, result: JSONValue) -> RPCResponse {
+    public static func success(id: RPCID, result: JSONValue) -> RPCResponse {
         RPCResponse(id: id, result: result, error: nil)
     }
 
-    public static func failure(id: JSONValue, error: RPCError) -> RPCResponse {
-        RPCResponse(id: id, result: nil, error: ErrorBody(code: error.code, message: error.message))
+    public static func failure(id: RPCID, error: RPCError) -> RPCResponse {
+        RPCResponse(id: id, result: nil, error: ErrorBody(code: error.code, message: error.message, data: error.data))
     }
 
-    private enum CodingKeys: String, CodingKey { case jsonrpc, id, result, error }
+    /// ID tokens have already passed the strict codec. Everything else is JSONEncoder-escaped.
+    /// Encoding directly through Foundation would round arbitrary numeric ID tokens.
+    public func serialized() throws -> Data {
+        var bytes = Data("{\"jsonrpc\":\"2.0\"".utf8)
+        bytes.append(contentsOf: ",\"id\":".utf8); bytes.append(try id.encoded())
+        if let result { bytes.append(contentsOf: ",\"result\":".utf8); bytes.append(try JSONEncoder().encode(result)) }
+        if let error { bytes.append(contentsOf: ",\"error\":".utf8); bytes.append(try JSONEncoder().encode(error)) }
+        bytes.append(0x7D)
+        guard bytes.count <= RPCWireObject.maximumBytes else {
+            throw RPCError(code: -32603, message: "RPC response exceeded the chosen byte budget")
+        }
+        return bytes
+    }
 }

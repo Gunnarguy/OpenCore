@@ -40,14 +40,10 @@ struct AgentEcosystemSnapshot: Sendable, Equatable {
     // Rollout mentions per repo name (lowercased repo key -> count)
     let codexRolloutsByRepo: [String: Int]
 
-    var skillsInSyncCount: Int {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        return Set(claudeSkills).intersection(Set(sharedAgentsSkills)).filter { name in
-            let original = home.appendingPathComponent(".claude/skills/\(name)").resolvingSymlinksInPath().standardizedFileURL
-            let shared = home.appendingPathComponent(".agents/skills/\(name)").resolvingSymlinksInPath().standardizedFileURL
-            return original == shared
-        }.count
-    }
+    let skillsInSyncCount: Int
+    let checkedAt: Date
+    let readIssues: [String]
+    let checkedOrder: UInt64
 
     var totalUnifiedMemoryArtifacts: Int {
         claudeMemoryFileCount + codexRolloutSummaryCount + (codexMemoryHandbookLines > 0 ? 2 : 0) + (codexMemoryV2Exists ? 1 : 0)
@@ -69,6 +65,8 @@ struct FleetRepoCard: Identifiable, Sendable, Equatable {
     let headWhen: String
     let headDate: String
     let dirty: Int
+    let gitStatusMeasured: Bool
+    let collectedAt: Date
     let dirtySample: [String]
     let unpushed: Int
     let statePath: String
@@ -108,7 +106,12 @@ struct FleetRepoCard: Identifiable, Sendable, Equatable {
 
     var isHandoffCurrent: Bool { stateStatus == "current" }
     var isHandoffStale: Bool { stateStatus == "stale" }
-    var isDirty: Bool { dirty > 0 }
+    var isDirty: Bool { gitStatusMeasured && dirty > 0 }
+    var isClean: Bool { gitStatusMeasured && dirty == 0 }
+    var workingTreeSummary: String {
+        RepositoryStatusObservation(isGit: git, dirtyCount: gitStatusMeasured ? dirty : nil,
+            hasError: errorMessage != nil, isMissing: missingDir).summary
+    }
 
     /// Clean relative path to the state/handoff file (never an 85-character `/Users/...` path).
     var shortStateRel: String {
@@ -205,7 +208,7 @@ struct FleetRepoCard: Identifiable, Sendable, Equatable {
         var lines: [String] = [
             "Repository: \(name) (\(homeRel))",
             "Branch / HEAD: \(branch) @ \(head) (\(headWhen)) - \(headSubject)",
-            "Working Tree: \(dirty == 0 ? "clean" : "\(dirty) modified files (\(dirtySample.prefix(5).joined(separator: ", ")))") · \(unpushed) unpushed commits",
+            "Working Tree: \(workingTreeSummary)",
             "Handoff (\(shortStateRel)): \(stateStatus.uppercased()) (last verified commit: \(stateCommit.isEmpty ? "none" : stateCommit))",
             "Agent Coverage: \(activeAgents.joined(separator: " + ")) · \(memoryFiles) Claude mem · \(codexRolloutCount) Codex rollouts · \(sessions) sessions",
         ]
@@ -260,6 +263,8 @@ struct MachineHealthSnapshot: Sendable, Equatable {
     let sharedSkillCount: Int
     let machineMapExists: Bool
     let checkedAt: Date
+    let tailnetProbeRequested: Bool
+    let numberedFileScanReachedLimit: Bool
 
     func isDiskSpaceLow(thresholdGiB: Double) -> Bool { diskSpace.isLow(thresholdGiB: thresholdGiB) }
     var freeSpaceSummary: String { dataVolumeFreeGiB.map { String(format: "%.1f GiB free", $0) } ?? "Disk space not measured" }
@@ -297,43 +302,57 @@ enum OperatorConsoleService {
     private static func buildAgentEcosystemSnapshotSync() -> AgentEcosystemSnapshot {
         let fm = FileManager.default
         let home = fm.homeDirectoryForCurrentUser
+        var readIssues: [String] = []
+        func directory(_ path: String) -> [String] {
+            do { return try fm.contentsOfDirectory(atPath: path) }
+            catch let error as CocoaError where error.code == .fileReadNoSuchFile { return [] }
+            catch { readIssues.append("An inventory directory could not be read."); return [] }
+        }
+        func text(_ path: String) -> String {
+            do { return try String(contentsOfFile: path, encoding: .utf8) }
+            catch let error as CocoaError where error.code == .fileReadNoSuchFile { return "" }
+            catch { readIssues.append("An inventory file could not be read."); return "" }
+        }
+        func skills(_ path: String) -> [String] {
+            directory(path).filter { !$0.hasPrefix(".") && fm.fileExists(atPath: (path as NSString).appendingPathComponent("\($0)/SKILL.md")) }.sorted()
+        }
 
         // 1. Claude Code (~/.claude)
         let claudeGlobalMD = home.appendingPathComponent(".claude/CLAUDE.md").path
         let claudeSkillsDir = home.appendingPathComponent(".claude/skills").path
-        let claudeSkills = listSkillDirectoryNames(atPath: claudeSkillsDir)
+        let claudeSkills = skills(claudeSkillsDir)
         let claudeHooksDir = home.appendingPathComponent(".claude/hooks").path
-        let claudeHooks = ((try? fm.contentsOfDirectory(atPath: claudeHooksDir)) ?? [])
+        let claudeHooks = directory(claudeHooksDir)
             .filter { $0.hasSuffix(".sh") && !$0.contains(".bak") && $0 != "lib.sh" }
         let claudeRoots = discoverClaudeMemoryRoots()
         var claudeMemFiles = 0
         for root in claudeRoots {
-            let files = (try? fm.contentsOfDirectory(atPath: root.url.path)) ?? []
+            let files = directory(root.url.path)
             claudeMemFiles += files.filter { $0.lowercased().hasSuffix(".md") }.count
         }
 
         // 2. Codex (~/.codex + ~/.agents)
         let codexGlobalAgentsMD = home.appendingPathComponent(".codex/AGENTS.md").path
         let sharedSkillsDir = home.appendingPathComponent(".agents/skills").path
-        let sharedSkills = listSkillDirectoryNames(atPath: sharedSkillsDir)
+        let sharedSkills = skills(sharedSkillsDir)
         let codexProcSkillsDir = home.appendingPathComponent(".codex/memories/skills").path
-        let codexProcSkills = ((try? fm.contentsOfDirectory(atPath: codexProcSkillsDir)) ?? [])
+        let codexProcSkills = directory(codexProcSkillsDir)
             .filter { !$0.hasPrefix(".") }
             .sorted()
         let codexHooksDir = home.appendingPathComponent(".codex/hooks").path
-        let codexHooks = ((try? fm.contentsOfDirectory(atPath: codexHooksDir)) ?? [])
+        let codexHooks = directory(codexHooksDir)
             .filter { $0.hasSuffix(".sh") && !$0.contains(".bak") && $0 != "lib.sh" }
 
         let codexMemoryMDPath = home.appendingPathComponent(".codex/memories/MEMORY.md").path
-        let codexMemoryMDText = (try? String(contentsOfFile: codexMemoryMDPath, encoding: .utf8)) ?? ""
+        let codexMemoryMDText = text(codexMemoryMDPath)
         let codexMemoryLines = codexMemoryMDText.isEmpty ? 0 : codexMemoryMDText.components(separatedBy: .newlines).count
         let codexTaskSections = codexMemoryMDText.components(separatedBy: "\n### ").count - 1
 
         let rolloutsDir = home.appendingPathComponent(".codex/memories/rollout_summaries").path
-        let rolloutFiles = ((try? fm.contentsOfDirectory(atPath: rolloutsDir)) ?? [])
+        let rolloutFiles = directory(rolloutsDir)
             .filter { $0.hasSuffix(".md") }
         let rolloutsV2Dir = home.appendingPathComponent(".codex/memories_v2/rollout_summaries").path
-        let rolloutV2Files = ((try? fm.contentsOfDirectory(atPath: rolloutsV2Dir)) ?? [])
+        let rolloutV2Files = directory(rolloutsV2Dir)
             .filter { $0.hasSuffix(".md") }
         let allRolloutNames = (rolloutFiles + rolloutV2Files).map { $0.lowercased() }
 
@@ -366,7 +385,7 @@ enum OperatorConsoleService {
         }
 
         let codexStatePath = home.appendingPathComponent(".codex/memories/Docs/ai/STATE.md").path
-        let codexStateText = (try? String(contentsOfFile: codexStatePath, encoding: .utf8)) ?? ""
+        let codexStateText = text(codexStatePath)
         var codexUpdated = ""
         var codexCommit = ""
         for line in codexStateText.components(separatedBy: .newlines) {
@@ -383,7 +402,7 @@ enum OperatorConsoleService {
         let agyRulePath = home.appendingPathComponent(".gemini/config/rules/gunnar.md").path
         let agyBridgePath = home.appendingPathComponent(".gemini/config/hooks/kit-bridge.py").path
         let agySkillsDir = home.appendingPathComponent(".gemini/config/skills").path
-        let agySkills = listSkillDirectoryNames(atPath: agySkillsDir)
+        let agySkills = skills(agySkillsDir)
         let parityBriefPath = home.appendingPathComponent(".agents/briefs/codex-antigravity-parity.md").path
 
         // 4. Machine Map
@@ -391,6 +410,8 @@ enum OperatorConsoleService {
         let machineMapExists = fm.fileExists(atPath: machineMapPath)
         let machineMapBytes = ((try? fm.attributesOfItem(atPath: machineMapPath))?[.size] as? NSNumber)?.intValue ?? 0
 
+        let sameSourceSkills = SharedSkillInventory.sameSourceCount(firstNames: claudeSkills, secondNames: sharedSkills,
+            firstRoot: home.appendingPathComponent(".claude/skills"), secondRoot: home.appendingPathComponent(".agents/skills"))
         return AgentEcosystemSnapshot(
             claudeGlobalMDExists: fm.fileExists(atPath: claudeGlobalMD),
             claudeSkills: claudeSkills,
@@ -413,84 +434,82 @@ enum OperatorConsoleService {
             parityBriefExists: fm.fileExists(atPath: parityBriefPath),
             machineMapExists: machineMapExists,
             machineMapSizeKB: max(1, machineMapBytes / 1024),
-            codexRolloutsByRepo: rolloutsByRepo
+            codexRolloutsByRepo: rolloutsByRepo,
+            skillsInSyncCount: sameSourceSkills,
+            checkedAt: Date(),
+            readIssues: readIssues,
+            checkedOrder: DispatchTime.now().uptimeNanoseconds
         )
-    }
-
-    private static func listSkillDirectoryNames(atPath dirPath: String) -> [String] {
-        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: dirPath) else { return [] }
-        return entries.filter { name in
-            guard !name.hasPrefix(".") else { return false }
-            let skillFile = (dirPath as NSString).appendingPathComponent("\(name)/SKILL.md")
-            return FileManager.default.fileExists(atPath: skillFile)
-        }.sorted()
     }
 
     /// Runs `~/.claude/bin/fleet.py --json` plus `here.py --json` on active sibling repos off the
     /// main thread and enriches every card with Claude, Codex, and Antigravity metadata.
-    static func collectFleet() async -> [FleetRepoCard] {
+    static func collectFleet() async -> OperatorSnapshotRead<[FleetRepoCard]> {
         await Task.detached(priority: .userInitiated) {
+            let attemptedAt = Date()
+            let order = DispatchTime.now().uptimeNanoseconds
             let home = FileManager.default.homeDirectoryForCurrentUser
             let fleetScript = home.appendingPathComponent(".claude/bin/fleet.py").path
             let hereScript = home.appendingPathComponent(".claude/bin/here.py").path
-            guard FileManager.default.fileExists(atPath: fleetScript) else { return [] }
-
+            guard FileManager.default.fileExists(atPath: fleetScript) else {
+                return OperatorSnapshotRead(attemptedAt: attemptedAt, finishedAt: Date(), order: order, outcome: .failed("Fleet reader unavailable."))
+            }
             let ecosystem = buildAgentEcosystemSnapshotSync()
-
-            let (exitCode, stdout, _) = runProcess(
-                executable: "/usr/bin/python3",
-                arguments: [fleetScript, "--json"],
-                timeoutSeconds: 25
-            )
+            let (exitCode, stdout, _) = runProcess(executable: "/usr/bin/python3", arguments: [fleetScript, "--json"], timeoutSeconds: 25)
             var cards: [FleetRepoCard] = []
+            var issues: [String] = []
             if exitCode == 0, let data = stdout.data(using: .utf8),
                let rawArray = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
                 cards = rawArray.map { parseCard($0, rolloutsByRepo: ecosystem.codexRolloutsByRepo) }
+            } else {
+                issues.append(exitCode == 0 ? "Fleet reader returned invalid JSON." : "Fleet reader failed (status \(exitCode)).")
             }
-
-            // Also inspect the extra active repositories listed in `extraActiveRepos`.
             if FileManager.default.fileExists(atPath: hereScript) {
                 let existingNames = Set(cards.map { $0.name.lowercased() })
                 for extra in extraActiveRepos where !existingNames.contains(extra.name.lowercased()) {
                     let fullRoot = home.appendingPathComponent(extra.relPath).path
                     guard FileManager.default.fileExists(atPath: fullRoot) else { continue }
-                    let (rc, out, _) = runProcess(
-                        executable: "/usr/bin/python3",
-                        arguments: [hereScript, "--json", fullRoot],
-                        timeoutSeconds: 6
-                    )
-                    if rc == 0, let d = out.data(using: .utf8),
-                       var dict = try? JSONSerialization.jsonObject(with: d) as? [String: Any] {
+                    let (rc, out, _) = runProcess(executable: "/usr/bin/python3", arguments: [hereScript, "--json", fullRoot], timeoutSeconds: 6)
+                    if rc == 0, let d = out.data(using: .utf8), var dict = try? JSONSerialization.jsonObject(with: d) as? [String: Any] {
                         dict["name"] = extra.name
                         dict["desc"] = extra.desc
                         cards.append(parseCard(dict, rolloutsByRepo: ecosystem.codexRolloutsByRepo))
-                    }
+                    } else { issues.append("An additional repository read failed.") }
                 }
-            }
-
-            return cards
+            } else { issues.append("Additional repository reader unavailable.") }
+            let usable = cards.filter { !$0.missingDir && $0.errorMessage == nil && !$0.root.isEmpty }
+            if usable.count != cards.count { issues.append("Some repository cards were missing or errored.") }
+            if usable.contains(where: { $0.git && !$0.gitStatusMeasured }) { issues.append("Some Git status fields were not measured.") }
+            let outcome: OperatorSnapshotRead<[FleetRepoCard]>.Outcome
+            if usable.isEmpty { outcome = .failed((issues + ["No usable repository cards returned."]).joined(separator: " ")) }
+            else if issues.isEmpty { outcome = .complete(usable) }
+            else { outcome = .partial(usable, issues: issues) }
+            return OperatorSnapshotRead(attemptedAt: attemptedAt, finishedAt: Date(), order: order, outcome: outcome)
         }.value
     }
 
     /// Refreshes a single repository card via `~/.claude/bin/here.py --json <root>`.
-    static func collectSingleRepo(root: String, existingName: String, existingDesc: String) async -> FleetRepoCard? {
+    static func collectSingleRepo(root: String, existingName: String, existingDesc: String) async -> OperatorSnapshotRead<FleetRepoCard> {
         await Task.detached(priority: .userInitiated) {
-            let scriptPath = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(".claude/bin/here.py").path
-            guard FileManager.default.fileExists(atPath: scriptPath) else { return nil }
-
+            let attemptedAt = Date()
+            let order = DispatchTime.now().uptimeNanoseconds
+            func result(_ outcome: OperatorSnapshotRead<FleetRepoCard>.Outcome) -> OperatorSnapshotRead<FleetRepoCard> {
+                OperatorSnapshotRead(attemptedAt: attemptedAt, finishedAt: Date(), order: order, outcome: outcome)
+            }
+            let scriptPath = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/bin/here.py").path
+            guard FileManager.default.fileExists(atPath: scriptPath) else { return result(.failed("Repository reader unavailable.")) }
             let ecosystem = buildAgentEcosystemSnapshotSync()
-            let (exitCode, stdout, _) = runProcess(
-                executable: "/usr/bin/python3",
-                arguments: [scriptPath, "--json", root],
-                timeoutSeconds: 12
-            )
+            let (exitCode, stdout, _) = runProcess(executable: "/usr/bin/python3", arguments: [scriptPath, "--json", root], timeoutSeconds: 12)
             guard exitCode == 0, let data = stdout.data(using: .utf8),
                   var dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-            else { return nil }
+            else { return result(.failed("Repository refresh failed or returned invalid JSON.")) }
             dict["name"] = existingName
             dict["desc"] = existingDesc
-            return parseCard(dict, rolloutsByRepo: ecosystem.codexRolloutsByRepo)
+            let card = parseCard(dict, rolloutsByRepo: ecosystem.codexRolloutsByRepo)
+            guard !card.missingDir, card.errorMessage == nil, !card.root.isEmpty else {
+                return result(.failed("Repository refresh returned a missing or errored card."))
+            }
+            return result(card.gitStatusMeasured ? .complete(card) : .partial(card, issues: ["Repository Git status was not measured."]))
         }.value
     }
 
@@ -540,7 +559,9 @@ enum OperatorConsoleService {
                 codexRolloutCount: ecosystem.codexRolloutSummaryCount,
                 sharedSkillCount: ecosystem.sharedAgentsSkills.count,
                 machineMapExists: ecosystem.machineMapExists,
-                checkedAt: Date()
+                checkedAt: Date(),
+                tailnetProbeRequested: checkTailnet,
+                numberedFileScanReachedLimit: conflictFiles.files.count >= numberedFileScanLimit
             )
         }.value
     }
@@ -636,7 +657,12 @@ enum OperatorConsoleService {
         var incomplete = false
         let incompleteMessage = "Some repository folders could not be checked. Results may be incomplete. Refresh to retry."
 
+        // Chosen limits: bound traversal even when no matching filenames exist.
+        var budget = CooperativeScanBudget(startedAt: DispatchTime.now().uptimeNanoseconds,
+            maximumNanoseconds: 3_000_000_000, maximumEntries: 20_000)
+        let budgetMessage = "Filename scan stopped at its entry/time budget; results are partial."
         for repo in repos {
+            guard budget.admit(now: DispatchTime.now().uptimeNanoseconds, cancelled: Task.isCancelled) else { return (conflicts, budgetMessage) }
             guard let values = try? repo.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]) else { incomplete = true; continue }
             guard values.isDirectory == true, values.isSymbolicLink != true else { continue }
             guard let enumerator = FileManager.default.enumerator(
@@ -646,7 +672,9 @@ enum OperatorConsoleService {
                 errorHandler: { _, _ in incomplete = true; return true }
             ) else { incomplete = true; continue }
 
-            while let url = enumerator.nextObject() as? URL {
+            while true {
+                guard budget.admit(now: DispatchTime.now().uptimeNanoseconds, cancelled: Task.isCancelled) else { return (conflicts, budgetMessage) }
+                guard let url = enumerator.nextObject() as? URL else { break }
                 let name = url.lastPathComponent
                 if FilesystemConnector.skippedDirectories.contains(name) {
                     enumerator.skipDescendants()
@@ -745,6 +773,8 @@ enum OperatorConsoleService {
             headWhen: (d["head_when"] as? String) ?? "",
             headDate: (d["head_date"] as? String) ?? "",
             dirty: (d["dirty"] as? Int) ?? 0,
+            gitStatusMeasured: (try? RepositoryStatusObservation(json: JSONSerialization.data(withJSONObject: d)).isMeasured) ?? false,
+            collectedAt: Date(),
             dirtySample: (d["dirty_sample"] as? [String]) ?? [],
             unpushed: (d["unpushed"] as? Int) ?? 0,
             statePath: (d["state_path"] as? String) ?? "",

@@ -62,7 +62,7 @@ public struct Exporter: Sendable {
         "source", "object", "chunk", "evidence", "entity", "entity_alias", "edge",
         "claim", "claim_evidence", "contradiction", "belief", "correction", "event",
         "receipt", "receipt_evidence", "receipt_claim", "embedding_run", "schema_migration",
-        "conversation", "conversation_turn", "object_version",
+        "conversation", "conversation_turn", "object_version", "companion_thread_tombstone",
     ]
 
     public func export(to directory: URL, format: Format, log: @Sendable (String) -> Void = { _ in }) async throws -> Outcome {

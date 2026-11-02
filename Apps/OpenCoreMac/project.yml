@@ -24,6 +24,12 @@ targets:
     dependencies:
       - package: OpenCore
         product: OpenCoreKit
+      - package: OpenCore
+        product: OpenCoreCompanion
+      - package: OpenCore
+        product: OpenCoreCompanionHost
+      - package: OpenCore
+        product: OpenCorePresentation
     info:
       path: Generated/Info.plist
       properties:
@@ -68,8 +74,8 @@ targets:
         com.apple.security.app-sandbox: false
         com.apple.security.network.client: true
         com.apple.security.device.audio-input: true
-        # Hardened runtime needs this before Automation can even prompt. Notes is read through
-        # AppleScript, and Apple Notes has synced 0 objects since 2026-08-14.
+        # Hardened runtime needs this before Automation can prompt. Notes is read through
+        # AppleScript; actual library/TCC acceptance is qualified separately.
         com.apple.security.automation.apple-events: true
         # Apple lists this under the Hardened Runtime's resource access for reading calendars
         # (Security > Hardened Runtime, read 2026-10-31). The 2026-08-14 calendar sync worked
@@ -88,3 +94,41 @@ targets:
         DEVELOPMENT_TEAM: Z3E334EXZD
         CODE_SIGN_IDENTITY: "Apple Development"
         GENERATE_INFOPLIST_FILE: NO
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+
+  # Internal bootstrap for safe screen review. It has no production entry point or services.
+  OpenCoreReview:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources/OpenCoreReviewMain.swift
+      - path: Resources
+        buildPhase: resources
+        optional: true
+    dependencies:
+      - package: OpenCore
+        product: OpenCoreReviewSupport
+    info:
+      path: Generated/ReviewInfo.plist
+      properties:
+        CFBundleDisplayName: OpenCore Review
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        LSBackgroundOnly: true
+    entitlements:
+      path: Generated/Review.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.temporary-exception.files.absolute-path.read-only:
+          - /private/tmp/opencore-review-snapshots/
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.gunndamental.OpenCore.Review
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) OPENCORE_REVIEW"
+        CODE_SIGN_STYLE: Manual
+        DEVELOPMENT_TEAM: ""
+        CODE_SIGN_IDENTITY: "-"
+        GENERATE_INFOPLIST_FILE: NO
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon

@@ -396,7 +396,7 @@ private struct MaintenanceCountsPanel: View {
         case "edges":
             return ("Knowledge Graph Edges", "arrow.triangle.branch", Pastel.lilac, "Directed relationships linking two entities in the graph.", .entities)
         case "receipts":
-            return ("Audit Receipts", "receipt.fill", Pastel.aqua, "Stored query stages, source references, and objects transmitted by the answer path.", .receipts)
+            return ("Audit Receipts", "receipt.fill", Pastel.aqua, "Stored query stages, source references, acknowledged deliveries and unconfirmed submissions.", .receipts)
         default:
             return (label.capitalized, "tablecells", Pastel.ice, "SQLite table in opencore.sqlite3.", nil)
         }

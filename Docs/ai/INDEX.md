@@ -30,3 +30,5 @@ Rules load by path: `.claude/rules/app.md` for the app, `operator.md` for the op
 
 Last context-system audit: 2026-10-31. It covered these documents, not the Runbook's dated operator
 sections, which record what was true on their dates.
+
+[source] iPhone phase coverage and acceptance evidence: `Docs/ai/PHONE.md`. Pair/build operations: `RUNBOOK.md`. Icon prompts/assets: `Apps/Artwork.md`.

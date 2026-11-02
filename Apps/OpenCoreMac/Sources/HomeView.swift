@@ -1,5 +1,6 @@
 import AppKit
 import CoreModel
+import CorePresentation
 import CoreReason
 import CoreSearch
 import CoreStore
@@ -331,7 +332,7 @@ struct HomeView: View {
     // MARK: - Focused "Needs Attention Right Now" Repo Tray on Command Center
 
     private var attentionReposSpotlightSection: some View {
-        let attentionRepos = model.fleetCards.filter { $0.isDirty || $0.isHandoffStale }
+        let attentionRepos = model.fleetCards.filter { $0.isDirty || !$0.gitStatusMeasured || $0.isHandoffStale }
         let displayed = Array((attentionRepos.isEmpty ? model.fleetCards : attentionRepos).prefix(4))
 
         return VStack(alignment: .leading, spacing: 10) {
@@ -1213,14 +1214,14 @@ struct HomeView: View {
 
     private var visualFleetMatrixCard: some View {
         let total = max(model.fleetCards.count, 1)
-        let syncedClean = model.fleetCards.filter { $0.isHandoffCurrent && !$0.isDirty }
+        let syncedClean = model.fleetCards.filter { $0.isHandoffCurrent && $0.isClean }
         let dirtyRepos = model.fleetCards.filter(\.isDirty)
-        let staleClean = model.fleetCards.filter { $0.isHandoffStale && !$0.isDirty }
-        let otherRepos = model.fleetCards.filter { !$0.isHandoffCurrent && !$0.isHandoffStale && !$0.isDirty }
+        let staleClean = model.fleetCards.filter { $0.isHandoffStale && $0.isClean }
+        let otherRepos = model.fleetCards.filter { !$0.isHandoffCurrent && !$0.isHandoffStale && $0.isClean }
 
         return VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Label("Visual Repository Fleet Matrix (100% Git & Filesystem Ground Truth)", systemImage: "chart.bar.xaxis")
+                Label("Repository Fleet Matrix (Collected Git & Filesystem Status)", systemImage: "chart.bar.xaxis")
                     .font(.subheadline.weight(.bold))
                     .lineLimit(1)
                 Spacer()
@@ -1284,7 +1285,7 @@ struct HomeView: View {
             // Interactive wrapping grid of mini-pills for every repository in the fleet (zero horizontal clipping)
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 168), spacing: 6)], alignment: .leading, spacing: 6) {
                 ForEach(model.fleetCards) { card in
-                    let pillColor: Color = card.isDirty ? Pastel.aqua : (card.isHandoffCurrent ? Pastel.mint : (card.isHandoffStale ? Pastel.peach : Pastel.ice))
+                    let pillColor: Color = !card.gitStatusMeasured ? Pastel.peach : card.isDirty ? Pastel.aqua : (card.isHandoffCurrent ? Pastel.mint : (card.isHandoffStale ? Pastel.peach : Pastel.ice))
                     Button {
                         Task { await model.auditRepository(card) }
                     } label: {
@@ -1313,7 +1314,7 @@ struct HomeView: View {
                         }
                     }
                     .buttonStyle(.plain)
-                    .help("\(card.name): \(card.branch) @ \(card.head) · \(card.handoffBadgeText) · Dirty files: \(card.dirty). Click for read-only here.py orientation card.")
+                    .help("\(card.name): \(card.branch) @ \(card.head) · \(card.handoffBadgeText) · Working tree: \(card.workingTreeSummary). Click for read-only here.py orientation card.")
                 }
             }
         }
@@ -1326,7 +1327,7 @@ struct HomeView: View {
         case .all:
             return model.fleetCards
         case .attention:
-            return model.fleetCards.filter { $0.isHandoffStale || $0.isDirty || $0.stateStatus == "missing" }
+            return model.fleetCards.filter { $0.isHandoffStale || $0.isDirty || !$0.gitStatusMeasured || $0.stateStatus == "missing" }
         case .current:
             return model.fleetCards.filter { $0.isHandoffCurrent }
         }
@@ -1336,7 +1337,7 @@ struct HomeView: View {
         let staleCount = model.fleetCards.filter(\.isHandoffStale).count
         let dirtyCount = model.fleetCards.filter(\.isDirty).count
         let currentCount = model.fleetCards.filter(\.isHandoffCurrent).count
-        let attentionCount = model.fleetCards.filter { $0.isHandoffStale || $0.isDirty || $0.stateStatus == "missing" }.count
+        let attentionCount = model.fleetCards.filter { $0.isHandoffStale || $0.isDirty || !$0.gitStatusMeasured || $0.stateStatus == "missing" }.count
 
         return VStack(alignment: .leading, spacing: 10) {
             // Row 1: Single-line Header + Filter Picker + Refresh Button (Zero Wrapping)
@@ -1846,14 +1847,14 @@ private struct FleetRepoCardView: View {
                     .help(card.handoffProvenanceHelp)
 
                 if card.git {
-                    Text(card.dirty == 0 ? "● clean" : "▲ \(card.dirty) dirty")
+                    Text(card.workingTreeSummary)
                         .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(card.dirty == 0 ? .green : .cyan)
+                        .foregroundStyle(card.isClean ? .green : .orange)
                         .lineLimit(1)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
-                        .background((card.dirty == 0 ? Pastel.mint : Pastel.aqua).opacity(0.12), in: .capsule)
-                        .help(card.dirtySample.isEmpty ? "Working tree is clean" : "Modified: \(card.dirtySample.joined(separator: ", "))")
+                        .background((card.isClean ? Pastel.mint : Pastel.peach).opacity(0.12), in: .capsule)
+                        .help(card.gitStatusMeasured && !card.dirtySample.isEmpty ? "Modified: \(card.dirtySample.joined(separator: ", "))" : "Working tree: \(card.workingTreeSummary)")
                 }
 
                 Spacer(minLength: 4)
@@ -2124,7 +2125,7 @@ struct RepoFleetWorkspaceView: View {
         case .all:
             base = model.fleetCards
         case .attention:
-            base = model.fleetCards.filter { $0.isHandoffStale || $0.isDirty || $0.stateStatus == "missing" }
+            base = model.fleetCards.filter { $0.isHandoffStale || $0.isDirty || !$0.gitStatusMeasured || $0.stateStatus == "missing" }
         case .current:
             base = model.fleetCards.filter { $0.isHandoffCurrent }
         }
@@ -2140,10 +2141,10 @@ struct RepoFleetWorkspaceView: View {
 
     var body: some View {
         let total = max(model.fleetCards.count, 1)
-        let syncedClean = model.fleetCards.filter { $0.isHandoffCurrent && !$0.isDirty }
+        let syncedClean = model.fleetCards.filter { $0.isHandoffCurrent && $0.isClean }
         let dirtyRepos = model.fleetCards.filter { $0.isDirty }
-        let staleClean = model.fleetCards.filter { $0.isHandoffStale && !$0.isDirty }
-        let attentionCount = model.fleetCards.filter { $0.isHandoffStale || $0.isDirty || $0.stateStatus == "missing" }.count
+        let staleClean = model.fleetCards.filter { $0.isHandoffStale && $0.isClean }
+        let attentionCount = model.fleetCards.filter { $0.isHandoffStale || $0.isDirty || !$0.gitStatusMeasured || $0.stateStatus == "missing" }.count
 
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
@@ -2233,7 +2234,7 @@ struct RepoFleetWorkspaceView: View {
 
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 168), spacing: 6)], alignment: .leading, spacing: 6) {
                         ForEach(model.fleetCards) { card in
-                            let pillColor: Color = card.isDirty ? Pastel.aqua : (card.isHandoffCurrent ? Pastel.mint : (card.isHandoffStale ? Pastel.peach : Pastel.ice))
+                            let pillColor: Color = !card.gitStatusMeasured ? Pastel.peach : card.isDirty ? Pastel.aqua : (card.isHandoffCurrent ? Pastel.mint : (card.isHandoffStale ? Pastel.peach : Pastel.ice))
                             Button {
                                 Task { await model.auditRepository(card) }
                             } label: {

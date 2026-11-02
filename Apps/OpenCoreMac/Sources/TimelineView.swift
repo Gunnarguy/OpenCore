@@ -60,6 +60,7 @@ struct TimelineView: View {
     @State private var days = 90
     @State private var domainFilter: Domain?
     @State private var loading = false
+    @State private var latestReload = 0
     @State private var mode: Mode = .events
 
     enum Mode: String, CaseIterable, Identifiable {
@@ -191,10 +192,16 @@ struct TimelineView: View {
         }
     }
 
+    /// Changing the span while a read is running starts a second one, and the slower of the two used
+    /// to win: a 90-day read finishing late replaced the 7 days now selected, under the 7-day label.
     private func reload() async {
+        latestReload &+= 1
+        let request = latestReload
         loading = true
-        defer { loading = false }
-        entries = await model.loadTimeline(days: days, domains: domainFilter.map { [$0] })
+        let result = await model.loadTimeline(days: days, domains: domainFilter.map { [$0] })
+        guard request == latestReload else { return }
+        entries = result
+        loading = false
     }
 }
 

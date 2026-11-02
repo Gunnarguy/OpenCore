@@ -616,7 +616,6 @@ func sinceEveryPhrase(phrase: String, start: String) throws {
 
 @Test("what is listed as not read is not read", arguments: [
     "on October 12",
-    "last Monday",
     "next week",
     "tonight",
     "this weekend",

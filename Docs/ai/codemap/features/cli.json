@@ -4,14 +4,14 @@
   "name": "Command line",
   "aliases": ["opencore", "main.swift", "doctor", "memory", "checkout", "correct", "export"],
   "purpose": "The opencore command: every subcommand dispatches from one switch, and --db points any of them at another store.",
-  "revision": "e801208",
+  "revision": "08f4e80",
   "verified_on": "2026-10-31",
   "entry_points": ["openStore"],
   "files": [
-    {"path": "Sources/opencore/main.swift", "role": "primary", "blob": "5d9af58b71f74ba974302909702f58a5aea12f35"}
+    {"path": "Sources/opencore/main.swift", "role": "primary", "blob": "896b9c2c80efb58b6135dbdb3e783b3c724d376a"}
   ],
   "nodes": [
-    {"id": "openStore", "kind": "function", "path": "Sources/opencore/main.swift", "line": 178, "match": "let path = option(\"db\").map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }", "status": "VERIFIED", "note": "--db, which is how a copy gets measured."}
+    {"id": "openStore", "kind": "function", "path": "Sources/opencore/main.swift", "line": 179, "match": "let path = option(\"db\").map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }", "status": "VERIFIED", "note": "--db, which is how a copy gets measured."}
   ],
   "edges": [],
   "docs": [],
@@ -20,10 +20,10 @@
   "derived": {
     "generated_by": "codemap 1.1.0 derive: declarations, type references and test mentions; edges are INFERRED",
     "nodes": [
-      {"id": "DaemonCommands", "kind": "model", "path": "Sources/opencore/main.swift", "line": 1209, "match": "enum DaemonCommands {", "status": "VERIFIED"}
+      {"id": "DaemonCommands", "kind": "model", "path": "Sources/opencore/main.swift", "line": 1264, "match": "enum DaemonCommands {", "status": "VERIFIED"}
     ],
     "edges": [
-      {"from": "DaemonCommands", "type": "depends_on", "to": "feature:connectors", "status": "INFERRED", "evidence": [{"path": "Sources/opencore/main.swift", "line": 1282, "match": "if GitHubConnector.resolveToken() != nil {"}], "note": "via GitHubConnector"}
+      {"from": "DaemonCommands", "type": "depends_on", "to": "feature:connectors", "status": "INFERRED", "evidence": [{"path": "Sources/opencore/main.swift", "line": 1337, "match": "if GitHubConnector.resolveToken() != nil {"}], "note": "via GitHubConnector"}
     ],
     "edges_omitted": 0
   }

@@ -87,12 +87,18 @@ func upkeepDoesNotLead() async throws {
     #expect(quiet.latest.first?.detail == "One small change")
 }
 
-@Test("a question that names a repository and a window stays on that repository")
-func namedWindow() async throws {
-    let now = Date()
+// The fixture used the wall clock but expected five-day-old events in "this month". On
+// November 1 it correctly produced an empty window. Fix both clock and calendar so subject
+// scoping and first-of-month emptiness remain separate, repeatable expectations.
+@Test("a question that names a repository and a window stays on that repository", arguments: [
+    ("2026-11-15T12:00:00Z", ["Quiet"]),
+    ("2026-11-01T06:00:00Z", []),
+])
+func namedWindow(reference: String, expected: [String]) async throws {
+    let now = instant(reference)
     let store = try await fixture(now: now)
-    let answer = try await Reasoner(store: store, now: now).answer("what did I change in Quiet this month", persistReceipt: false)
-    #expect(answer.activity?.groups.map(\.subject.canonicalName) == ["Quiet"])
+    let answer = try await Reasoner(store: store, now: now, calendar: utc).answer("what did I change in Quiet this month", persistReceipt: false)
+    #expect(answer.activity?.groups.map(\.subject.canonicalName) == expected)
 }
 
 // An empty window and a store nobody has synced are different facts and read the same otherwise.
@@ -129,7 +135,7 @@ func activityRespectsThePolicy() async throws {
         "jsonrpc": .string("2.0"), "id": .number(1), "method": .string("tools/call"),
         "params": .object(["name": .string("core_ask"), "arguments": .object(["query": .string("what was I doing recently")])]),
     ])
-    let request = try JSONDecoder().decode(RPCRequest.self, from: JSONEncoder().encode(payload))
+    let request = try RPCRequest.decode(JSONEncoder().encode(payload))
     let result = try await MCPServer(store: store).handle(request)
     guard case .object(let dict) = result, case .array(let content)? = dict["content"],
           case .object(let first)? = content.first, case .string(let text)? = first["text"]
@@ -150,7 +156,7 @@ func traceExplainsActivity() async throws {
         "jsonrpc": .string("2.0"), "id": .number(1), "method": .string("tools/call"),
         "params": .object(["name": .string("core_trace"), "arguments": .object(["receipt": .string(answer.receipt.shortCode)])]),
     ])
-    let request = try JSONDecoder().decode(RPCRequest.self, from: JSONEncoder().encode(payload))
+    let request = try RPCRequest.decode(JSONEncoder().encode(payload))
     let result = try await MCPServer(store: store).handle(request)
     guard case .object(let dict) = result, case .array(let content)? = dict["content"],
           case .object(let first)? = content.first, case .string(let text)? = first["text"]
@@ -173,7 +179,7 @@ private func callTool(_ server: MCPServer, _ name: String, _ arguments: [String:
         "jsonrpc": .string("2.0"), "id": .number(1), "method": .string("tools/call"),
         "params": .object(["name": .string(name), "arguments": .object(arguments)]),
     ])
-    let request = try JSONDecoder().decode(RPCRequest.self, from: JSONEncoder().encode(payload))
+    let request = try RPCRequest.decode(JSONEncoder().encode(payload))
     let result = try await server.handle(request)
     guard case .object(let dict) = result, case .array(let content)? = dict["content"],
           case .object(let first)? = content.first, case .string(let text)? = first["text"]

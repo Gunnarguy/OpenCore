@@ -1662,6 +1662,12 @@ final class ComputerControlManager {
         isPlanningTask = true
         defer { isPlanningTask = false }
         plannerProblem = nil
+        // A failed scan left nothing to point at, and the model still answered: `pointerPlan` only
+        // checks that a point is on screen, so an invented one became a step Click Now would run.
+        guard !detectedElements.isEmpty else {
+            plannerProblem = screenScanProblem ?? ComputerStudioDiagnosis.screenScanEmpty()
+            return
+        }
 
         let goalWords = Set(trimmedGoal.lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init))
         let rankedElements = detectedElements.sorted { lhs, rhs in

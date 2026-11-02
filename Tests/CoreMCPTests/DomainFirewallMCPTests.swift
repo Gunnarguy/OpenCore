@@ -32,7 +32,7 @@ private func callMCPTool(
         ]),
     ])
     let data = try JSONEncoder().encode(payload)
-    let request = try JSONDecoder().decode(RPCRequest.self, from: data)
+    let request = try RPCRequest.decode(data)
     let result = try await server.handle(request)
     guard case .object(let dict) = result,
           case .array(let content)? = dict["content"],
@@ -390,7 +390,7 @@ struct DomainFirewallMCPTests {
             ]
             if let params { dict["params"] = params }
             let data = try JSONEncoder().encode(JSONValue.object(dict))
-            let req = try JSONDecoder().decode(RPCRequest.self, from: data)
+            let req = try RPCRequest.decode(data)
             return try await server.handle(req)
         }
 
@@ -499,8 +499,18 @@ func beliefReasonDoesNotQuoteBlockedPredecessor() async throws {
         (nextAction("Write the public note", day: 1, domain: .project), 1.5),
         (nextAction("Publish the public note", day: 2, domain: .project), 2.5),
     ]
+    let source = Source(kind: .manual, handle: "belief-history-fixture", displayName: "Fixture", defaultAuthority: .authoredArtifact, defaultDomain: .project)
+    try await store.upsert(source)
     for (claim, decided) in steps {
         try await store.save([claim])
+        // Every asserted version has real support, so this continues to test the reason
+        // firewall after MCP adopts the same evidence requirement as Reasoner.
+        let object = CoreObject(sourceID: source.id, kind: .document, externalID: claim.id.value,
+            title: "Fixture", text: claim.literal ?? "", domain: claim.domain, authority: .authoredArtifact)
+        try await store.ingest([object])
+        let evidence = Evidence(objectID: object.id, snippet: object.text, authority: .authoredArtifact)
+        try await store.save([evidence])
+        try await store.link(claim: claim.id, to: evidence.id, stance: .supports)
         _ = try await BeliefEngine(store: store, now: start.addingTimeInterval(decided * 86_400)).reconcile()
     }
     let history = try await store.beliefHistory(key: steps[0].0.claimKey)
@@ -515,4 +525,47 @@ func beliefReasonDoesNotQuoteBlockedPredecessor() async throws {
     #expect(claims.contains("Publish the public note"))
     #expect(claims.contains("v3: changed from 'Write the public note'"), "a reason that quotes nothing blocked is left alone")
     #expect(!claims.contains("zebrafinch"))
+}
+
+// MCP previously admitted a claim with no evidence while Reasoner withheld it.
+@Test("MCP and answers both withhold a claim without an admitted supporting object")
+func unsupportedClaimsStayOffEveryAnswerSurface() async throws {
+    let store = try await temporaryStore()
+    let subject = CoreEntity(kind: .project, canonicalName: "Quillberry", domain: .project)
+    try await store.upsert([subject])
+    let source = Source(kind: .manual, handle: "unsupported-fixture", displayName: "Fixture", defaultAuthority: .authoredArtifact, defaultDomain: .project)
+    try await store.upsert(source)
+    let object = CoreObject(sourceID: source.id, kind: .document, externalID: "candidate", title: "Quillberry",
+        text: "Quillberry current status.", domain: .project, authority: .authoredArtifact)
+    try await store.ingest([object])
+    try await store.save([CoreChunk(objectID: object.id, ordinal: 0, text: object.text, range: 0..<object.text.count)])
+    let claim = CoreClaim(subject: subject.id, predicate: Predicate.status, literal: "unsupported-sentinel",
+        confidence: 0.9, authority: .authoredArtifact, derivation: .observed,
+        validity: Validity(observedAt: Date(timeIntervalSince1970: 1_700_000_000)), domain: .project)
+    try await store.save([claim])
+    let policy = AdmissionPolicy(queryDomain: .project)
+    #expect(try await !ClaimAdmission.admits(claim, policy: policy, store: store))
+    let server = MCPServer(store: store)
+    let result = try await callMCPTool(server, name: "core_claims", arguments: ["entity": .string("Quillberry")])
+    #expect(!result.contains("unsupported-sentinel"))
+    let answer = try await Reasoner(store: store).answer("What is Quillberry's status?", externalCaller: true)
+    #expect(answer.passages.contains { $0.object.id == object.id }, "the fixture must reach retrieval before admission is tested")
+    #expect(!answer.points.contains { $0.statement.contains("unsupported-sentinel") })
+}
+
+
+// Recognizing personal owner wording once left core_search's separate policy able to admit it.
+@Test("personal query wording stays closed in both MCP answer and search")
+func ownerPersonalMarkersNeverUnlockMCP() async throws {
+    let store = try await temporaryStore()
+    let source = Source(kind: .manual, handle: "fixture-owner", displayName: "Fixture owner", defaultAuthority: .directStatement, defaultDomain: .personal)
+    try await store.upsert(source)
+    let object = CoreObject(sourceID: source.id, kind: .document, externalID: "owner-calendar", title: "Calendar fixture",
+        text: "my calendar cobalt MCP_PERSONAL_SENTINEL", domain: .personal, authority: .directStatement)
+    try await store.ingest([object])
+    try await store.save([CoreChunk(objectID: object.id, ordinal: 0, text: object.text, range: 0..<object.text.count)])
+    for tool in ["core_ask", "core_search"] {
+        let text = try await callMCPTool(MCPServer(store: store), name: tool, arguments: ["query": .string("my calendar cobalt")])
+        #expect(!text.contains("MCP_PERSONAL_SENTINEL"), "\(tool) exposed personal content")
+    }
 }

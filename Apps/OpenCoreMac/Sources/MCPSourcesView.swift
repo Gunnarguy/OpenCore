@@ -2,7 +2,9 @@ import CoreIngest
 import CoreJSONRPC
 import CoreMCP
 import CoreModel
+import CorePresentation
 import CoreSearch
+import CoreStore
 import SwiftUI
 
 /// One hub for Connections & MCP: local workspace & Apple connectors, external MCP sources,
@@ -1239,15 +1241,17 @@ struct OpenCoreMCPServerInspectorView: View {
             MetricPill(label: "tools", value: "\(MCPServer.toolDefinitions.count)")
             Spacer()
             HStack(spacing: 5) {
-                Image(systemName: settings.mcpExposeSensitiveDomains ? "lock.open.trianglebadge.exclamationmark" : "lock.shield.fill")
-                    .foregroundStyle(settings.mcpExposeSensitiveDomains ? .orange : .green)
-                Text(settings.mcpExposeSensitiveDomains ? "Sensitive domains exposed" : "Sensitive domains firewalled")
+                Image(systemName: settings.confirmedMCPExposure == nil ? "questionmark.diamond" :
+                        settings.confirmedMCPExposure == true ? "lock.open.trianglebadge.exclamationmark" : "lock.shield.fill")
+                    .foregroundStyle(settings.confirmedMCPExposure == true ? .orange : .secondary)
+                Text(settings.mcpExposureSummary)
                     .font(.caption.weight(.medium))
-                    .foregroundStyle(settings.mcpExposeSensitiveDomains ? .orange : .secondary)
+                    .foregroundStyle(settings.confirmedMCPExposure == true ? .orange : .secondary)
             }
         }
         .padding(14)
         .openCoreGlassCard(cornerRadius: 10)
+        .task { settings.observeInitialMCPStartupConfiguration(SharedConfig.readMCPExposure()) }
     }
 
     private var playgroundPanel: some View {
@@ -1361,10 +1365,13 @@ struct OpenCoreMCPServerInspectorView: View {
 
     private func makeServer() -> MCPServer? {
         guard let store = model.store else { return nil }
+        let current = SharedConfig.readMCPExposure()
+        settings.observeInitialMCPStartupConfiguration(current)
+        let verified = settings.revalidateMCPStartupConfirmation(currentSharedSetting: current)
         return MCPServer(
             store: store,
             embedder: try? NLEmbeddingProvider(),
-            sensitiveDomainsUnlockable: settings.mcpExposeSensitiveDomains
+            sensitiveDomainsUnlockable: verified && settings.confirmedMCPExposure == true
         )
     }
 
@@ -1377,7 +1384,7 @@ struct OpenCoreMCPServerInspectorView: View {
             "params": .object(params),
         ])
         let data = try JSONEncoder().encode(payload)
-        let req = try JSONDecoder().decode(RPCRequest.self, from: data)
+        let req = try RPCRequest.decode(data)
         let result = try await server.handle(req)
         let ms = Int((DispatchTime.now().uptimeNanoseconds - start) / 1_000_000)
         return (result, ms)

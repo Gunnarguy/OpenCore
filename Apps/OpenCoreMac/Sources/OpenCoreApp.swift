@@ -1,12 +1,25 @@
+import CorePresentation
 import CoreSpotlight
+import CoreTelemetry
+import Foundation
 import SwiftUI
 
+#if !OPENCORE_REVIEW
 @main
 struct OpenCoreApp: App {
-    @State private var model = AppModel.shared
+    @State private var model: AppModel
+
+    init() {
+        do { try ReviewSnapshotPolicy.requireProductionArguments(Array(CommandLine.arguments.dropFirst())) }
+        catch {
+            FileHandle.standardError.write(Data("Review launch requires the separate OpenCoreReview build.\n".utf8))
+            exit(2)
+        }
+        _model = State(initialValue: AppModel.shared)
+    }
 
     var body: some Scene {
-        WindowGroup(id: "main") {
+        WindowGroup(id: "main", for: String.self) { _ in
             RootView()
                 .environment(\.appModel, model)
                 .environment(\.appSettings, model.settings)
@@ -18,6 +31,8 @@ struct OpenCoreApp: App {
                     await model.start()
                 }
                 .frame(minWidth: 960, minHeight: 620)
+        } defaultValue: {
+            "workspace"
         }
         .windowToolbarStyle(.unified)
         .commands {
@@ -92,6 +107,31 @@ struct OpenCoreApp: App {
             }
         }
 
+        Settings {
+            VStack(spacing: 0) {
+                if let failure = model.failure {
+                    FailureBanner(failure: failure) { model.dismissFailure() }
+                }
+                if case .working(let operation) = model.state {
+                    ProgressView(operation)
+                        .controlSize(.small)
+                        .padding(10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                SettingsView()
+            }
+                .environment(\.appModel, model)
+                .environment(\.appSettings, model.settings)
+                .preferredColorScheme(model.settings.appearanceMode.colorScheme)
+                .tint(model.settings.pastelAccent.color)
+                .dynamicTypeSize(model.settings.fontScale.dynamicTypeSize)
+                .frame(minWidth: 900, idealWidth: 1000, minHeight: 620, idealHeight: 720)
+                .task {
+                    model.settings.applyAppearanceToNSApp()
+                    await model.start()
+                }
+        }
+
         MenuBarExtra("OpenCore", systemImage: "brain.head.profile") {
             MenuBarView()
                 .environment(\.appModel, model)
@@ -102,6 +142,8 @@ struct OpenCoreApp: App {
         .menuBarExtraStyle(.window)
     }
 }
+
+#endif
 
 /// The sidebar, organized into human-centered categories where each major domain gets its own clean workspace.
 enum Section: String, CaseIterable, Identifiable, Hashable {

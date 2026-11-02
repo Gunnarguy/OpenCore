@@ -71,7 +71,7 @@ public enum BoundedProcess {
                 break
             }
         }
-        let timedOut = !finished && !Task.isCancelled
+        var timedOut = !finished && !Task.isCancelled
         if !finished {
             process.terminate()
             if completed.wait(timeout: .now() + 1) == .timedOut {
@@ -79,8 +79,16 @@ public enum BoundedProcess {
                 _ = completed.wait(timeout: .now() + 1)
             }
         }
-        // Descendants can inherit a pipe. Do not let one keep this API waiting forever.
-        _ = readers.wait(timeout: .now() + 1)
+        // A successful child can exit before its pipe readers run or inherited writers close.
+        // The old fixed one-second grace returned status 0 with silently incomplete output.
+        // Keep draining within the original overall budget and label an unfinished drain as
+        // a timeout. Pipe-drain cleanup after termination uses at most one second and observes cancellation.
+        let drainDeadline = finished ? deadline : min(deadline, Date().addingTimeInterval(1))
+        var drained = readers.wait(timeout: .now()) == .success
+        while !drained, !Task.isCancelled, Date() < drainDeadline {
+            drained = readers.wait(timeout: .now() + min(0.05, max(0.001, drainDeadline.timeIntervalSinceNow))) == .success
+        }
+        if !drained { timedOut = true }
         try Task.checkCancellation()
         return Result(
             status: process.isRunning ? -1 : process.terminationStatus,

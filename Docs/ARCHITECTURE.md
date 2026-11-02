@@ -17,17 +17,62 @@ Layers depend downward only `[source]`, `Package.swift`.
 |---|---|---|
 | 0 | `CoreModel` | Primitives, `Domain`, `Authority`, `Temporal`, `Belief`, `CommitNature`, `ConnectorBatch`, `Receipt`, the chunker. No I/O |
 | 0 | `CoreTelemetry` | Measurement, `BoundedProcess`, BetterDisplay parsing, `DisplayMutationGate`. Depends on nothing |
+| 0 | `CoreCompanion` | iOS/macOS wire types, authenticated encrypted transport, pairing and session decisions. No engine or SQL dependency |
 | 0 | `CoreJSONRPC` | Messages and the stdio and HTTP transports, shared by the MCP server and client |
 | 1 | `CoreStore` | Every SQL string: `Store`, `Chunks`, `Activity`, `HomeSnapshot`, `Conversations`, `RebuildDiff`, `Export`, `LocalPrivateNames`, migrations |
 | 2 | `CoreIngest` | Connectors, MCP client and OAuth, Keychain, `AgentMemoryPolicy`, `SyncSchedule`, `SyncLane` |
 | 2 | `CoreGraph` | `IngestPipeline`, `EntityResolver`, `ClaimExtractor`, `BeliefEngine`, `BeliefAlerts`, `SourceSync`, `RebuildRehearsal` |
 | 2 | `CoreSearch` | `AdmissionPolicy`, `HybridSearch`, `PassageSearch`, `TemporalIntent`, embeddings |
 | 3 | `CoreReason` | `Reasoner` (claims, no model), `Conversation` (chat), `QueryFocus`, `WindowReport`, `AggregateAnswering`, `Grounding`, `ModelClaimProposer`. The only layer that reaches a model |
-| 4 | `CoreMCP`, `opencore`, `Apps/OpenCoreMac` | Surfaces |
+| 4 | `CoreCompanionHost` | Mac-only typed owner reads and existing answer engines, with per-device domain ceilings |
+| 5 | `CoreMCP`, `opencore`, `Apps/OpenCoreMac`, `Apps/OpenCorePhone` | Surfaces; the phone imports only `CoreCompanion` |
 
-Three answer shapes `[source]`: `Reasoner.answer` assembles claims with no model. `Conversation.answer`
-is grounded chat, on-device first. `AggregateAnswering` answers counts from SQL. Each gets the same
-admission policy before anything is ranked.
+Four answer shapes `[source]`: `Reasoner.answer` assembles claims with no model. `Conversation.answer`
+is grounded chat, on-device first. `AggregateAnswering` answers counts from SQL. `AgendaAnswering`
+lists the owner's calendar and reminders from their objects by date and status, for local callers only,
+after any count. Each gets the same admission policy before anything is ranked.
+
+[source] `CoreJSONRPC.HTTPTransport` owns individual request executions. A mutex-protected completion
+winner covers headers, streaming reads, an application deadline and caller cancellation; synchronous
+URLSession task registration permits cancellation before headers. Logical completion does not wait
+for native cancellation acknowledgement, and late workers cannot replace it. Injected sessions stay
+caller-owned. Shutdown closes this transport; overlapping legacy initializations are refused before
+another POST can replace session ownership.
+[source] `HTTPResponseDecoder` checks response IDs/envelopes, preserves recognized failed-HTTP RPC
+details plus status, and prioritizes authorization failures. It frames whole UTF-8 SSE events, ignoring
+notifications until a response, without dispatching incomplete EOF data. Chosen budgets are8MiB
+consumed bytes and400 diagnostic bytes; these are application limits, not process-memory or protocol
+maxima. Legacy session headers publish only after a completed successful initialize response. Protocol
+revision/header selection is still a separate migration job. Isolated custom-scheme URLProtocol fixtures
+cannot fall back to a real service. Current API contracts were checked against macOS27 SDK/docs on
+2026-11-01; fixture tests establish behavior, not real-service interoperability.
+
+[source] Exact wire IDs use `RPCWireObject` and sealed `RPCID` integer tokens. A strict whole-
+document grammar pass precedes semantic checks and safe fixed-length ID masking; other fields stay
+in JSONValue. Canonical numeric equality uses symbolic exponents without floating conversion or
+expansion; string identity/hash compares decoded UTF8 code points. `RPCRequest.decode(Data)` and
+`RPCResponse.serialized()` replace the lossy Foundation ID routes at server, playground and fixture
+seams; both client transports correlate exact IDs before interpreting response fields. Application
+budgets8MiB/128levels are chosen limits. Ordinary numeric payload representation is unchanged.
+[test] Raw IDs, typed echo, both transport seams and prior contracts passed760 full tests/17 runtime
+mutations with separate review; proof/limits: [exact IDs](ai/verification/2026-11-01-exact-rpc-ids.md).
+
+[source] Stdio client replies use `StdioReplyInbox` exact-ID registrations and per-owner receipt
+floors/deadlines. The reader stamps whole chunks before parsing, decodes outside its state mutex and
+publishes only to current owners; other concurrent callers cannot discard their replies. Cached
+on-time data survives EOF/expiry; stopped or withdrawn work cannot publish a late parse. Chosen
+active/cache/FIFO budgets bound retained wire data and metadata. Post-encoding health/cancel
+admission feeds a single FIFO client stdin writer with an owned nonblocking, per-FD SIGPIPE-suppressed
+endpoint. Queued/zero-byte cancellation is local; interrupted partial frames close the shared stream.
+Byte progress is applied before final-byte cancellation classification. Pointers/descriptors never
+cross await, and all shutdown callers await the same owned close. Chosen128-frame/16MiB queue budgets,
+16KiB syscall chunks and5ms polling are application choices. Encoding remains synchronous and reply
+eligibility uses its existing clock; no whole-exchange/confirmed child-exit guarantee is claimed.
+[test] Ownership passed777 full tests/25 mutations and separate review; proof:
+[stdio ownership](ai/verification/2026-11-01-stdio-ownership.md).
+[test] Client stdin writer passed791 full tests,16 writer/6 reader faults, separate review and builds;
+proof/limits: [nonblocking stdin](ai/verification/2026-11-01-stdio-writer.md). TERM remains an unconfirmed
+request; safe owned exit has a separate High roadmap row.
 
 ---
 
@@ -47,13 +92,19 @@ objects and no receipts, so nothing it does is evidence, and `Receipt.objectsTra
 about it. Its risks are in `Docs/ai/STATE.md`. The Hub's path and identity and the automation tool's
 path come from `private-names.json`, and with that file missing the Hub reads as not running.
 
+[source] JARVIS operator briefings are deterministic observations with per-snapshot capture/attempt
+metadata, not synthesized evidence. Complete/partial/failed reads stay distinct; failed refreshes do
+not redate cached values, and late row or inventory results cannot replace newer observations.
+Unknown Git fields cannot certify a clean tree. Inventory counts are materialized at collection.
+The numbered-file scan uses chosen cooperative entry/deadline limits between filesystem operations;
+a single filesystem call can still block. Stored beliefs remain in the evidence workspace.
+
 ---
 
 ## What is reviewed
 
 As of 2026-10-31 `[source]`: private names, focused answers, time windows, fresh store and honest
-beliefs were built, adversarially reviewed and repaired. Rebuild, Home and hardening have code in the
-tree that was not reviewed, and the WWDC26 currency pass was not done. `Docs/ai/STATE.md` has the list.
+beliefs were built, adversarially reviewed and repaired. Rebuild was reviewed on copies. The companion prerequisites and owner channel received separate adversarial passes. Home still needs owner screen review, and the repository-wide WWDC26 currency pass is not complete. `Docs/ai/STATE.md` has the list.
 
 ---
 
@@ -266,7 +317,27 @@ each stage as it completes. If a value could not be measured it is `nil` and ren
 `opencore trace` able to walk from a sentence back to the commit behind it. `[measured]` —
 verified against receipt `oc_d74555`.
 
+[source] New claim and passage answers link the exact spans and original passage scores in one
+receipt transaction. System answers use the already retrieved answer, preserve per-claim authority
+and caveats, and save once after supplemental prose is chosen. A local writer's identity is recorded;
+deterministic prose has no model. Legacy passage-only receipts may predate persisted span links.
+
 ---
+
+## Outbound request accounting
+
+[source, 2026-10-31] Cloud submission is recorded when a prepared request is handed to transport.
+Source-object counts use distinct represented floor IDs in that prompt. Optional HTTP status,
+recognizable provider application response, and structured-answer decoding stay separate. Missing
+measurements are omitted. The legacy integer counts application-acknowledged source objects;
+unconfirmed submissions stay in stages and shared presentation, even after deterministic fallback.
+These observations do not prove bytes, retention, or the egress of questions/instructions.
+
+[source] Each submitted cloud request also saves an independent request-audit receipt with real
+claim/passage provenance. It survives disabled chat history, cancellation and absent phone ACK.
+Authenticated device/grant metadata limits phone access without asserting delivery. A later answer
+receipt links the audit; companion.delivery is added only after ACK. Request audits are labelled as
+such, and failed persistence is reported rather than hidden. No schema migration was added.
 
 ## Freshness
 
@@ -308,3 +379,115 @@ Zero contradictions is expected on a first sync: there is nothing yet to disagre
 appear on a later sync once a source changes what it says.
 
 Tests: see `Docs/ai/RUNBOOK.md` for the current count `[measured]`.
+
+
+## iPhone owner channel [source, 2026-10-31]
+
+The phone is a native SwiftUI remote. The Mac keeps the only store and runs the existing
+`Conversation`, `Reasoner` and `PassageSearch`. `CoreCompanionHost` has no SQL or operator path.
+The engine remains Mac-only; only the dependency-free wire target is built into the phone.
+MCP remains a separate, model-facing, read-only channel with its existing domain gate.
+
+The Mac connection is off at launch. Enabling it requires a selected, currently assigned, up
+Tailscale tunnel address. `NWParameters.requiredLocalEndpoint` pins the listener to that literal
+IPv4 address; there is no wildcard or LAN fallback. In-person invitations pin the Mac public key,
+expire after two minutes and authorize one phone. The phone uses a biometric-protected Secure
+Enclave P-256 signing key, a fresh Mac challenge and ephemeral ECDH. Direction-specific HKDF keys,
+AES-GCM and authenticated sequence numbers protect each fragment. Limits are chosen: five-minute
+sessions, eight active connections, eight volatile resumable responses, eight MB per message,
+600-byte fragments and TCP MSS 960. These sizes are design choices, not packet measurements.
+
+[source, references checked 2026-10-31] Xcode 27.0 (27A266a), iOS/macOS 27 SDK interfaces and
+Apple's current [Secure Enclave signing key](https://developer.apple.com/documentation/cryptokit/secureenclave/p256/signing/privatekey),
+[local endpoint requirement](https://developer.apple.com/documentation/network/nwparameters/requiredlocalendpoint),
+[biometric evaluation](https://developer.apple.com/documentation/localauthentication/lacontext/evaluatepolicy(_:localizedreason:reply:))
+and [TCP segment limit](https://developer.apple.com/documentation/network/nwprotocoltcp/options/maximumsegmentsize)
+references were read. Tailscale documents its [1280-byte MTU](https://tailscale.com/docs/reference/troubleshooting/network-configuration/tcp-connection-two-devices).
+These references establish API contracts, not this app's behavior on a physical phone.
+
+[source] A paired grant is the maximum domain set. Query admission may narrow it. Browse queries
+filter before pagination. Claims require admitted subjects, targets and supporting floor objects.
+New pairings receive a random grant ID; conversation context and resumable responses cannot cross
+a changed grant. A change in a chat turn's admitted set clears model context and retrieval anchors.
+Limited phones can read only their current grant's own receipts, because historical raw questions
+and stage notes have no independent domain label. Full-domain owner phones can inspect all receipts.
+
+[source] Supplying a new valid code for an existing signing identity persists a fresh grant with the
+new code's domain ceiling. A code-free reconnect retains the existing grant. Grant replacement and
+revocation return the precise displaced grant, so delayed cleanup cannot cancel a newer session or
+erase its replay state. Failed code validation or persistence retains the prior grant.
+
+[source] Phone delivery counts as transmission off the Mac. The delivery stage records the paired
+device ID, name, grant ID and distinct floor objects directly quoted or cited in the delivered answer.
+`objectsTransmitted` is at least that count; a pre-existing model transmission count is preserved.
+Consulted evidence stays in the trace even when not directly quoted. Claim and passage provenance,
+including actual retrieval scores and immutable passage snippets, is saved atomically with the receipt
+after acknowledgement. Confidence remains nil. Draft tokens are explicitly unverified; they do not
+produce a completed-delivery receipt. This counter describes completed acknowledged answers, not a
+byte-level record of interrupted draft fragments. Browse reads do not create answer receipts.
+
+[source] Closing a connection, revoking its grant, stopping the server or expiring a session cancels
+in-flight preparation. After an authenticated acknowledgement, the receipt commit may finish even
+if the final socket write fails. A five-minute, memory-only resume cache reuses the same generated
+response and commit instead of inventing a newer generation time or a second receipt. The phone
+stores only pairing/key material and its last-reachable timestamp. Evidence and answers are cleared
+on background lock. No APNs, remote wake, second database or offline evidence cache is implemented.
+
+[source, in progress] Saved-phone-chat primitives bind each thread to its pairing grant and domain
+ceiling, recheck the admitted history before exposure, and compare the ordered exchange revision in
+the acknowledged write transaction. Schema 7 adds an exportable digest-only deletion marker so
+current readers and acknowledged saves reject a deleted thread even if its rows are recreated. A
+trigger rejects unmarked deletes from an already-open older writer; it does not prevent every insert
+by older code. The in-progress saved-chat generation route uses a fresh actor per request and carries
+the revision from the restored snapshot to its ACK-gated save. It withholds drafts for now, checks
+old history and new answer references in one read snapshot, and revalidates cached saved answers and
+history pages before sending them. Cached pages without an explicit validator refuse retry/resume;
+other read routes still need validators and an initial-send disclosure audit.
+Deletion markers cannot backfill threads deleted before this migration. No live-store migration was
+performed for this work.
+
+[design] The full-fidelity goal includes later store actions and operator views/control. Their routes
+are absent from this first read-only channel. Physical Face ID, real-tailnet pairing, sleeping-Mac
+behavior and generation parity with real models still require the owner's phase review.
+
+
+## Internal Mac review bootstrap [source, 2026-11-01]
+
+OpenCoreReview is a separate background-only Foundation entry point, built with only
+OpenCoreReviewSupport (CoreStore/CoreTelemetry). Production app UI/controller types are not linked into this
+bootstrap. The regular app rejects review arguments before constructing AppModel. There is no
+fallback to the default store. Policy admits an explicit regular nlink1 file under a private copy
+root, rejects aliases and SQLite sidecars, then opens an immutable read-only snapshot.
+
+[source] Ordinary Store/Database opens retain their defaults. The distinct snapshot factory uses
+escaped URI options and skips sidecars/locks only for self-contained, unchanging copies. The typed
+creator uses SQLite backup, changes only the new destination's journal mode/permissions and removes
+only its owned detached SHM index after close. Both backup kinds reject preexisting auxiliaries.
+No schema or migration changed. Actual screen/model/settings injection is a subsequent job.
+
+[source, references checked 2026-11-01] API contracts: Apple's [App Sandbox](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.app-sandbox),
+[read-only file exceptions](https://developer.apple.com/library/archive/documentation/Miscellaneous/Reference/EntitlementKeyReference/Chapters/AppSandboxTemporaryExceptionEntitlements.html),
+SQLite [immutable URIs](https://www.sqlite.org/uri.html) and [WAL read-only behavior](https://www.sqlite.org/wal.html#read_only_databases).
+The macOS 27 SDK exposes the required open flags; installed SQLite reports 3.54.0. Compilation,
+signed-metadata inspection and fixture execution are separate evidence in the verification artifact.
+
+## Explicit Mac presentation ownership [source, 2026-11-01]
+
+CorePresentation contains macOS settings and adaptive Pastel tokens. Settings requires one explicit
+UserDefaults instance for reads/writes and explicit effects for scheduled sync, returning to dry run
+and MCP configuration. Only the production app bridge chooses standard defaults and controller
+callbacks. Initialization restores state without invoking effects; named next-launch automation
+confirmation and dirty/reset semantics remain unchanged. App-local NSApp appearance behavior remains.
+
+[source] Glass card/bar/badge ViewModifiers resolve environment settings in body. The package and
+theme extraction does not yet isolate AppModel or view tasks, remove the production environment
+fallback, or qualify actual screens. Tests and current Apple references:
+[settings ownership](ai/verification/2026-11-01-settings-ownership.md).
+
+[source] MCP startup preference writes use a typed field-preserving SharedConfig updater, with
+preparation refusal, unknown write/readback and matching observed confirmation kept separate.
+Requested defaults never prove persistence. A one-shot strict initial read can restore saved
+authorization; attempted changes, unknown observation and invalidation cannot silently reinitialize
+it. New playground servers and clipboard copies revalidate current shared state. Generated clients
+contain no unsafe override. Existing servers and explicit external unsafe arguments keep their
+startup behavior. Proof/limits: [MCP preference](ai/verification/2026-11-01-mcp-preference.md).

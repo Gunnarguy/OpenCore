@@ -553,6 +553,18 @@ func ask(_ query: String) async throws {
             }
             print("")
         }
+        let printPassages = {
+            print("\nMatching passages")
+            for hit in answer.passages.prefix(passagesShown) {
+                let date = hit.object.authoredAt.map { " · \(dateFormatter.string(from: $0))" } ?? ""
+                print("  \(hit.object.title) [\(hit.object.kind.rawValue)\(date)]")
+                print("    \(hit.chunk.text.replacingOccurrences(of: "\n", with: " ").prefix(160))")
+            }
+        }
+        if answer.passagesLead {
+            printPassages()
+            if !answer.points.isEmpty { print("\nAlso known about where those came from") }
+        }
         for point in answer.points.prefix(pointsShown) {
             print("\(point.derivation == .observed ? "•" : "~") \(point.statement)")
             print("  confidence \(String(format: "%.2f", point.confidence)) · \(point.authority.label) · \(point.derivation.rawValue)")
@@ -568,14 +580,7 @@ func ask(_ query: String) async throws {
         }
         if !answer.points.isEmpty { print("\n  • observed directly    ~ inferred") }
         // The summary says how many passages matched, and `--no-fm` used to show none of them.
-        if !answer.passages.isEmpty {
-            print("\nMatching passages")
-            for hit in answer.passages.prefix(passagesShown) {
-                let date = hit.object.authoredAt.map { " · \(dateFormatter.string(from: $0))" } ?? ""
-                print("  \(hit.object.title) [\(hit.object.kind.rawValue)\(date)]")
-                print("    \(hit.chunk.text.replacingOccurrences(of: "\n", with: " ").prefix(160))")
-            }
-        }
+        if !answer.passages.isEmpty, !answer.passagesLead { printPassages() }
     }
 
     if !answer.contradictions.isEmpty {
@@ -586,7 +591,7 @@ func ask(_ query: String) async throws {
         }
     }
 
-    if answer.counted == nil, !flag("no-fm") {
+    if answer.counted == nil, answer.agenda == nil, !flag("no-fm") {
         let (domain, requested) = AdmissionPolicy.classifyDomain(
             query,
             knownEntitySurfaces: try await store.aliasSurfaces()
@@ -686,8 +691,8 @@ func printReceipt(_ receipt: Receipt) {
     claims consulted      \(receipt.claimsConsulted)
     contradictions        \(receipt.contradictionsSurfaced)
     domains blocked       \(receipt.domainsBlocked.map(\.rawValue).joined(separator: ", "))
-    model                 \(receipt.model ?? "none — assembled from claims")
-    objects transmitted   \(receipt.objectsTransmitted)
+    prose author          \(receipt.model ?? "no model author")
+    outbound activity     \(receipt.outboundDescription)
     confidence            \(receipt.confidence.map { String(format: "%.2f", $0) } ?? "not measured")
     """)
     for stage in receipt.stages {
@@ -820,6 +825,7 @@ func listReceipts() async throws {
         print("\(receipt.shortCode)  \(dateFormatter.string(from: receipt.createdAt))  \(receipt.queryClass.rawValue)")
         print("  \(receipt.query)")
         print("  \(receipt.objectsRetrieved) retrieved · \(receipt.claimsConsulted) claims · \(receipt.evidenceAdmitted) evidence")
+        print("  \(receipt.outboundDescription)")
     }
 }
 

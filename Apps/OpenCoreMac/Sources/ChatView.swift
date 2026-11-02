@@ -1,4 +1,5 @@
 import CoreModel
+import CorePresentation
 import CoreReason
 import CoreSearch
 import CoreStore
@@ -9,6 +10,7 @@ import SwiftUI
 final class ChatModel {
     var turns: [Turn] = []
     var draft = ""
+    var ownerDomain: Domain?
     var draftTokens = 0
     var sending = false
     var sendTask: Task<Void, Never>?
@@ -58,7 +60,8 @@ final class ChatModel {
         let key = (store: ObjectIdentifier(store.database), tuning: tuning, id: currentID)
         if let retained, let retainedKey, retainedKey == key { return retained }
         let created = Conversation(
-            store: store, embedder: try? NLEmbeddingProvider(), tuning: tuning, id: currentID
+            store: store, embedder: try? NLEmbeddingProvider(), tuning: tuning, id: currentID,
+            onAuditFailure: { message in await AppModel.shared.recordAuditFailure(message) }
         )
         retained = created
         retainedKey = key
@@ -291,6 +294,13 @@ struct ChatView: View {
     private var composer: some View {
         let jarvis = JarvisController.shared
         return VStack(alignment: .leading, spacing: 8) {
+            Picker("Read from", selection: $chat.ownerDomain) {
+                Text("Automatic").tag(Domain?.none)
+                ForEach(Domain.allCases.filter { $0 != .restricted }, id: \.self) { domain in
+                    Text(domain.rawValue.capitalized).tag(Optional(domain))
+                }
+            }.pickerStyle(.menu).disabled(chat.sending)
+                .help("Personal includes calendar, reminders and journals. This choice applies only to your questions.")
             HStack(spacing: 8) {
                 Label(chat.telemetry.modelVariant, systemImage: "cpu.fill")
                     .font(.caption2.monospaced().weight(.semibold))
@@ -376,20 +386,21 @@ struct ChatView: View {
         chat.turns.append(Turn(role: .you, text: question))
 
         let tuning = settings.tuning
+        let ownerDomain = chat.ownerDomain
         let requestID = UUID()
         chat.sendRequestID = requestID
         chat.sendTask = Task {
             defer {
                 if chat.sendRequestID == requestID { chat.sending = false; chat.sendTask = nil }
             }
-            async let structuredAnswer = model.reasonAnswer(contextualized, persistReceipt: false)
+            async let structuredAnswer = model.reasonAnswer(question, persistReceipt: false, ownerDomain: ownerDomain, retrievalQuery: contextualized)
             let conversation = chat.conversation(store: store, tuning: tuning)
             await conversation.configureGeneration(.init(reasoningLevel: settings.fmReasoningLevelRaw,
                                                          includeSchemaInPrompt: settings.fmIncludeSchemaInPrompt))
             var placeholderIndex: Int?
             var finalTurnID: UUID?
 
-            for await update in conversation.send(question) {
+            for await update in conversation.send(question, ownerDomain: ownerDomain) {
                 guard !Task.isCancelled, chat.sendRequestID == requestID else { break }
                 finalTurnID = update.id
                 if let index = placeholderIndex {
@@ -544,11 +555,7 @@ private struct TurnView: View {
         } else {
             parts.append("\(receipt.objectsRetrieved) of \(receipt.objectsSearched) passages")
         }
-        if receipt.objectsTransmitted > 0 {
-            parts.append("cloud (\(receipt.objectsTransmitted) sent)")
-        } else {
-            parts.append(receipt.model == nil ? "deterministic graph" : "100% on-device (\(receipt.model ?? "fm"))")
-        }
+        parts.append(receipt.outboundDescription)
         parts.append(receipt.shortCode)
         return parts.joined(separator: " · ")
     }

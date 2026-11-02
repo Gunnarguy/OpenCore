@@ -15,6 +15,7 @@ public enum StoreError: Error, CustomStringConvertible {
     case step(String, sql: String)
     case schemaMissing
     case notFound(String)
+    case newerSchema(found: Int, supported: Int)
 
     public var description: String {
         switch self {
@@ -23,6 +24,7 @@ public enum StoreError: Error, CustomStringConvertible {
         case .step(let message, let sql): "statement failed: \(message)\n  sql: \(sql)"
         case .schemaMissing: "schema.sql is missing from the CoreStore bundle"
         case .notFound(let what): "not found: \(what)"
+        case .newerSchema(let found, let supported): "store schema \(found) is newer than this build supports (\(supported)); open it with a newer OpenCore build"
         }
     }
 }
@@ -209,7 +211,13 @@ public final class Connection {
                 case SQLITE_FLOAT:
                     columns[names[index]] = .real(sqlite3_column_double(statement, position))
                 case SQLITE_TEXT:
-                    columns[names[index]] = .text(String(cString: sqlite3_column_text(statement, position)))
+                    // SQLite TEXT can contain NUL. A C-string initializer would silently drop
+                    // the suffix, including a later, potentially restricted domain label.
+                    guard let bytes = sqlite3_column_text(statement, position) else {
+                        throw StoreError.step(String(cString: sqlite3_errmsg(handle)), sql: sql)
+                    }
+                    let count = Int(sqlite3_column_bytes(statement, position))
+                    columns[names[index]] = .text(String(decoding: UnsafeBufferPointer(start: bytes, count: count), as: UTF8.self))
                 case SQLITE_BLOB:
                     if let bytes = sqlite3_column_blob(statement, position) {
                         let count = Int(sqlite3_column_bytes(statement, position))
@@ -249,7 +257,19 @@ public final class Connection {
             case .real(let number):
                 sqlite3_bind_double(statement, position, number)
             case .text(let string):
-                sqlite3_bind_text(statement, position, string, -1, SQLITE_TRANSIENT)
+                // Pass the UTF-8 byte count explicitly; -1 truncates a Swift string at NUL.
+                guard let count = Int32(exactly: string.utf8.count) else {
+                    sqlite3_finalize(statement)
+                    throw StoreError.prepare("text binding exceeds SQLite's byte limit", sql: sql)
+                }
+                let result = string.withCString { bytes in
+                    sqlite3_bind_text(statement, position, bytes, count, SQLITE_TRANSIENT)
+                }
+                guard result == SQLITE_OK else {
+                    let message = String(cString: sqlite3_errmsg(handle))
+                    sqlite3_finalize(statement)
+                    throw StoreError.prepare(message, sql: sql)
+                }
             case .blob(let data):
                 _ = data.withUnsafeBytes { buffer in
                     sqlite3_bind_blob(statement, position, buffer.baseAddress, Int32(data.count), SQLITE_TRANSIENT)
@@ -282,23 +302,38 @@ public actor Database {
         (4, "migration_004"),
         (5, "migration_005"),
         (6, "migration_006"),
+        (7, "migration_007"),
     ]
 
     public static var schemaVersion: Int { migrations.map(\.version).max() ?? 0 }
 
-    public init(path: URL) throws {
+    public init(path: URL, readOnly: Bool = false, immutableSnapshot: Bool = false) throws {
+        guard !immutableSnapshot || readOnly else { throw StoreError.open("an immutable snapshot must be opened read-only") }
         self.path = path
-        try FileManager.default.createDirectory(at: path.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if !readOnly { try FileManager.default.createDirectory(at: path.deletingLastPathComponent(), withIntermediateDirectories: true) }
 
         var handle: OpaquePointer?
-        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
-        guard sqlite3_open_v2(path.path, &handle, flags, nil) == SQLITE_OK, let handle else {
+        let flags = (readOnly ? SQLITE_OPEN_READONLY : SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE)
+            | SQLITE_OPEN_FULLMUTEX | (immutableSnapshot ? SQLITE_OPEN_URI : 0)
+        let sqlitePath: String
+        if immutableSnapshot {
+            // Only for self-contained, unchanging copies: SQLite skips locks and sidecars.
+            // URLComponents escapes literal ?, # and % in file names before adding URI options.
+            var uri = URLComponents()
+            uri.scheme = "file"
+            uri.path = path.path
+            uri.queryItems = [URLQueryItem(name: "mode", value: "ro"), URLQueryItem(name: "immutable", value: "1")]
+            guard let url = uri.url else { throw StoreError.open("invalid snapshot path") }
+            sqlitePath = url.absoluteString
+        } else { sqlitePath = path.path }
+        guard sqlite3_open_v2(sqlitePath, &handle, flags, nil) == SQLITE_OK, let handle else {
             let message = handle.map { String(cString: sqlite3_errmsg($0)) } ?? "unknown"
             if let handle { sqlite3_close_v2(handle) }
             throw StoreError.open(message)
         }
         sqlite3_busy_timeout(handle, 5_000)
         self.connection = Connection(handle: handle)
+        if readOnly { try self.connection.executeScript("PRAGMA query_only = ON; PRAGMA foreign_keys = ON;") }
     }
 
     /// The default location: `~/Library/Application Support/OpenCore/opencore.sqlite3`.
@@ -312,6 +347,16 @@ public actor Database {
     /// A consistent SQLite snapshot, including committed WAL pages, into a reserved private
     /// file. No unlink/recreate gap and no trust in a caller-supplied preexisting backup.
     public func createPolicyRepairBackup(at url: URL) throws {
+        try createBackup(at: url, selfContained: false)
+    }
+
+    /// A consistent, self-contained copy for immutable inspection. Only the new destination's
+    /// journal mode/permissions change; the source connection is read by SQLite's backup API.
+    public func createReadOnlySnapshot(at url: URL) throws {
+        try createBackup(at: url, selfContained: true)
+    }
+
+    private func createBackup(at url: URL, selfContained: Bool) throws {
         let requested = url.standardizedFileURL
         // NSTemporaryDirectory can begin with /var (a symlink to /private/var on macOS).
         // Resolve only the parent; the destination itself must still pass exclusive/no-follow creation.
@@ -325,6 +370,20 @@ public actor Database {
             throw StoreError.open("backup destination must be new and separate from the active database")
         }
         try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        if selfContained {
+            let attributes = try FileManager.default.attributesOfItem(atPath: destination.deletingLastPathComponent().path)
+            guard let permissions = attributes[.posixPermissions] as? NSNumber, permissions.intValue & 0o077 == 0 else {
+                throw StoreError.open("snapshot destination must be in a private directory")
+            }
+        }
+        // A new main inode is insufficient when preexisting SQLite auxiliaries can alias
+        // other data. Reserve a new database namespace for both backup kinds.
+        for suffix in ["-wal", "-shm", "-journal"] {
+            var sidecar = stat()
+            guard lstat(destinationPath + suffix, &sidecar) != 0, errno == ENOENT else {
+                throw StoreError.open("backup destination must not have SQLite sidecars")
+            }
+        }
         #if canImport(Darwin)
         let descriptor = Darwin.open(destinationPath, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, mode_t(0o600))
         #else
@@ -378,7 +437,39 @@ public actor Database {
         guard integrity.count == 1, integrity.first?.string("integrity_check") == "ok" else {
             throw StoreError.open("backup integrity check failed; no policy changes were applied")
         }
-        guard identityIsUnchanged(), fchmod(descriptor, mode_t(0o600)) == 0, fsync(descriptor) == 0, identityIsUnchanged() else {
+        if selfContained {
+            let mode = try backupConnection.query("PRAGMA journal_mode = DELETE")
+            guard mode.first?.string("journal_mode") == "delete" else {
+                throw StoreError.open("could not make the new snapshot self-contained")
+            }
+            // Some SQLite builds retain a detached SHM index even after switching to DELETE.
+            // No sidecar existed before this private backup. Capture only the ordinary index
+            // created by our target connection, then unlink only that same inode after close.
+            let shmPath = destinationPath + "-shm"
+            var ownedIndex = stat()
+            let hasOwnedIndex = lstat(shmPath, &ownedIndex) == 0
+            if hasOwnedIndex {
+                guard ownedIndex.st_nlink == 1, (ownedIndex.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG) else {
+                    throw StoreError.open("snapshot index identity is unsafe")
+                }
+            }
+            guard sqlite3_close(target) == SQLITE_OK else { throw StoreError.open("could not close the new snapshot") }
+            backupHandle = nil
+            var remainingIndex = stat()
+            if lstat(shmPath, &remainingIndex) == 0 {
+                guard hasOwnedIndex, remainingIndex.st_dev == ownedIndex.st_dev, remainingIndex.st_ino == ownedIndex.st_ino,
+                      remainingIndex.st_nlink == 1, (remainingIndex.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG),
+                      unlink(shmPath) == 0 else { throw StoreError.open("could not remove the owned snapshot index") }
+            }
+            for suffix in ["-wal", "-shm", "-journal"] {
+                var sidecar = stat()
+                guard lstat(destinationPath + suffix, &sidecar) != 0, errno == ENOENT else {
+                    throw StoreError.open("new snapshot still has SQLite sidecars")
+                }
+            }
+        }
+        let permissions: mode_t = selfContained ? 0o400 : 0o600
+        guard identityIsUnchanged(), fchmod(descriptor, permissions) == 0, fsync(descriptor) == 0, identityIsUnchanged() else {
             throw StoreError.open("could not confirm and flush the private backup")
         }
         completed = true
@@ -389,25 +480,45 @@ public actor Database {
     /// Migration 1 creates `schema_migration` itself, so it always runs; its statements
     /// are all `IF NOT EXISTS` and applying it to an existing store is a no-op.
     public func migrate() throws {
+        var scripts: [(version: Int, sql: String)] = []
         for migration in Self.migrations {
             guard let url = Bundle.module.url(forResource: migration.resource, withExtension: "sql", subdirectory: "Resources")
                     ?? Bundle.module.url(forResource: migration.resource, withExtension: "sql"),
                   let sql = try? String(contentsOf: url, encoding: .utf8)
             else { throw StoreError.schemaMissing }
 
-            if migration.version > 1 {
-                let applied = try connection.query(
-                    "SELECT version FROM schema_migration WHERE version = ?",
-                    [.integer(Int64(migration.version))]
-                )
-                if !applied.isEmpty { continue }
-            }
+            scripts.append((migration.version, sql))
+        }
+        try applyMigrations(scripts)
+    }
 
-            try connection.executeScript(sql)
-            try connection.execute(
-                "INSERT OR IGNORE INTO schema_migration (version, applied_at) VALUES (?, ?)",
-                [.integer(Int64(migration.version)), .real(Date().timeIntervalSince1970)]
-            )
+    /// Internal seam for proving rollback with a deliberately broken migration. Shipped
+    /// resources remain append-only. Check the version before changing journal mode or DDL.
+    func applyMigrations(_ scripts: [(version: Int, sql: String)]) throws {
+        let hasLedger = try connection.scalarInt("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'schema_migration'") > 0
+        let found = hasLedger ? try connection.scalarInt("SELECT COALESCE(MAX(version), 0) FROM schema_migration") : 0
+        let supported = scripts.map(\.version).max() ?? 0
+        guard found <= supported else { throw StoreError.newerSchema(found: found, supported: supported) }
+
+        // SQLite cannot switch to WAL inside a transaction, and foreign_keys is a no-op
+        // there. Run these connection settings first; all schema and ledger writes are atomic.
+        try connection.executeScript("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")
+        try write { connection in
+            // Another process may have migrated while BEGIN IMMEDIATE waited for its lock.
+            // The check under the write lock is the one that authorizes schema changes.
+            let hasLedger = try connection.scalarInt("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'schema_migration'") > 0
+            let lockedVersion = hasLedger ? try connection.scalarInt("SELECT COALESCE(MAX(version), 0) FROM schema_migration") : 0
+            guard lockedVersion <= supported else { throw StoreError.newerSchema(found: lockedVersion, supported: supported) }
+            for migration in scripts {
+                if migration.version > 1,
+                   try connection.scalarInt("SELECT COUNT(*) FROM schema_migration WHERE version = ?", [.integer(Int64(migration.version))]) > 0 { continue }
+                let transactionalSQL = migration.sql
+                    .replacingOccurrences(of: "PRAGMA journal_mode = WAL;", with: "")
+                    .replacingOccurrences(of: "PRAGMA foreign_keys = ON;", with: "")
+                try connection.executeScript(transactionalSQL)
+                try connection.execute("INSERT OR IGNORE INTO schema_migration (version, applied_at) VALUES (?, ?)",
+                    [.integer(Int64(migration.version)), .real(Date().timeIntervalSince1970)])
+            }
         }
     }
 

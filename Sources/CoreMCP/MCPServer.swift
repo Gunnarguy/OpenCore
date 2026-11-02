@@ -69,7 +69,7 @@ public actor MCPServer {
 
             let request: RPCRequest
             do {
-                request = try JSONDecoder().decode(RPCRequest.self, from: data)
+                request = try RPCRequest.decode(data)
             } catch {
                 log("could not decode message: \(error)")
                 continue
@@ -460,6 +460,7 @@ public actor MCPServer {
         lines.append("claims consulted: \(receipt.claimsConsulted), evidence admitted: \(receipt.evidenceAdmitted)")
         lines.append("domains blocked: \(receipt.domainsBlocked.map(\.rawValue).joined(separator: ", "))")
         lines.append("confidence: \(receipt.confidence.map { String(format: "%.2f", $0) } ?? "not measured")")
+        lines.append(receipt.outboundDescription)
         lines.append("Trace this with core_trace(receipt: \"\(receipt.shortCode)\").")
         return lines.joined(separator: "\n")
     }
@@ -550,7 +551,7 @@ public actor MCPServer {
         )
         var claims: [CoreClaim] = []
         for claim in rawClaims {
-            guard try await isClaimAdmitted(claim, policy: activePolicy) else { continue }
+            guard try await ClaimAdmission.admits(claim, policy: activePolicy, store: store) else { continue }
             claims.append(claim)
         }
         guard !claims.isEmpty else { return "\(entity.canonicalName) exists but has no current claims." }
@@ -588,7 +589,7 @@ public actor MCPServer {
                 var history: [Belief] = []
                 for belief in rawHistory {
                     guard let beliefClaim = try await store.claim(belief.claimID),
-                          try await isClaimAdmitted(beliefClaim, policy: activePolicy)
+                          try await ClaimAdmission.admits(beliefClaim, policy: activePolicy, store: store)
                     else { continue }
                     history.append(belief)
                 }
@@ -610,8 +611,8 @@ public actor MCPServer {
         for item in rawItems {
             guard let claimA = try await store.claim(item.claimA),
                   let claimB = try await store.claim(item.claimB),
-                  try await isClaimAdmitted(claimA, policy: activePolicy),
-                  try await isClaimAdmitted(claimB, policy: activePolicy)
+                  try await ClaimAdmission.admits(claimA, policy: activePolicy, store: store),
+                  try await ClaimAdmission.admits(claimB, policy: activePolicy, store: store)
             else { continue }
             items.append(item)
         }
@@ -637,7 +638,7 @@ public actor MCPServer {
         for belief in beliefs {
             guard lines.count < 50 else { break }
             guard let claim = try await store.claim(belief.claimID),
-                  try await isClaimAdmitted(claim, policy: activePolicy),
+                  try await ClaimAdmission.admits(claim, policy: activePolicy, store: store),
                   let subjectEntity = try await store.entity(claim.subject)
             else { continue }
             let value: String = if let objectEntity = claim.objectEntity {
@@ -659,6 +660,10 @@ public actor MCPServer {
             return "Receipt \(receipt.shortCode) is in the \(blockedDomain.rawValue) domain, which this server does not expose."
         }
 
+        return try await traceRows(receipt, policy: activePolicy) + "\n" + receipt.outboundDescription
+    }
+
+    private func traceRows(_ receipt: Receipt, policy activePolicy: AdmissionPolicy) async throws -> String {
         let rows = try await store.trace(receipt: receipt.id)
             .filter { activePolicy.admits($0.1.domain) }
         guard !rows.isEmpty else {
@@ -674,7 +679,7 @@ public actor MCPServer {
             // Same reasoning for a time question, whose support is the event log.
             if let stage = receipt.stages.first(where: { $0.name == "activity" }) {
                 return "Receipt \(receipt.shortCode) was answered from \(stage.counters["events_in_window"] ?? 0) "
-                    + "event(s) in the window (\(stage.note ?? "no window recorded")), so it cites no evidence rows. "
+                    + "event(s) in the recorded window, so it cites no evidence rows. "
                     + "Its support is the event log, not a set of passages."
             }
             // Chat answering from passages alone. "Admitted no evidence" beside a counter of six
@@ -689,7 +694,9 @@ public actor MCPServer {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd"
 
-        var lines = ["Evidence behind \(receipt.shortCode) (\"\(receipt.query)\"):"]
+        // Raw owner questions and stage notes have no independent domain label. A trace may
+        // expose admitted source evidence without exposing that unrelated private free text.
+        var lines = ["Evidence behind \(receipt.shortCode):"]
         for (index, entry) in rows.enumerated() {
             let (evidence, object, score) = entry
             lines.append("")
@@ -728,7 +735,7 @@ public actor MCPServer {
 
         var admittedClaims: [DossierClaim] = []
         for row in snapshot.claims {
-            guard try await isClaimAdmitted(row.claim, policy: activePolicy) else { continue }
+            guard try await ClaimAdmission.admits(row.claim, policy: activePolicy, store: store) else { continue }
             admittedClaims.append(row)
         }
         lines.append("")
@@ -746,8 +753,8 @@ public actor MCPServer {
         for item in snapshot.contradictions {
             guard let claimA = try await store.claim(item.claimA),
                   let claimB = try await store.claim(item.claimB),
-                  try await isClaimAdmitted(claimA, policy: activePolicy),
-                  try await isClaimAdmitted(claimB, policy: activePolicy)
+                  try await ClaimAdmission.admits(claimA, policy: activePolicy, store: store),
+                  try await ClaimAdmission.admits(claimB, policy: activePolicy, store: store)
             else { continue }
             admittedContradictions.append(item)
         }
@@ -832,8 +839,7 @@ public actor MCPServer {
         // An external caller cannot unlock a sensitive domain by wording, and cannot land
         // in one either: a query that classifies as medical is re-based to project.
         if !sensitiveDomainsUnlockable {
-            let safeDomain = domain.isSensitive ? Domain.project : domain
-            return AdmissionPolicy(queryDomain: safeDomain, explicitlyRequested: [])
+            return AdmissionPolicy.forQuestion(query, externalCaller: true)
         }
         return AdmissionPolicy(queryDomain: domain, explicitlyRequested: requested, allowRestricted: true)
     }
@@ -850,42 +856,17 @@ public actor MCPServer {
         let history = try await store.beliefHistory(key: belief.claimKey)
         guard let previous = history.first(where: { $0.id == replaced }),
               let claim = try await store.claim(previous.claimID),
-              try await isClaimAdmitted(claim, policy: policy)
+              try await ClaimAdmission.admits(claim, policy: policy, store: store)
         else { return "replaced a value this server does not expose" }
         return belief.reason
     }
 
-    private func isClaimAdmitted(_ claim: CoreClaim, policy: AdmissionPolicy) async throws -> Bool {
-        guard policy.admits(claim.domain),
-              let subject = try await store.entity(claim.subject),
-              policy.admits(subject.domain)
-        else { return false }
-        if let objectEntity = claim.objectEntity,
-           let target = try await store.entity(objectEntity),
-           !policy.admits(target.domain) {
-            return false
-        }
-        let supporting = try await store.evidence(for: claim.id, stance: .supports)
-        if !supporting.isEmpty {
-            var hasAdmittedSupport = false
-            for (evidence, _, _) in supporting {
-                if let object = try await store.object(evidence.objectID) {
-                    if policy.admits(object.domain) {
-                        hasAdmittedSupport = true
-                    }
-                } else {
-                    hasAdmittedSupport = true
-                }
-            }
-            guard hasAdmittedSupport else { return false }
-        }
-        return true
-    }
+
 
     // MARK: - Transport
 
     private func write(_ response: RPCResponse) {
-        guard let data = try? JSONEncoder().encode(response),
+        guard let data = try? response.serialized(),
               var line = String(data: data, encoding: .utf8)
         else {
             log("could not encode response")

@@ -41,7 +41,7 @@ extension StdioTransport: MCPTransport {}
 /// Deliberately separate from `StdioTransport.TransportError` rather than merged into it: a
 /// subprocess cannot be rate limited and a URL cannot exit with a signal, and one enum
 /// carrying both would have half its cases uninhabitable at any given moment.
-public enum HTTPTransportError: Error, CustomStringConvertible {
+public enum HTTPTransportError: Error, CustomStringConvertible, CustomDebugStringConvertible, LocalizedError {
     /// The server demands authorization. `resourceMetadata` is the URL from the
     /// `WWW-Authenticate` header, which is how the MCP authorization spec bootstraps
     /// discovery: an unauthenticated request is the documented way to find out where to
@@ -50,17 +50,34 @@ public enum HTTPTransportError: Error, CustomStringConvertible {
     case httpStatus(Int, body: String)
     case malformed(String)
     case timedOut(method: String, seconds: TimeInterval)
-    case remote(code: Int, message: String)
+    case remote(code: Int, message: String, data: JSONValue? = nil)
+    case remoteHTTP(status: Int, error: RPCError)
+    case responseTooLarge(limit: Int)
+    case closed
+
+    public var httpStatusCode: Int? {
+        switch self {
+        case .unauthorized: 401
+        case .httpStatus(let status, _), .remoteHTTP(let status, _): status
+        default: nil
+        }
+    }
+
+    public var debugDescription: String { description }
+    public var errorDescription: String? { description }
 
     public var description: String {
         switch self {
         case .unauthorized(let url):
             "server requires authorization\(url.map { " (metadata at \($0.absoluteString))" } ?? "")"
-        case .httpStatus(let code, let body):
-            "server returned HTTP \(code)\(body.isEmpty ? "" : ": \(body.prefix(300))")"
+        case .httpStatus(let code, _):
+            "server returned HTTP \(code)"
         case .malformed(let detail): "malformed response: \(detail)"
-        case .timedOut(let method, let seconds): "'\(method)' did not respond within \(Int(seconds))s"
-        case .remote(let code, let message): "server returned error \(code): \(message)"
+        case .timedOut(let method, let seconds): "'\(method)' did not complete within \(seconds)s"
+        case .remote(let code, let message, _): "server returned error \(code): \(message)"
+        case .remoteHTTP(let status, let error): "server returned HTTP \(status): \(error.description)"
+        case .responseTooLarge(let limit): "server response exceeded the \(limit)-byte limit"
+        case .closed: "HTTP transport is closed"
         }
     }
 }
@@ -72,7 +89,19 @@ public enum HTTPTransportError: Error, CustomStringConvertible {
 /// pattern-matching two unrelated enums at the call site is how it would silently stop
 /// working over the newer one.
 public func rpcErrorCode(_ error: any Error) -> Int? {
-    if case StdioTransport.TransportError.remote(let code, _) = error { return code }
-    if case HTTPTransportError.remote(let code, _) = error { return code }
+    rpcError(error)?.code
+}
+
+/// Transport-independent access to structured details. Callers inspect data deliberately;
+/// descriptions and telemetry retain only code/message.
+public func rpcError(_ error: any Error) -> RPCError? {
+    if let rpc = error as? RPCError { return rpc }
+    if case StdioTransport.TransportError.remote(let code, let message, let data) = error {
+        return RPCError(code: code, message: message, data: data)
+    }
+    if case HTTPTransportError.remote(let code, let message, let data) = error {
+        return RPCError(code: code, message: message, data: data)
+    }
+    if case HTTPTransportError.remoteHTTP(_, let rpc) = error { return rpc }
     return nil
 }

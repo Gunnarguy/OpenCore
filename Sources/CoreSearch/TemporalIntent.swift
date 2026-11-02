@@ -68,9 +68,10 @@ public struct QueryTimeWindow: Sendable, Hashable, Codable {
 /// where its owner was standing.
 ///
 /// Not read, so a question using them is searched across all of time: single dated days ("on
-/// October 12", "last Monday"), future spans ("next week", "tonight", "this weekend"), ranges with
-/// two ends ("from March to May"), and a position inside anything but a named month or year ("the
-/// last week of the sprint"). `TemporalIntentTests` pins this list.
+/// October 12"), future spans ("next week", "tonight", "this weekend"), ranges with two ends ("from
+/// March to May"), and a position inside anything but a named month or year ("the last week of the
+/// sprint"). `TemporalIntentTests` pins this list. A calendar question reads ahead, through
+/// `AgendaIntent`, because a calendar is the one source that holds the future.
 public enum TemporalIntent {
     /// How far back "recently" reaches.
     ///
@@ -115,6 +116,7 @@ public enum TemporalIntent {
             // These two hold "last week" and "last year" as well, and mean something narrower.
             ?? partWindow(in: query, now: now, calendar: calendar)
             ?? relativeMonthWindow(in: query, now: now, calendar: calendar)
+            ?? lastWeekdayWindow(in: query, now: now, calendar: calendar)
             ?? fixedWindow(in: query, now: now, calendar: calendar)
             ?? rollingWindow(in: query, now: now, calendar: calendar)
             ?? agoWindow(in: query, now: now, calendar: calendar)
@@ -279,6 +281,21 @@ public enum TemporalIntent {
         return nil
     }
 
+    /// "last Tuesday", "this past Friday". The bug: neither had a reading, so "what did I do last
+    /// Tuesday" searched all of time and opened with a project's language.
+    private static func lastWeekdayWindow(in query: String, now: Date, calendar: Calendar) -> QueryTimeWindow? {
+        for match in query.matches(of: /\b(?:last|this\s+past)\s+(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b(?!\s+of\b)/.ignoresCase()) {
+            guard let weekday = weekdays[match.1.lowercased()] else { continue }
+            let start = previousWeekday(weekday, now: now, calendar: calendar)
+            let phrase = String(match.0)
+            return QueryTimeWindow(
+                start: start, end: shifted(.day, by: 1, from: start, in: calendar), phrase: phrase,
+                residualQuery: residual(of: query, removing: [phrase])
+            )
+        }
+        return nil
+    }
+
     // MARK: - Spelled-out spans
 
     private static let units: [(names: [String], component: Calendar.Component)] = [
@@ -291,11 +308,11 @@ public enum TemporalIntent {
         "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10, "twelve": 12,
     ]
 
-    private static func number(from text: String) -> Int? {
+    static func number(from text: String) -> Int? {
         Int(text) ?? numberWords[text]
     }
 
-    private static func unit(named text: String) -> Calendar.Component? {
+    static func unit(named text: String) -> Calendar.Component? {
         units.first(where: { $0.names.contains(text) })?.component
     }
 
@@ -343,14 +360,14 @@ public enum TemporalIntent {
 
     // MARK: - Since
 
-    private static let months: [String: Int] = [
+    static let months: [String: Int] = [
         "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6, "july": 7,
         "august": 8, "september": 9, "october": 10, "november": 11, "december": 12,
         "jan": 1, "feb": 2, "mar": 3, "apr": 4, "jun": 6, "jul": 7, "aug": 8, "sep": 9, "sept": 9,
         "oct": 10, "nov": 11, "dec": 12,
     ]
 
-    private static let weekdays: [String: Int] = [
+    static let weekdays: [String: Int] = [
         "sunday": 1, "monday": 2, "tuesday": 3, "wednesday": 4, "thursday": 5, "friday": 6, "saturday": 7,
     ]
 

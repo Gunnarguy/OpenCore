@@ -93,3 +93,19 @@ func savedChatsAreActuallyWritten() async throws {
     let turnFile = outcome.files.first { $0.name.hasPrefix("conversation_turn") }
     #expect(turnFile?.rows == 1)
 }
+
+@Test("deleted phone thread markers survive archival export without conversation IDs")
+func phoneTombstonesAreExportedWithoutThreadIdentity() async throws {
+    let store = try await temporaryStore()
+    let scope = CompanionHistoryScope(deviceID: UUID(), grantID: UUID(), domains: [.project, .publicRecord], selectedDomain: nil)
+    let id = scope.conversationID(for: UUID())
+    try await store.deleteConversation(id: id)
+    let directory = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("opencore-tombstone-export-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let outcome = try await Exporter(store: store).export(to: directory, format: .jsonl)
+    let text = try String(contentsOf: directory.appendingPathComponent("companion_thread_tombstone.jsonl"), encoding: .utf8)
+    #expect(text.contains(Store.companionTombstoneKey(id)))
+    #expect(!text.contains(id))
+    #expect(outcome.files.first { $0.name.hasPrefix("companion_thread_tombstone") }?.rows == 1)
+    #expect(!Store.derivedTables.contains("companion_thread_tombstone"))
+}

@@ -520,7 +520,7 @@ extension CoreObject {
             uri: row.string("o_uri"),
             authoredAt: row.date("o_authored_at"),
             ingestedAt: row.requireDate("o_ingested_at"),
-            domain: Domain(rawValue: row.requireString("o_domain")) ?? .project,
+            domain: Domain(rawValue: row.requireString("o_domain")) ?? .restricted,
             authority: Authority(rawValue: row.requireInt("o_authority")) ?? .thirdPartyRecord,
             metadata: metadata
         )

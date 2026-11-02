@@ -1,6 +1,7 @@
 import AppKit
 import CoreIngest
 import CoreModel
+import CorePresentation
 import CoreSearch
 import CoreStore
 import CoreTelemetry
@@ -22,6 +23,7 @@ struct SettingsView: View {
         case retrieval = "Retrieval & Graph"
         case sync = "Sync & Agents"
         case security = "Security, MCP & Data"
+        case phone = "iPhone Companion"
 
         var id: String { rawValue }
 
@@ -34,6 +36,7 @@ struct SettingsView: View {
             case .retrieval: return "slider.horizontal.3"
             case .sync: return "arrow.triangle.2.circlepath"
             case .security: return "lock.shield.fill"
+            case .phone: return "iphone"
             }
         }
 
@@ -46,6 +49,7 @@ struct SettingsView: View {
             case .retrieval: return Pastel.butter
             case .sync: return Pastel.peach
             case .security: return Pastel.rose
+            case .phone: return Pastel.aqua
             }
         }
     }
@@ -71,6 +75,8 @@ struct SettingsView: View {
                     SyncTab()
                 case .security:
                     SecurityMCPAndDataTab()
+                case .phone:
+                    CompanionSettingsView()
                 }
             }
             .padding(24)
@@ -500,7 +506,7 @@ private struct CommandCenterAndAITab: View {
                                 .openCorePastelBadge(Pastel.mint)
                             Text("Context: \(ComputerControlManager.shared.fmContextSize) tok")
                                 .openCorePastelBadge(Pastel.sky)
-                            Text(ComputerControlManager.shared.pccAvailable ? "PCC Available" : "100% On-Device")
+                            Text(ComputerControlManager.shared.pccAvailable ? "PCC Available" : "PCC Not Available")
                                 .openCorePastelBadge(Pastel.lavender)
                         }
                     }
@@ -517,6 +523,7 @@ private struct CommandCenterAndAITab: View {
 
 private struct HardwareAndUSBSettingsTab: View {
     @Environment(\.appModel) private var model
+    @Environment(\.openWindow) private var openWindow
     @Environment(\.appSettings) private var settings
     @ObservedObject private var usbManager = USBManager.shared
 
@@ -561,6 +568,7 @@ private struct HardwareAndUSBSettingsTab: View {
 
                         Button {
                             model.navigate(to: .hardwareUSB)
+                            openWindow(id: "main", value: "workspace")
                         } label: {
                             Label("Open Full USB & macOS 27 Hardware Suite (⌘4)", systemImage: "arrow.up.forward.app")
                                 .font(.caption.weight(.semibold))
@@ -616,6 +624,7 @@ private struct HardwareAndUSBSettingsTab: View {
 
 private struct AutomationAndControlSettingsTab: View {
     @Environment(\.appModel) private var model
+    @Environment(\.openWindow) private var openWindow
     @Environment(\.appSettings) private var settings
     @State private var ctrl = ComputerControlManager.shared
     @State private var isConfirmingLiveDefault = false
@@ -650,6 +659,7 @@ private struct AutomationAndControlSettingsTab: View {
                 Spacer()
                 Button {
                     model.navigate(to: .computerControl)
+                    openWindow(id: "main", value: "workspace")
                 } label: {
                     Label("Open Local Hub + Automation Studio (⌘5)", systemImage: "arrow.up.forward.app")
                         .font(.caption.weight(.bold))
@@ -895,6 +905,7 @@ private struct SyncTab: View {
 // MARK: - TAB 7: Security, Credentials, MCP Firewall & Data Export
 
 private struct SecurityMCPAndDataTab: View {
+    @State private var confirmingUnsafeMCP = false
     @Environment(\.appModel) private var model
     @Environment(\.appSettings) private var settings
     @State private var tokenField = ""
@@ -1015,8 +1026,23 @@ private struct SecurityMCPAndDataTab: View {
                     }
                 }
 
-                Toggle("Allow external MCP callers to reach medical, financial, and relationship domains (--unsafe-expose-sensitive)", isOn: $settings.mcpExposeSensitiveDomains)
+                Text(settings.mcpExposureSummary)
                     .font(.callout)
+                if let message = settings.mcpExposureWriteResult?.failureDescription {
+                    Text(message).font(.caption).foregroundStyle(Pastel.rose)
+                }
+                Text("Reconnect or restart MCP clients after saving. Existing servers keep their startup permissions. Remove any explicit --unsafe-expose-sensitive argument when blocking access; that argument overrides the shared setting.")
+                    .font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    Button("Block sensitive MCP access") { settings.mcpExposeSensitiveDomains = false }
+                    Button("Configure unsafe MCP access…") { confirmingUnsafeMCP = true }
+                }
+                .confirmationDialog("Expose sensitive and restricted memory to models?", isPresented: $confirmingUnsafeMCP, titleVisibility: .visible) {
+                    Button("Enable unsafe MCP startup access", role: .destructive) { settings.mcpExposeSensitiveDomains = true }
+                    Button("Cancel", role: .cancel) { }
+                } message: {
+                    Text("This opens medical, financial, relationship and restricted mixed memory to MCP callers. A model is not you. The iPhone companion uses a separate owner channel and does not need this setting.")
+                }
 
                 MCPConfigSnippet()
             }
@@ -1123,25 +1149,18 @@ private struct StatusLine: View {
 }
 
 private struct MCPConfigSnippet: View {
+    @Environment(\.appModel) private var model
     @Environment(\.appSettings) private var settings
     @State private var copied = false
 
-    private var snippet: String {
-        """
-        {
-          "mcpServers": {
-            "opencore": {
-              "command": "\(FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/opencore").path)",
-              "args": ["mcp"\(settings.mcpExposeSensitiveDomains ? ", \"--unsafe-expose-sensitive\"" : "")]
-            }
-          }
-        }
-        """
+    private var snippet: String? {
+        AppSettings.mcpClientConfiguration(command: FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/bin/opencore").path)
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(snippet)
+            Text(snippet ?? "Client configuration could not be generated.")
                 .font(.caption.monospaced())
                 .foregroundStyle(Pastel.ice)
                 .textSelection(.enabled)
@@ -1150,14 +1169,27 @@ private struct MCPConfigSnippet: View {
                 .background(Color.black.opacity(0.35), in: .rect(cornerRadius: 8))
             HStack {
                 Button(copied ? "Copied JSON" : "Copy MCP Config") {
+                    guard settings.revalidateMCPStartupConfirmation(currentSharedSetting: SharedConfig.readMCPExposure()),
+                          let snippet else {
+                        if let message = settings.mcpExposureWriteResult?.failureDescription {
+                            model.recordAuditFailure("MCP client configuration: " + message)
+                        }
+                        return
+                    }
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(snippet, forType: .string)
                     copied = true
                 }
+                .disabled(settings.confirmedMCPExposure == nil || snippet == nil)
                 .controlSize(.small)
                 .openCoreGlassButton(tint: Pastel.sky)
                 Spacer()
             }
+            Text(settings.confirmedMCPExposure == nil
+                 ? "Confirm the shared startup preference before copying. Retry a failed save. This example contains no unsafe override."
+                 : "This example uses the saved shared startup preference and contains no unsafe override.")
+                .font(.caption).foregroundStyle(.secondary)
         }
+        .task { settings.observeInitialMCPStartupConfiguration(SharedConfig.readMCPExposure()) }
     }
 }

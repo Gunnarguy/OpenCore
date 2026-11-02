@@ -4,6 +4,7 @@ import CoreIngest
 import CoreModel
 import CoreReason
 import CoreStore
+import CoreTelemetry
 import Observation
 import Speech
 import SwiftUI
@@ -25,7 +26,7 @@ final class JarvisController: NSObject, AVSpeechSynthesizerDelegate {
     var isGeneratingBriefing = false
     var briefingHeadline = ""
     var briefingPoints: [BriefingItem] = []
-    var briefingBrief: Conversation.GroundedBrief?
+    var briefingSummary: String?
     var lastBriefingAt: Date?
 
     // Voice Input & Neural Readback state
@@ -76,153 +77,70 @@ final class JarvisController: NSObject, AVSpeechSynthesizerDelegate {
     func generateMorningBriefing(using model: AppModel) async {
         guard !isGeneratingBriefing else { return }
         isGeneratingBriefing = true
+        briefingSummary = nil
+        briefingHeadline = "Refreshing operator snapshots…"
+        briefingPoints = []
+        lastBriefingAt = nil
         defer { isGeneratingBriefing = false }
 
         refreshTelemetry()
-        if model.fleetCards.isEmpty {
-            await model.refreshFleetStatus()
-        }
-        if model.machineHealth == nil {
-            await model.refreshMachineHealth(checkTailnet: true)
-        }
-
+        await model.refreshFleetStatus()
+        await model.refreshMachineHealth(checkTailnet: true)
         let fleet = model.fleetCards
-        let dirtyRepos = fleet.filter { $0.dirty > 0 }
-        let staleRepos = fleet.filter { $0.isHandoffStale }
-        let currentRepos = fleet.filter { $0.isHandoffCurrent }
-
+        let measured = fleet.filter(\.gitStatusMeasured)
+        let dirty = measured.filter { $0.dirty > 0 }
         var items: [BriefingItem] = []
+        let captured = model.fleetSnapshot.lastCapture
+        let attempt = model.fleetSnapshot.lastAttempt
+        var fleetDetail = captured.map {
+            "Inventory collection: \($0.attemptedAt.formatted()) through \($0.finishedAt.formatted()). Individual row refreshes may be newer."
+        } ?? "No usable fleet capture."
+        if let captured, !captured.isComplete {
+            fleetDetail += " Retained capture is partial: " + captured.issues.joined(separator: " ")
+        }
+        if let attempt, !attempt.issues.isEmpty {
+            fleetDetail += " Latest attempt \(attempt.finishedAt.formatted()): \(attempt.issues.joined(separator: " "))"
+        }
+        if model.isLoadingFleet { fleetDetail += " A collection is still running; these cards are from the earlier capture." }
+        fleetDetail += " \(fleet.count - measured.count) cards have no measured Git status."
+        items.append(BriefingItem(category: "FLEET SNAPSHOT", symbol: "folder.fill.badge.gearshape",
+            tint: captured?.isComplete == true && attempt?.isComplete == true && !model.isLoadingFleet ? .cyan : .orange,
+            title: "\(fleet.count) repository cards · \(dirty.count) dirty among \(measured.count) measured trees",
+            detail: fleetDetail, actionLabel: "Open fleet", repoName: nil, sectionTarget: .home))
 
-        // 1. Fleet pulse (100% git + STATE.md measured)
-        let fleetSummary = "\(fleet.count) repos: \(currentRepos.count) handoff current · \(staleRepos.count) git ahead · \(dirtyRepos.count) dirty tree"
-        items.append(BriefingItem(
-            category: "FLEET & HANDOFF PULSE",
-            symbol: "folder.fill.badge.gearshape",
-            tint: staleRepos.isEmpty && dirtyRepos.isEmpty ? .green : .cyan,
-            title: fleetSummary,
-            detail: dirtyRepos.isEmpty
-                ? "All repository working trees are clean across ~/Documents/GitHub & ~/Claude/Projects."
-                : "Active uncommitted changes in: \(dirtyRepos.map { "\($0.name) (\($0.dirty))" }.joined(separator: ", ")).",
-            actionLabel: staleRepos.first.map { "Inspect \($0.name)" },
-            repoName: staleRepos.first?.name ?? dirtyRepos.first?.name,
-            sectionTarget: nil
-        ))
-
-        // 2. Cross-Agent Unification (Claude Code · Codex · Antigravity)
         if let eco = model.agentEcosystem {
-            items.append(BriefingItem(
-                category: "CLAUDE · CODEX · AGY UNIFIED",
-                symbol: "point.3.filled.connected.trianglepath.dotted",
-                tint: .purple,
-                title: "\(eco.skillsInSyncCount) shared skills · \(eco.codexRolloutSummaryCount) Codex rollouts · \(eco.claudeMemoryFileCount) Claude memories",
-                detail: "Codex MEMORY.md (\(eco.codexMemoryTaskSections) task sections) + Claude (\(eco.claudeMemoryProjectCount) projects) + AGY kit-bridge active.",
-                actionLabel: "Open Codex-Memories",
-                repoName: "Codex-Memories",
-                sectionTarget: nil
-            ))
-        } else {
-            items.append(BriefingItem(
-                category: "FACT & PASSAGE STORE",
-                symbol: "checkmark.seal.fill",
-                tint: .green,
-                title: "\(model.objectCount.formatted()) floor objects · \(model.chunkCount.formatted()) searchable passages",
-                detail: "Every passage and claim is linked to its immutable source file byte offset.",
-                actionLabel: "Inspect Entities",
-                repoName: nil,
-                sectionTarget: .entities
-            ))
+            let details = eco.readIssues.isEmpty
+                ? "\(eco.skillsInSyncCount) same-source skill folders · \(eco.codexRolloutSummaryCount) rollout files · \(eco.claudeMemoryFileCount) memory files."
+                : "Inventory incomplete; aggregate counts withheld. \(eco.readIssues.joined(separator: " "))"
+            items.append(BriefingItem(category: "AGENT CONFIGURATION INVENTORY", symbol: "point.3.filled.connected.trianglepath.dotted",
+                tint: eco.readIssues.isEmpty ? .purple : .orange, title: "Inventory checked \(eco.checkedAt.formatted())",
+                detail: details + " File presence and shared folders do not verify provider activation or runtime parity.",
+                actionLabel: nil, repoName: nil, sectionTarget: nil))
         }
 
-        // 3. Hardware, USB & Tailnet Watchtower
         if let health = model.machineHealth {
-            let hw = HardwareInspectorManager.shared
-            let reachablePeers = health.tailnetPeers.filter(\.reachable).map(\.alias)
-            let peerText = reachablePeers.isEmpty ? "local only" : reachablePeers.joined(separator: ", ")
-            let hasHazard = health.isDiskSpaceLow(thresholdGiB: AppSettings.shared.lowDiskWarningThresholdGiB) || health.dataVolumeFreeGiB == nil || health.bootedSimulators.count > 1 || !health.icloudConflictFiles.isEmpty || health.simulatorCheckError != nil || health.numberedFileScanError != nil
-            items.append(BriefingItem(
-                category: "MAC, USB & TAILNET",
-                symbol: hasHazard ? "exclamationmark.shield.fill" : "cable.connector.horizontal",
-                tint: hasHazard ? .orange : .green,
-                title: "\(health.freeSpaceSummary) · \(hw.devices.count) USB dev · \(health.simulatorSummary) · Tailnet: \(peerText)",
-                detail: health.numberedFileScanError ?? (health.icloudConflictFiles.isEmpty
-                    ? "0 numbered-file candidates · \(hw.mountedExternalVolumes.count) external volume(s) mounted."
-                    : "\(health.icloudConflictFiles.count) possible duplicate files to review; filenames do not prove an iCloud conflict."),
-                actionLabel: "USB Topology (⌘4)",
-                repoName: nil,
-                sectionTarget: .hardwareUSB
-            ))
+            let peers = health.tailnetPeers.filter { $0.role != "Local" && $0.reachable }.map(\.alias)
+            let peerText = OperatorSnapshotFormatting.peers(requested: health.tailnetProbeRequested, reachable: peers)
+            var details = ["Checks attempted through \(health.checkedAt.formatted()).", peerText]
+            if health.dataVolumeFreeGiB == nil { details.append("Disk measurement unavailable.") }
+            if let issue = health.simulatorCheckError { details.append(issue) }
+            details.append(OperatorSnapshotFormatting.numberedFiles(count: health.icloudConflictFiles.count,
+                reachedLimit: health.numberedFileScanReachedLimit, error: health.numberedFileScanError))
+            if model.isLoadingMachineHealth { details.append("Another collection is still in progress.") }
+            items.append(BriefingItem(category: "MAC & TAILNET SNAPSHOT", symbol: "desktopcomputer",
+                tint: health.isDiskSpaceLow(thresholdGiB: AppSettings.shared.lowDiskWarningThresholdGiB) || health.dataVolumeFreeGiB == nil || health.simulatorCheckError != nil || health.numberedFileScanError != nil ? .orange : .cyan,
+                title: "\(health.freeSpaceSummary) · \(health.simulatorSummary)", detail: details.joined(separator: " "),
+                actionLabel: "Open Mac checks", repoName: nil, sectionTarget: .home))
         }
-
-        // 4. Recent belief revisions (last 7 days)
-        var recentBeliefLines: [String] = []
-        if let store = model.store,
-           let recentBeliefs = try? await store.beliefsDecided(since: Date().addingTimeInterval(-7 * 86_400)) {
-            for belief in recentBeliefs.prefix(6) {
-                if let claim = try? await store.claim(belief.claimID),
-                   !claim.domain.isSensitive {
-                    let subj = (try? await model.name(of: claim.subject, in: store)) ?? claim.subject.value
-                    let val = (try? await model.value(of: claim, in: store)) ?? "unknown"
-                    recentBeliefLines.append("\(subj) \(claim.predicate): \(val) (\(belief.reason))")
-                }
-            }
-        }
-
+        items.append(BriefingItem(category: "STORED HISTORY", symbol: "books.vertical.fill", tint: .green,
+            title: "Inspect beliefs and their source records",
+            detail: "Operator snapshots are not stored evidence. Belief history and cited answers remain in the evidence workspace.",
+            actionLabel: "Open beliefs", repoName: nil, sectionTarget: .beliefs))
         briefingPoints = items
-        briefingHeadline = "Good \(Self.timeOfDayGreeting()), Gunnar. \(fleet.count) repos online, \(model.objectCount.formatted()) floor objects indexed, Claude + Codex + Antigravity unified."
-        lastBriefingAt = Date()
-
-        // Build numbered sources for `/usr/bin/fm` grounded executive synthesis
-        var sources: [GroundingSource] = []
-        let syntheticID = ObjectID.derived(from: "jarvis", "morning-briefing")
-        if !fleet.isEmpty {
-            let topRepoLines = fleet.prefix(8).map { card in
-                var line = "\(card.name) (\(card.branch) @ \(card.head), handoff \(card.stateStatus), dirty \(card.dirty))"
-                if let obj = card.primaryObjective { line += " · Goal: \(obj)" }
-                if let nxt = card.primaryNextAction { line += " · Next: \(nxt)" }
-                return line
-            }.joined(separator: "\n")
-            sources.append(GroundingSource(
-                index: 1,
-                title: "Live Fleet Status (fleet.py)",
-                text: topRepoLines,
-                objectID: syntheticID,
-                authority: .authoredArtifact,
-                uri: nil
-            ))
-        }
-        if !recentBeliefLines.isEmpty {
-            sources.append(GroundingSource(
-                index: sources.count + 1,
-                title: "Recent Belief Revisions (7d)",
-                text: recentBeliefLines.joined(separator: "\n"),
-                objectID: syntheticID,
-                authority: .authoredArtifact,
-                uri: nil
-            ))
-        }
-        if let health = model.machineHealth {
-            let healthText = "Data volume: \(health.freeSpaceSummary) (\(health.dataVolumeUsedPercent.map { "\($0)% used" } ?? "usage not measured")). \(health.simulatorSummary). \(health.claudeMemoryFileCount) Claude memory files indexed."
-            sources.append(GroundingSource(
-                index: sources.count + 1,
-                title: "Mac & Tailnet Health Snapshot",
-                text: healthText,
-                objectID: syntheticID,
-                authority: .directStatement,
-                uri: nil
-            ))
-        }
-
-        if !sources.isEmpty {
-            briefingBrief = await Conversation.synthesizeGroundedBrief(
-                question: "Give a concise executive briefing on current repository objectives, handoff hygiene, and machine health.",
-                sources: sources
-            )
-        }
-
-        if autoSpeakAnswers || AppSettings.shared.jarvisAutoSpeakBriefings {
-            let spoken = briefingBrief?.text ?? briefingHeadline
-            speak(spoken)
-        }
+        briefingHeadline = "Good \(Self.timeOfDayGreeting()). \(fleet.count) repository cards available."
+        briefingSummary = items.map { "\($0.category): \($0.title). \($0.detail)" }.joined(separator: "\n\n")
+        lastBriefingAt = Date() // Presentation time only; each snapshot above carries its own capture/attempt time.
+        if autoSpeakAnswers || AppSettings.shared.jarvisAutoSpeakBriefings { speak(briefingSummary ?? briefingHeadline) }
     }
 
     private static func timeOfDayGreeting() -> String {
@@ -496,7 +414,7 @@ struct JarvisCommandDeckCard: View {
                 .controlSize(.small)
                 .openCoreGlassButton(prominent: true)
                 .disabled(jarvis.isGeneratingBriefing)
-                .help("Synthesize a cited executive briefing across all repos, Claude/Codex/Antigravity memories, and Mac hardware")
+                .help("Refresh repository and Mac observations, with capture times and collection limits")
 
                 Button {
                     jarvis.toggleVoiceListening { spokenQuery in
@@ -525,9 +443,9 @@ struct JarvisCommandDeckCard: View {
                     }
                     .controlSize(.small)
                     .openCoreGlassButton()
-                } else if let brief = jarvis.briefingBrief {
+                } else if let summary = jarvis.briefingSummary {
                     Button {
-                        jarvis.speak(brief.text)
+                        jarvis.speak(summary)
                     } label: {
                         Label("Read Aloud", systemImage: "speaker.wave.2.fill")
                             .font(.caption)
@@ -551,7 +469,7 @@ struct JarvisCommandDeckCard: View {
             }
 
             // Row 2: Single-line subtitle
-            Text("On-device executive synthesis across all repositories, unified Claude/Codex/Antigravity memories, voice dictation, and Vision OCR.")
+            Text("Repository and Mac snapshots, agent configuration inventory, voice dictation and Vision OCR.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
@@ -571,14 +489,13 @@ struct JarvisCommandDeckCard: View {
             if !jarvis.briefingPoints.isEmpty {
                 Divider()
                 VStack(alignment: .leading, spacing: 10) {
-                    if let brief = jarvis.briefingBrief {
-                        let groundedCount = brief.verdicts.filter(\.isGrounded).count
+                    if let summary = jarvis.briefingSummary {
                         VStack(alignment: .leading, spacing: 6) {
                             HStack(spacing: 8) {
-                                Label("EXECUTIVE BRIEFING SYNTHESIS", systemImage: "cpu.fill")
+                                Label("OPERATOR SNAPSHOT SUMMARY", systemImage: "list.bullet.rectangle")
                                     .font(.system(size: 10, weight: .bold, design: .monospaced))
                                     .foregroundStyle(Pastel.mint)
-                                Text("[\(brief.modelName) · \(groundedCount)/\(brief.verdicts.count) sentences grounded · on-device synthesis]")
+                                Text("Deterministic observations · not stored evidence")
                                     .font(.caption2.monospaced())
                                     .foregroundStyle(.secondary)
                                 Spacer()
@@ -586,7 +503,7 @@ struct JarvisCommandDeckCard: View {
                                     if jarvis.isSpeaking {
                                         jarvis.stopSpeaking()
                                     } else {
-                                        jarvis.speak(brief.text)
+                                        jarvis.speak(summary)
                                     }
                                 } label: {
                                     Label(jarvis.isSpeaking ? "Stop Audio" : "Speak Briefing", systemImage: jarvis.isSpeaking ? "stop.fill" : "speaker.wave.2.fill")
@@ -595,7 +512,7 @@ struct JarvisCommandDeckCard: View {
                                 .controlSize(.mini)
                                 .openCoreGlassButton()
                             }
-                            Text(brief.text)
+                            Text(summary)
                                 .font(.callout)
                                 .textSelection(.enabled)
                         }
@@ -633,7 +550,7 @@ struct JarvisCommandDeckCard: View {
                                 Text(item.detail)
                                     .font(.caption2)
                                     .foregroundStyle(.secondary)
-                                    .lineLimit(2)
+                                    .fixedSize(horizontal: false, vertical: true)
                             }
                             .padding(10)
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -809,18 +726,18 @@ struct JarvisHUDView: View {
     private var executiveBriefingSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Label("Executive Briefing (Fleet + Belief Graph + Mac Watchtower)", systemImage: "sparkles")
+                Label("Operator Briefing (Fleet + Mac Snapshots)", systemImage: "sparkles")
                     .font(.subheadline.weight(.semibold))
                 if jarvis.isGeneratingBriefing {
                     ProgressView().controlSize(.small)
                 }
                 Spacer()
-                if let brief = jarvis.briefingBrief {
+                if let summary = jarvis.briefingSummary {
                     Button {
                         if jarvis.isSpeaking {
                             jarvis.stopSpeaking()
                         } else {
-                            jarvis.speak(brief.text)
+                            jarvis.speak(summary)
                         }
                     } label: {
                         Label(jarvis.isSpeaking ? "Stop Speaking" : "Read Briefing Aloud", systemImage: jarvis.isSpeaking ? "stop.fill" : "speaker.wave.2.fill")
@@ -846,8 +763,8 @@ struct JarvisHUDView: View {
                     .foregroundStyle(Color.accentColor)
             }
 
-            if let brief = jarvis.briefingBrief {
-                Text(brief.text)
+            if let summary = jarvis.briefingSummary {
+                Text(summary)
                     .font(.callout)
                     .textSelection(.enabled)
                     .padding(10)

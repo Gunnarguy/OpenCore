@@ -1,9 +1,11 @@
 import CoreGraph
 import CoreIngest
 import CoreModel
+import CorePresentation
 import CoreReason
 import CoreSearch
 import CoreStore
+import CoreTelemetry
 import Foundation
 import Observation
 import SwiftUI
@@ -46,6 +48,7 @@ final class AppModel {
     private(set) var store: Store?
     /// Owned here so there is one instance, injected into the environment by OpenCoreApp.
     let settings = AppSettings.shared
+    let companionHost = CompanionHostController()
 
     /// What is happening right now. `.failed` is recorded in `failure` as it is set, because
     /// this is one slot that every operation writes: `refresh()` set `.failed` and its caller
@@ -84,6 +87,11 @@ final class AppModel {
     }
 
     func dismissFailure() { failure = nil }
+    func recordAuditFailure(_ message: String) {
+        guard failure?.message.contains(message) != true else { return }
+        let prior = failure.map { "\n" + $0.message } ?? ""
+        failure = AppFailure(message: message + prior, at: Date())
+    }
 
     /// Incremented whenever the store opens or any sync, rebuild, or correction finishes.
     /// Views key their `.task(id:)` on this counter so no screen stays blank on launch or stale
@@ -95,6 +103,10 @@ final class AppModel {
     var activeEntityID: EntityID?
     var pendingEntityID: EntityID?
     var pendingEntityName: String?
+    /// Navigation history owns the requested subject even when resolution fails.
+    var entityNavigationTarget: EntityNavigationRead.Target?
+    /// Consuming pending fields must not restart the view task and select an unrelated default.
+    var entityNavigationRevision = 0
     var pendingQuestion: String?
     var pendingPassageQuery: String?
     var showingQuickJump = false
@@ -257,10 +269,17 @@ final class AppModel {
     // MARK: - Cross-screen Navigation
 
     private var currentNavigationStop: NavigationStop {
-        NavigationStop(
+        let entityID: EntityID?
+        let entityName: String?
+        switch entityNavigationTarget {
+        case .id(let id): entityID = id; entityName = nil
+        case .name(let name): entityID = nil; entityName = name
+        case nil: entityID = activeEntityID; entityName = nil
+        }
+        return NavigationStop(
             section: selectedSection,
-            entityID: selectedSection == .entities ? (activeEntityID ?? pendingEntityID) : nil,
-            entityName: selectedSection == .entities ? pendingEntityName : nil,
+            entityID: selectedSection == .entities ? entityID : nil,
+            entityName: selectedSection == .entities ? entityName : nil,
             subject: knowledgeSubject(for: selectedSection)
         )
     }
@@ -303,31 +322,42 @@ final class AppModel {
     private func applyNavigationStop(_ stop: NavigationStop) {
         if stop.section == .claims { claimsSubject = stop.subject }
         if stop.section == .beliefs { beliefsSubject = stop.subject }
+        pendingEntityID = nil
+        pendingEntityName = nil
+        entityNavigationTarget = nil
+        entityNavigationRevision += 1
         if let entityID = stop.entityID {
+            entityNavigationTarget = .id(entityID)
             pendingEntityID = entityID
             pendingEntityName = nil
         } else if let entityName = stop.entityName {
+            entityNavigationTarget = .name(entityName)
             pendingEntityName = entityName
             pendingEntityID = nil
-            PendingEntity.shared.name = entityName
         }
         selectedSection = stop.section
     }
 
     func openEntity(id: EntityID) {
-        if selectedSection == .entities, activeEntityID == id { return }
-        pushHistoryBeforeJumping()
+        // Even an already active entity may currently be behind a nested workspace tab.
+        // Queue a real read so every explicit jump can present its dossier and report its result.
+        if selectedSection != .entities || activeEntityID != id || pendingEntityID != nil || pendingEntityName != nil {
+            pushHistoryBeforeJumping()
+        }
+        entityNavigationTarget = .id(id)
         pendingEntityID = id
         pendingEntityName = nil
+        entityNavigationRevision += 1
         selectedSection = .entities
     }
 
     func openEntity(named name: String) {
         pushHistoryBeforeJumping()
+        entityNavigationTarget = .name(name)
         pendingEntityName = name
         pendingEntityID = nil
+        entityNavigationRevision += 1
         selectedSection = .entities
-        PendingEntity.shared.name = name
     }
 
     func askInChat(_ question: String) {
@@ -580,6 +610,7 @@ final class AppModel {
             Task { await refreshMachineHealth() }
             Task { await refreshFleetStatus() }
             startScheduledSync()
+            companionHost.resume(store: opened, settings: settings)
         } catch {
             state = .failed("\(error)")
         }
@@ -687,7 +718,8 @@ final class AppModel {
     var embeddedCount = 0
     var embeddingModel: String?
 
-    var fleetCards: [FleetRepoCard] = []
+    var fleetSnapshot = OperatorSnapshotCache<[FleetRepoCard]>()
+    var fleetCards: [FleetRepoCard] { fleetSnapshot.value ?? [] }
     var isLoadingFleet = false
     var machineHealth: MachineHealthSnapshot?
     var agentEcosystem: AgentEcosystemSnapshot?
@@ -703,21 +735,20 @@ final class AppModel {
         async let cardsTask = OperatorConsoleService.collectFleet()
         async let ecoTask = OperatorConsoleService.collectAgentEcosystem()
         let (cards, eco) = await (cardsTask, ecoTask)
-        if !cards.isEmpty {
-            fleetCards = cards
+        fleetSnapshot.record(cards)
+        if !cards.issues.isEmpty, failure == nil {
+            failure = AppFailure(message: cards.issues.joined(separator: " "), at: cards.finishedAt)
         }
-        agentEcosystem = eco
+        if agentEcosystem.map({ eco.checkedOrder >= $0.checkedOrder }) ?? true { agentEcosystem = eco }
     }
 
     func refreshSingleRepo(_ card: FleetRepoCard) async {
-        guard let updated = await OperatorConsoleService.collectSingleRepo(
-            root: card.root,
-            existingName: card.name,
-            existingDesc: card.desc
-        ) else { return }
-        if let idx = fleetCards.firstIndex(where: { $0.name == card.name }) {
-            fleetCards[idx] = updated
-        }
+        let read = await OperatorConsoleService.collectSingleRepo(root: card.root, existingName: card.name, existingDesc: card.desc)
+        var cards = fleetCards
+        if let updated = read.value, let idx = cards.firstIndex(where: { $0.name == card.name }) { cards[idx] = updated }
+        let issues = read.issues.map { "Repository refresh: " + $0 }
+        guard fleetSnapshot.amendCapturedValue(cards, rowKey: card.id, order: read.order, issues: issues) else { return }
+        if !issues.isEmpty, failure == nil { failure = AppFailure(message: issues.joined(separator: " "), at: read.finishedAt) }
     }
 
     func refreshMachineHealth(checkTailnet: Bool = true) async {
@@ -728,7 +759,7 @@ final class AppModel {
         async let ecoTask = OperatorConsoleService.collectAgentEcosystem()
         let (health, eco) = await (healthTask, ecoTask)
         machineHealth = health
-        agentEcosystem = eco
+        if agentEcosystem.map({ eco.checkedOrder >= $0.checkedOrder }) ?? true { agentEcosystem = eco }
     }
 
     func auditRepository(_ card: FleetRepoCard) async {
@@ -1098,10 +1129,10 @@ final class AppModel {
     }
 
     /// Deterministic claim & counter-evidence query for ChatView (`persistReceipt: false`) and MenuBarExtra (`persistReceipt: true`).
-    func reasonAnswer(_ query: String, persistReceipt: Bool = true) async -> Answer? {
+    func reasonAnswer(_ query: String, persistReceipt: Bool = true, ownerDomain: Domain? = nil, retrievalQuery: String? = nil) async -> Answer? {
         guard let store, !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         let reasoner = Reasoner(store: store, embedder: try? NLEmbeddingProvider(), tuning: settings.tuning)
-        return try? await reasoner.answer(query, persistReceipt: persistReceipt)
+        return try? await reasoner.answer(query, persistReceipt: persistReceipt, ownerDomain: ownerDomain, retrievalQuery: retrievalQuery)
     }
 
     func loadTrace(for receipt: Receipt) async {

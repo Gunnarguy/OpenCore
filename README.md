@@ -268,16 +268,30 @@ building when a package moves is a personal knowledge store you lose. Developer 
 matter: the app project needs `xcodegen`, and the operator screens talk to BetterDisplay and a local
 automation service when they are present.
 
+## iPhone companion
+
+[source] `Apps/OpenCorePhone` is a native iPhone companion, with coordinated Mac and iPhone icons.
+The Mac generates chat and evidence answers and serves read-only knowledge views over an opt-in,
+paired Tailscale connection. Pair in Mac Settings → iPhone Companion, then unlock on the phone
+with Face ID. The phone keeps no second store. Build and review steps are in `Docs/ai/RUNBOOK.md`.
+
 ## What is not true yet
 
 Stated plainly, because the whole project is an argument for doing that:
+
+- **The iPhone phase is not accepted yet.** [source] Native knowledge views and a revocable owner
+  channel are implemented. Physical Face ID, real-tailnet pairing, sleeping-Mac behavior and model
+  answer parity remain unverified. Sync, corrections, saved chats, rebuild actions and operator
+  views/control are later phases. The graph is an entity/claim dossier browser, without the Mac's
+  spatial visualization. This is not yet the complete all-surface fidelity goal.
 
 - **Three pieces of work are open.** Home has code in the tree that has not had its review.
   Hardening is partly in the tree and unreviewed. The WWDC26 currency pass has not been done.
   Rebuild has been reviewed and proved on a copy, and has never been applied to the live store.
   That stays the owner's decision.
-- **The app has not been launched with the latest work.** It builds. Nobody has seen the new Home,
-  Maintenance or Sources screens, and scheduled sync and notification delivery have never run.
+- **The latest Mac companion settings have not been run.** [source] The installed baseline ran a
+  scheduled sync on 2026-10-31. Owner screen review, the new pairing screen and notification delivery
+  remain unverified.
 - **Display connection attribution is incomplete.** The display inventory sees current screens
   and modes, but does not establish the physical HDMI/DisplayPort socket, dock, cable or panel
   maximum. Descriptor and BetterDisplay link reports can reflect overrides/adapters; configured
@@ -328,9 +342,11 @@ Stated plainly, because the whole project is an argument for doing that:
   no longer happens, but the damage stays until a rebuild. On 2026-10-31 it had left 9 current claims
   with nothing supporting them, including both sides of each open contradiction, and an answer drops
   a claim with no support. On a copy a rebuild takes that to 0.
-- **Personal data can't be asked about yet.** Notes, calendar and reminders are stored, and `personal`
-  stays closed to local ask as well as to MCP. "Who contributed to X" shows nobody, because every
-  person entity is `personal`. Saying "my journal" does not open it.
+- **Personal data can be asked about only as a calendar or a list.** [test] Calendar and reminders
+  answer directly, for the owner only: "what's on my calendar tomorrow", "what's overdue", "what's
+  on my grocery list". Those answers come from dates and flags, so they link no evidence rows, and an
+  event or reminder deleted in Apple's app stays in the store. Apple Notes holds nothing until its first
+  real read works. "Who contributed to X" shows nobody, because every person entity is `personal`.
 - **A repository's archive flag has no history of its own.** Archiving changes metadata and not the
   record's text, so no earlier version is kept, and a rebuild reads only the current flag. GitHub
   gives no archive date either, so `archived` is dated by the last push, which is a floor on when it

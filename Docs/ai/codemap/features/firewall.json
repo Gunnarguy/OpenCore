@@ -2,16 +2,17 @@
   "schema": "codemap/1",
   "id": "firewall",
   "name": "Domain firewall",
-  "aliases": ["AdmissionPolicy", "domains", "admission", "blocked", "personal", "medical", "external caller", "isClaimAdmitted"],
+  "aliases": ["AdmissionPolicy", "domains", "admission", "blocked", "personal", "medical", "external caller", "ClaimAdmission", "ownerClaimAdmission"],
   "purpose": "Decides which domains a question may read, ahead of ranking, with MCP callers re-based and sensitive domains closed.",
-  "revision": "e801208",
-  "verified_on": "2026-10-31",
+  "revision": "08f4e80",
+  "verified_on": "2026-11-01",
   "entry_points": ["AdmissionPolicy"],
   "files": [
-    {"path": "Sources/CoreSearch/AdmissionPolicy.swift", "role": "primary", "blob": "503f9bdb16fc108b773133197dcf8f7682a9bfdf"},
+    {"path": "Sources/CoreSearch/AdmissionPolicy.swift", "role": "primary", "blob": "01d6c6d761272faf1394c2db1da534f3d77911d1"},
     {"path": "Sources/CoreModel/Domain.swift", "role": "primary", "blob": "594ae34c757216236706d71b8579989e4add58dd"},
-    {"path": "Tests/CoreMCPTests/DomainFirewallMCPTests.swift", "role": "test", "blob": "c6c724c6a741ddfa772dfe7f987d98f94de86c80"},
-    {"path": "Tests/CoreSearchTests/RestrictedDomainTests.swift", "role": "test", "blob": "9ef59f84d7ec13ad25768eb3acc548c82ec8893a"}
+    {"path": "Tests/CoreMCPTests/DomainFirewallMCPTests.swift", "role": "test", "blob": "5cd92fe12c97ec78cbd1242c996349ce40b83192"},
+    {"path": "Tests/CoreSearchTests/RestrictedDomainTests.swift", "role": "test", "blob": "2eaa7533a370e3afd74c11d30c21eaa0a8733641"},
+    {"path": "Sources/CoreSearch/ClaimAdmission.swift", "role": "primary", "blob": "07ce57d3d116e0abd96df668274c4348fb6610b9"}
   ],
   "nodes": [
     {"id": "AdmissionPolicy", "kind": "service", "path": "Sources/CoreSearch/AdmissionPolicy.swift", "line": 10, "match": "public struct AdmissionPolicy: Sendable {", "status": "VERIFIED", "note": "Inference is not consent."},
@@ -20,15 +21,18 @@
   ],
   "edges": [],
   "docs": [],
-  "unknowns": ["There are two isClaimAdmitted functions, in Reasoner and MCPServer. Unifying them is an open hardening item.", "`personal` is not sensitive, so 'journal' falls to project: opening it for the local owner is brief item 7."],
+  "unknowns": ["`personal` is not sensitive, so 'journal' falls to project: opening it for the local owner is brief item 7."],
   "related": ["answers", "mcp-server"],
   "derived": {
     "generated_by": "codemap 1.1.0 derive: declarations, type references and test mentions; edges are INFERRED",
     "nodes": [
-      {"id": "Domain", "kind": "model", "path": "Sources/CoreModel/Domain.swift", "line": 8, "match": "public enum Domain: String, Sendable, Codable, CaseIterable {", "status": "VERIFIED"}
+      {"id": "Domain", "kind": "model", "path": "Sources/CoreModel/Domain.swift", "line": 8, "match": "public enum Domain: String, Sendable, Codable, CaseIterable {", "status": "VERIFIED"},
+      {"id": "ClaimAdmission", "kind": "model", "path": "Sources/CoreSearch/ClaimAdmission.swift", "line": 5, "match": "public enum ClaimAdmission {", "status": "VERIFIED"}
     ],
     "edges": [
-      {"from": "AdmissionPolicy", "type": "depends_on", "to": "Domain", "status": "INFERRED", "evidence": [{"path": "Sources/CoreSearch/AdmissionPolicy.swift", "line": 11, "match": "public let queryDomain: Domain"}]}
+      {"from": "AdmissionPolicy", "type": "depends_on", "to": "Domain", "status": "INFERRED", "evidence": [{"path": "Sources/CoreSearch/AdmissionPolicy.swift", "line": 11, "match": "public let queryDomain: Domain"}]},
+      {"from": "ClaimAdmission", "type": "depends_on", "to": "AdmissionPolicy", "status": "INFERRED", "evidence": [{"path": "Sources/CoreSearch/ClaimAdmission.swift", "line": 6, "match": "public static func admits(_ claim: CoreClaim, policy: AdmissionPolicy, store: Store) async throws -> Bool {"}]},
+      {"from": "ClaimAdmission", "type": "depends_on", "to": "feature:store-floor", "status": "INFERRED", "evidence": [{"path": "Sources/CoreSearch/ClaimAdmission.swift", "line": 6, "match": "public static func admits(_ claim: CoreClaim, policy: AdmissionPolicy, store: Store) async throws -> Bool {"}], "note": "via CoreClaim, Store"}
     ],
     "edges_omitted": 0
   }

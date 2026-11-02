@@ -14,15 +14,42 @@ public struct AdmissionPolicy: Sendable {
 
     /// Sensitive domains open only when the query names them. Inference is not consent:
     /// a question that merely *sounds* medical does not unlock medical records.
-    public init(queryDomain: Domain, explicitlyRequested: Set<Domain> = [], allowRestricted: Bool = false) {
+    public init(queryDomain: Domain, explicitlyRequested: Set<Domain> = [], allowRestricted: Bool = false, maximumDomains: Set<Domain>? = nil) {
         self.queryDomain = queryDomain
         var allowed = queryDomain.readableDomains
         allowed.formUnion(explicitlyRequested.filter { $0.isSensitive && $0 != .restricted })
         // A domain name in model-written query text is never permission to open mixed memory.
         allowed.remove(.restricted)
         if allowRestricted { allowed.insert(.restricted) }
+        if let maximumDomains { allowed.formIntersection(maximumDomains) }
         self.admitted = allowed
         self.blocked = Set(Domain.allCases).subtracting(allowed)
+    }
+
+    /// Owner selection is an explicit UI decision. Model-written queries and automated
+    /// system surfaces never inherit that authority, including for work/personal domains.
+    public static func forQuestion(_ query: String, knownEntitySurfaces: Set<String> = [],
+                                   externalCaller: Bool = false, ownerDomain: Domain? = nil,
+                                   maximumDomains: Set<Domain>? = nil) -> AdmissionPolicy {
+        if externalCaller {
+            let external: Set<Domain> = [.project, .publicRecord]
+            return AdmissionPolicy(queryDomain: .project, maximumDomains: maximumDomains.map { $0.intersection(external) } ?? external)
+        }
+        if let ownerDomain {
+            return AdmissionPolicy(queryDomain: ownerDomain, maximumDomains: maximumDomains)
+        }
+        let (domain, requested) = classifyDomain(query, knownEntitySurfaces: knownEntitySurfaces)
+        return AdmissionPolicy(queryDomain: domain, explicitlyRequested: requested, maximumDomains: maximumDomains)
+    }
+
+    /// An owner read selection is not outbound consent. Keep explicit scopes and all
+    /// personal/work/sensitive wording local even if the retrieval ceiling is project-only.
+    /// The existing environment opt-in is still required at the actual cloud call site.
+    public func permitsCloudFallback(for question: String, explicitOwnerDomain: Domain? = nil) -> Bool {
+        let publicDomains: Set<Domain> = [.project, .publicRecord]
+        guard explicitOwnerDomain == nil, !admitted.isEmpty, admitted.isSubset(of: publicDomains) else { return false }
+        let (rawDomain, requested) = Self.classifyDomain(question)
+        return rawDomain.readableDomains.isSubset(of: publicDomains) && requested.isSubset(of: publicDomains)
     }
 
     public func admits(_ domain: Domain) -> Bool { admitted.contains(domain) }
@@ -32,7 +59,7 @@ public struct AdmissionPolicy: Sendable {
         (.financial, ["salary", "invoice", "tax", "taxes", "bank", "revenue", "expense", "expenses", "payment", "budget"]),
         (.relationship, ["girlfriend", "boyfriend", "partner", "spouse", "family", "friend", "friends"]),
         (.work, ["meeting", "manager", "colleague", "colleagues", "shift", "employer", "coworker"]),
-        (.personal, ["diary", "journal"]),
+        (.personal, ["diary", "journal", "calendar", "calendars", "reminder", "reminders", "my notes", "personal notes"]),
     ]
 
     /// Words that explicitly frame the question as a repository or software project lookup,
@@ -86,6 +113,7 @@ public struct AdmissionPolicy: Sendable {
         if let sensitive = requested.sorted(by: { $0.rawValue < $1.rawValue }).first(where: { $0.isSensitive }) {
             return (sensitive, requested)
         }
+        if requested.contains(.personal) { return (.personal, requested) }
         if requested.contains(.work) { return (.work, requested) }
         return (.project, requested)
     }

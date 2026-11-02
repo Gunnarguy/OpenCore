@@ -94,59 +94,12 @@ struct AskOpenCoreIntent: AppIntent {
     func perform() async throws -> some IntentResult & ProvidesDialog & ReturnsValue<String> {
         let store = try await Store.open()
         let embedder = try? NLEmbeddingProvider()
-        let reasoner = Reasoner(store: store, embedder: embedder)
+        let tuning = await MainActor.run { AppSettings.shared.tuning }
+        let reasoner = Reasoner(store: store, embedder: embedder, tuning: tuning)
         // AppIntents can be invoked by automated Shortcuts or model-generated tool calls, so
         // treat the caller as external: sensitive domains cannot be unlocked via query wording.
-        let answer = try await reasoner.answer(question, externalCaller: true)
-
-        var fmText: String?
-        if answer.counted == nil {
-            let (queryDomain, _) = AdmissionPolicy.classifyDomain(
-                question,
-                knownEntitySurfaces: try await store.aliasSurfaces()
-            )
-            let safeDomain: Domain = queryDomain.isSensitive ? .project : queryDomain
-            let policy = AdmissionPolicy(queryDomain: safeDomain, explicitlyRequested: [])
-            let search = PassageSearch(store: store, embedder: embedder)
-            // The same text and window as the answer it sits beneath.
-            if let outcome = try? await search.search(
-                query: answer.searchedText ?? question,
-                queryClass: answer.receipt.queryClass,
-                policy: policy,
-                limit: 5,
-                window: answer.window?.interval
-            ) {
-                var sources: [GroundingSource] = []
-                if !answer.points.isEmpty {
-                    let claimLines = answer.points.prefix(10).map {
-                        "\($0.statement) (\($0.authority.label), \($0.derivation.rawValue))"
-                    }
-                    sources.append(GroundingSource(
-                        index: 1,
-                        title: "Believed Claims (Current Truth)",
-                        text: claimLines.joined(separator: "\n"),
-                        objectID: ObjectID.derived(from: "intent-claims", question),
-                        authority: .authoredArtifact,
-                        uri: nil
-                    ))
-                }
-                for hit in outcome.hits {
-                    sources.append(GroundingSource(
-                        index: sources.count + 1,
-                        title: hit.object.title,
-                        text: hit.chunk.text,
-                        objectID: hit.object.id,
-                        authority: hit.object.authority,
-                        uri: hit.object.uri
-                    ))
-                }
-                if !sources.isEmpty, let brief = await Conversation.synthesizeGroundedBrief(question: question, sources: sources) {
-                    fmText = brief.text
-                }
-            }
-        }
-
-        let text = answer.shortcutText(brief: fmText)
+        let completed = try await reasoner.systemAnswer(question)
+        let text = completed.answer.shortcutText(brief: completed.brief?.text)
         return .result(value: text, dialog: IntentDialog(stringLiteral: text))
     }
 }

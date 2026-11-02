@@ -1,4 +1,5 @@
 import AppKit
+import CorePresentation
 import CoreTelemetry
 import SwiftUI
 

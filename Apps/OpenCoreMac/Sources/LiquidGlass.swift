@@ -1,62 +1,9 @@
 import AppKit
 import CoreModel
+import CorePresentation
 import SwiftUI
 
-/// Adaptive Pastel & Daylight palette engineered for macOS 27 Liquid Glass legibility (adaptive colors for Dark Obsidian and Light Frost modes).
-enum Pastel {
-    private static func adaptive(
-        dark: (CGFloat, CGFloat, CGFloat),
-        light: (CGFloat, CGFloat, CGFloat)
-    ) -> Color {
-        Color(nsColor: NSColor(name: nil) { appearance in
-            let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            let c = isDark ? dark : light
-            return NSColor(srgbRed: c.0, green: c.1, blue: c.2, alpha: 1.0)
-        })
-    }
-
-    /// Luminous sky blue (#8FD4FF in Dark · #0969DA in Light)
-    static let sky = adaptive(dark: (0.56, 0.83, 1.00), light: (0.04, 0.41, 0.85))
-    /// Luminous aqua (#85EBF5 in Dark · #087F8C in Light)
-    static let aqua = adaptive(dark: (0.52, 0.92, 0.96), light: (0.03, 0.50, 0.55))
-    /// Luminous mint green (#85F0C7 in Dark · #087F5B in Light)
-    static let mint = adaptive(dark: (0.52, 0.94, 0.78), light: (0.03, 0.50, 0.36))
-    /// Luminous sage (#A3F2AA in Dark · #2B8A3E in Light)
-    static let sage = adaptive(dark: (0.64, 0.95, 0.67), light: (0.17, 0.54, 0.24))
-    /// Luminous lavender (#CCB8FF in Dark · #5F3DC4 in Light)
-    static let lavender = adaptive(dark: (0.80, 0.72, 1.00), light: (0.37, 0.24, 0.77))
-    /// Luminous periwinkle (#ADC2FF in Dark · #3B5BDB in Light)
-    static let periwinkle = adaptive(dark: (0.68, 0.76, 1.00), light: (0.23, 0.36, 0.86))
-    /// Luminous lilac (#EBB3FA in Dark · #9C36B5 in Light)
-    static let lilac = adaptive(dark: (0.92, 0.70, 0.98), light: (0.61, 0.21, 0.71))
-    /// Luminous peach (#FFC78C in Dark · #C95B0C in Light)
-    static let peach = adaptive(dark: (1.00, 0.78, 0.55), light: (0.79, 0.36, 0.05))
-    /// Luminous butter yellow (#FFE88F in Dark · #9C6500 in Light)
-    static let butter = adaptive(dark: (1.00, 0.91, 0.56), light: (0.61, 0.40, 0.00))
-    /// Luminous coral rose (#FFA6B8 in Dark · #C2255C in Light)
-    static let rose = adaptive(dark: (1.00, 0.65, 0.72), light: (0.76, 0.15, 0.36))
-    /// Neutral ice silver (#E2E8F0 in Dark · #334155 in Light)
-    static let ice = adaptive(dark: (0.88, 0.91, 0.95), light: (0.20, 0.25, 0.33))
-
-    /// Maps standard SwiftUI saturated system colors to adaptive Pastel tokens.
-    static func resolve(_ color: Color?) -> Color? {
-        guard let color else { return nil }
-        switch color {
-        case .blue: return Pastel.sky
-        case .cyan: return Pastel.aqua
-        case .teal: return Pastel.aqua
-        case .mint: return Pastel.mint
-        case .green: return Pastel.mint
-        case .yellow: return Pastel.butter
-        case .orange: return Pastel.peach
-        case .red: return Pastel.rose
-        case .pink: return Pastel.lilac
-        case .purple: return Pastel.lavender
-        case .indigo: return Pastel.periwinkle
-        default: return color
-        }
-    }
-}
+typealias Pastel = CorePresentation.Pastel
 
 /// Liquid Glass surfaces and cross-screen navigation components (macOS 26 / 27+).
 struct OpenCoreGlassCluster<Content: View>: View {
@@ -74,17 +21,14 @@ struct OpenCoreGlassCluster<Content: View>: View {
     }
 }
 
-extension View {
-    /// Distinguished macOS 27 Liquid Glass content card:
-    /// Adapts dynamically between Dark Obsidian and Light Frost surfaces with adaptive foreground colors.
-    @ViewBuilder
-    @MainActor
-    func openCoreGlassCard(
-        cornerRadius: CGFloat = 12,
-        tint: Color? = nil,
-        interactive: Bool = false
-    ) -> some View {
-        let prefs = AppSettings.shared
+@MainActor
+private struct OpenCoreGlassCardModifier: ViewModifier {
+    @Environment(\.appSettings) private var prefs
+    let cornerRadius: CGFloat
+    let tint: Color?
+    let interactive: Bool
+
+    @ViewBuilder func body(content: Content) -> some View {
         let isLight = prefs.isEffectiveLightMode
         let resolvedTint = Pastel.resolve(tint)
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
@@ -94,7 +38,7 @@ extension View {
         let baseSurface = isLight
             ? Color(red: 0.98, green: 0.985, blue: 1.00).opacity(max(0.90, cardOpacity))
             : Color(red: 0.08, green: 0.10, blue: 0.14).opacity(cardOpacity)
-        self
+        content
             .background {
                 ZStack {
                     shape.fill(baseSurface)
@@ -149,6 +93,67 @@ extension View {
             .clipShape(shape)
             .shadow(color: isLight ? Color.black.opacity(0.05) : Color.clear, radius: 5, x: 0, y: 2)
     }
+}
+
+@MainActor
+private struct OpenCoreGlassBarModifier: ViewModifier {
+    @Environment(\.appSettings) private var prefs
+    let cornerRadius: CGFloat
+    let tint: Color?
+
+    @ViewBuilder func body(content: Content) -> some View {
+        let resolvedTint = Pastel.resolve(tint) ?? prefs.pastelAccent.color
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        if #available(macOS 26.0, *), prefs.useNativeLiquidGlassBars {
+            GlassEffectContainer(spacing: 10) {
+                content
+                    .glassEffect(
+                        .regular.tint(resolvedTint.opacity(0.14)),
+                        in: shape
+                    )
+            }
+        } else {
+            content.openCoreGlassCard(cornerRadius: cornerRadius, tint: resolvedTint)
+        }
+    }
+}
+
+@MainActor
+private struct OpenCorePastelBadgeModifier: ViewModifier {
+    @Environment(\.appSettings) private var prefs
+    let tint: Color
+
+    @ViewBuilder func body(content: Content) -> some View {
+        let isLight = prefs.isEffectiveLightMode
+        let resolved = Pastel.resolve(tint) ?? tint
+        let pillBase = isLight
+            ? Color.white.opacity(0.92)
+            : Color(red: 0.06, green: 0.08, blue: 0.12).opacity(0.85)
+        content
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(resolved)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 4)
+            .background(pillBase, in: .capsule)
+            .background(resolved.opacity(isLight ? 0.13 : 0.18), in: .capsule)
+            .overlay(
+                Capsule().strokeBorder(resolved.opacity(isLight ? 0.36 : 0.45), lineWidth: 0.9)
+            )
+    }
+}
+
+extension View {
+    /// Distinguished macOS 27 Liquid Glass content card:
+    /// Adapts dynamically between Dark Obsidian and Light Frost surfaces with adaptive foreground colors.
+    @ViewBuilder
+    @MainActor
+    func openCoreGlassCard(
+        cornerRadius: CGFloat = 12,
+        tint: Color? = nil,
+        interactive: Bool = false
+    ) -> some View {
+        modifier(OpenCoreGlassCardModifier(cornerRadius: cornerRadius, tint: tint, interactive: interactive))
+    }
 
     /// Applies a distinguished macOS 27 Liquid Glass functional bar (`GlassEffectContainer` + `.glassEffect(.regular, in: ...)`).
     @ViewBuilder
@@ -157,20 +162,7 @@ extension View {
         cornerRadius: CGFloat = 14,
         tint: Color? = nil
     ) -> some View {
-        let prefs = AppSettings.shared
-        let resolvedTint = Pastel.resolve(tint) ?? prefs.pastelAccent.color
-        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-        if #available(macOS 26.0, *), prefs.useNativeLiquidGlassBars {
-            GlassEffectContainer(spacing: 10) {
-                self
-                    .glassEffect(
-                        .regular.tint(resolvedTint.opacity(0.14)),
-                        in: shape
-                    )
-            }
-        } else {
-            self.openCoreGlassCard(cornerRadius: cornerRadius, tint: resolvedTint)
-        }
+        modifier(OpenCoreGlassBarModifier(cornerRadius: cornerRadius, tint: tint))
     }
 
     /// Applies an interactive Liquid Glass capsule pill on macOS 26/27+ with luminous pastel foreground legibility.
@@ -204,21 +196,7 @@ extension View {
     @ViewBuilder
     @MainActor
     func openCorePastelBadge(_ tint: Color = Pastel.sky) -> some View {
-        let isLight = AppSettings.shared.isEffectiveLightMode
-        let resolved = Pastel.resolve(tint) ?? tint
-        let pillBase = isLight
-            ? Color.white.opacity(0.92)
-            : Color(red: 0.06, green: 0.08, blue: 0.12).opacity(0.85)
-        self
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(resolved)
-            .padding(.horizontal, 9)
-            .padding(.vertical, 4)
-            .background(pillBase, in: .capsule)
-            .background(resolved.opacity(isLight ? 0.13 : 0.18), in: .capsule)
-            .overlay(
-                Capsule().strokeBorder(resolved.opacity(isLight ? 0.36 : 0.45), lineWidth: 0.9)
-            )
+        modifier(OpenCorePastelBadgeModifier(tint: tint))
     }
 
     /// Applies `.buttonStyle(.glass)` on macOS 26/27+ and `.buttonStyle(.bordered)` on macOS 15,
@@ -544,17 +522,17 @@ struct EntityLinkChip: View {
 
     var body: some View {
         Button {
-            ActionFeedbackCenter.shared.record(
-                button: "Open Entity: \(name)",
-                command: "SELECT * FROM entities WHERE name = '\(name)'",
-                outcome: "Navigated to Knowledge Graph dossier for '\(name)' and loaded linked claims & passages.",
-                status: .completed
-            )
             if let entityID {
                 model.openEntity(id: entityID)
             } else {
                 model.openEntity(named: name)
             }
+            ActionFeedbackCenter.shared.record(
+                button: "Open Entity: \(name)",
+                command: "Open entity dossier",
+                outcome: "Requested the dossier for '\(name)'. The read has not completed.",
+                status: .received
+            )
         } label: {
             HStack(spacing: 5) {
                 Text(name)

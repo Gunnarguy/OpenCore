@@ -4,7 +4,8 @@
   "script": "script/codemap.py",
   "source_roots": [
     "Sources",
-    "Apps/OpenCoreMac/Sources"
+    "Apps/OpenCoreMac/Sources",
+    "Apps/OpenCorePhone/Sources"
   ],
   "test_roots": [
     "Tests"
@@ -42,7 +43,8 @@
     "cli",
     "operator-console",
     "hardware",
-    "monitors"
+    "monitors",
+    "iphone-companion"
   ],
   "unmapped_notes": {}
 }

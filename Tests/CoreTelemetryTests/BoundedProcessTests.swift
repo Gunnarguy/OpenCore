@@ -31,3 +31,47 @@ func subprocessRespondsToCancellation() async throws {
     catch is CancellationError { }
     #expect(Date().timeIntervalSince(started) < 4)
 }
+
+// The bug: a successful parent could exit before its inherited pipe writer or a queued drain.
+// A fixed one-second wait then returned status 0 and empty/truncated output as a complete reply.
+@Test("successful subprocess output is complete even when its final writer closes later")
+func subprocessWaitsForCompleteOutput() throws {
+    let result = try BoundedProcess.run(executable: "/bin/sh", arguments: ["-c", "(/bin/sleep 1.3; printf late; printf diagnostic >&2) & exit 0"], timeout: 5, maximumOutputBytes: 1024)
+    #expect(result.status == 0)
+    #expect(!result.timedOut)
+    #expect(result.stdoutText == "late")
+    #expect(result.stderrText == "diagnostic")
+}
+
+@Test("an unfinished subprocess pipe is a timeout even after a successful parent exit")
+func subprocessIncompleteOutputIsTimeout() throws {
+    let result = try BoundedProcess.run(executable: "/bin/sh", arguments: ["-c", "(/bin/sleep 2; printf late) & exit 0"], timeout: 1, maximumOutputBytes: 1024)
+    #expect(result.status == 0)
+    #expect(result.timedOut)
+}
+
+// Separate guard: the direct child can already be gone when cancellation arrives. Waiting
+// the entire remaining pipe deadline here would defer a cancellation for minutes in Notes.
+@Test("cancelling after a subprocess exits interrupts its pending output drain")
+func subprocessCancellationInterruptsDrain() async throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("process-drain-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let ready = directory.appendingPathComponent("ready")
+    let worker = Task.detached {
+        try BoundedProcess.run(executable: "/bin/sh", arguments: ["-c", "(/bin/sleep 2; printf late) & printf ready > \"$1\"", "fixture", ready.path], timeout: 15)
+    }
+    let readyDeadline = Date().addingTimeInterval(5) // Chosen fixture startup allowance.
+    while !FileManager.default.fileExists(atPath: ready.path), Date() < readyDeadline {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    guard FileManager.default.fileExists(atPath: ready.path) else {
+        worker.cancel(); _ = try? await worker.value
+        Issue.record("synthetic parent never signalled readiness"); return
+    }
+    try await Task.sleep(for: .milliseconds(50))
+    let cancelledAt = Date()
+    worker.cancel()
+    await #expect(throws: CancellationError.self) { _ = try await worker.value }
+    #expect(Date().timeIntervalSince(cancelledAt) < 1, "cancellation must not wait for the two-second writer")
+}

@@ -41,6 +41,7 @@ google-ads.yaml
 
 # XcodeGen output — regenerate with `cd Apps/OpenCoreMac && xcodegen generate`
 Apps/OpenCoreMac/Generated/
+Apps/OpenCorePhone/Generated/
 
 # Claude Code hook checkpoints and Codex kit mirrors (kit, 2026-09-08)
 **/.claude/.state/

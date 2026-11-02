@@ -1554,3 +1554,95 @@ passing. The product was right, because `Store.ingest` had already been fixed fo
 
 **Consequences.** A single passing run proves less than it looks like when a test touches the clock.
 `Docs/ai/RUNBOOK.md` carries the symptom.
+
+
+## 2026-10-31: an authenticated owner channel, with acknowledged answer receipts
+
+[design] The iPhone uses a new channel rather than widening MCP. A person holding a paired phone
+and passing Face ID is a different authority from a model-written MCP query. The Mac owns the
+store and runs the engine; shipping the engine or a synchronized database to the phone was rejected
+for this phase because it would create another store and another admission path.
+
+[source] Scope is granted in person, revocable, and bounded again on every request. Each pairing
+has a fresh grant ID. Limited grants cannot browse unlabelled legacy receipts: retrieved domains
+cannot label private text typed into a question. No classifier can prove that free text safe.
+
+[design] Completed phone delivery counts as objects transmitted, naming the paired device and
+counting distinct directly quoted/cited floor objects. Receipt persistence follows an authenticated
+acknowledgement, so a lost final reply can be resumed with the same receipt. This makes completed
+delivery auditable; it does not measure bytes from partial drafts. Unmeasured confidence stays nil.
+
+[design] The owner requested complete mobile fidelity and both icons. This implementation is the
+read-only phase, with full-owner browsing or a project/public grant chosen on the Mac pairing screen.
+Owner actions, operator controls and the final physical-device phase acceptance remain separate.
+
+
+## 2026-10-31: Request audits and answer delivery are separate
+
+[source] This supersedes earlier zero-egress wording. A submitted cloud request may have left the
+Mac even if transport or decoding fails. Record submission, application acknowledgment and decoding
+separately; keep missing status unknown. Count distinct represented floor objects, not source entries.
+The integer is a legacy application-acknowledged count, not proof of zero bytes. Shared presentation
+must disclose unconfirmed requests and distinguish phone delivery from cloud activity.
+
+[source] Saving phone answers only after ACK is correct for delivery, but cannot audit prior cloud
+activity. Save a separate request-audit receipt before delivery, with actual retrieval provenance and
+current authenticated grant ownership. It is not a completed answer or a phone ACK. Surface failed
+persistence. Model nil names the absence of a final model prose author, not the absence of attempts.
+
+
+## 2026-11-01: Review has a separate immutable bootstrap
+
+[source] A flag read after production AppModel construction is too late: defaults and services are
+already reachable. Use a separate background-only Foundation entry with a thin store product, and
+refuse review arguments in production before model construction. Its first proof is copy admission
+and packaged read-only access, not a lookalike screen or actual UI acceptance.
+
+[source] Read-only SQLite is insufficient to exclude aliased WAL/SHM inputs. Review admits only a
+private self-contained copy and uses immutable URI mode; ordinary reads retain their previous mode.
+Snapshot creation owns a new destination namespace and auxiliary cleanup, preserving source bytes.
+A separate view-injection phase must remove global settings/service reachability before real views
+can be safely constructed. Compilation and sandbox declarations alone are not behavior acceptance.
+
+## 2026-11-01: Preference effects belong at the application boundary
+
+[source] Moving settings into CorePresentation lets package tests own persistence and callback
+effects without an app test target. Its initializer requires one suite, used for both reads and
+writes, and explicit effects. A production bridge preserves keys/defaults/controller behavior;
+isolated callers supply no effects. Initial restoration must not start services. Glass modifiers
+must resolve environment settings in body so later real-view review can supply isolated state.
+
+[design] This is a prerequisite for model/view-task isolation, not a claim that an isolated screen
+runtime already exists. Retaining the production configuration-save error during extraction avoids
+mixing a behavior fix into ownership changes; that finding has its own roadmap row.
+
+## 2026-11-01: Shared privacy configuration needs observed results
+
+[source] Requested defaults are separate from shared startup configuration. Patch the known field
+without losing unknown JSON, refuse malformed/unreadable inputs, and distinguish pre-write refusal
+from an unknown write/readback outcome. Never infer unchanged file state from an error. Confirmation
+observes a matching readback; it does not revoke running servers or prevent another writer.
+
+[design] Restore valid saved authorization through one strict initial observation, with no repeated
+approval/write on launch. Consume unknown observation separately from its optional value. Attempted
+changes, failed writes and invalidation cannot regain authorization through initialization. Revalidate
+current shared state before new playground construction/copy. Generate no unsafe CLI override, since
+it would defeat later shared blocks. This supersedes the temporary ignored-save behavior retained
+during settings extraction. Actual screen/CLI-process acceptance remains separate from package proof.
+
+## 2026-11-02: Calendar and reminders are read, not retrieved
+
+[measured] Asked real questions on a store copy, the app failed its own purpose on the plainest ones:
+"what is on my calendar this week" answered with a project's last commit and "what reminders do I
+have open" with 69 claims about repositories, while 565 events and 251 open reminders sat in the store.
+[design] Those sources produce objects and no claims, and an answer was assembled from claims. "Open"
+and "due" are a flag and a date, which no passage states, so better retrieval could not fix it.
+`AgendaIntent` reads the question, `Store.agendaEvents` and `agendaReminders` read the rows, and
+`AgendaAnswering` writes the list with no model. Connectors stay object-only. No claims were added,
+because a due date is not a claim about the world. It runs only for the owner: an external caller
+never reaches it, and it declines without `.personal`, so a limited phone gets the ordinary path. An
+agenda answer has no evidence rows to link, so its receipt names the stage and the object counts.
+[design] With no subject named, subjects now come from the top two passages rather than all twelve,
+and the passages lead. Claims stay in the answer as context, because `technologyDoesNotCaptureTheQuestion`
+pins that a passage about a project brings that project's claims.
+

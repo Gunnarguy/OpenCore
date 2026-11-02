@@ -1,7 +1,7 @@
 import CoreModel
 import SwiftUI
 
-/// Cryptographic Zero-Egress Verification & Privacy Receipt Card.
+/// Recorded evidence, delivery outcomes and uncertainty for one answer.
 struct ReceiptCard: View {
     @Environment(\.appModel) private var model
     let receipt: Receipt
@@ -13,13 +13,13 @@ struct ReceiptCard: View {
             HStack(alignment: .top, spacing: 12) {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 8) {
-                        Label("Receipt \(receipt.shortCode)", systemImage: "receipt.fill")
+                        Label("\(receipt.isRequestAudit ? "Request audit" : "Receipt") \(receipt.shortCode)", systemImage: "receipt.fill")
                             .font(.caption.monospaced().weight(.bold))
                             .foregroundStyle(Pastel.aqua)
                         Text(receipt.queryClass.rawValue.uppercased())
                             .openCorePastelBadge(Pastel.sky)
-                        Text(receipt.objectsTransmitted == 0 ? "0 SOURCE OBJECTS TRANSMITTED" : "\(receipt.objectsTransmitted) TRANSMITTED")
-                            .openCorePastelBadge(receipt.objectsTransmitted == 0 ? Pastel.mint : Pastel.rose)
+                        Text(receipt.outboundStatusLabel)
+                            .openCorePastelBadge(receipt.hasOutboundActivity ? Pastel.rose : Pastel.ice)
                         Text(ClaimsView.formatter.string(from: receipt.createdAt))
                             .font(.caption2.monospaced())
                             .foregroundStyle(.secondary)
@@ -59,12 +59,17 @@ struct ReceiptCard: View {
                 }
             }
 
+            Text(receipt.outboundDescription)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+
             // 2. Four Visual Audit Counters
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 180), spacing: 10)], spacing: 10) {
                 receiptMetric("Items Scanned", value: "\(receipt.objectsSearched)", subtitle: "objectsSearched", tint: Pastel.sky)
                 receiptMetric("Candidates Matched", value: "\(receipt.objectsRetrieved)", subtitle: "objectsRetrieved", tint: Pastel.aqua)
                 receiptMetric(
-                    receipt.answeredFromClaims ? "Fact Spans Used" : "Passages Cited",
+                    "Evidence Spans Linked",
                     value: "\(receipt.evidenceAdmitted)",
                     subtitle: "evidenceAdmitted",
                     tint: Pastel.mint
@@ -75,10 +80,10 @@ struct ReceiptCard: View {
             // 3. Model, Confidence & Privacy Firewall Domains
             HStack(spacing: 16) {
                 HStack(spacing: 6) {
-                    Text("Engine:")
+                    Text("Prose author:")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
-                    Text(receipt.model ?? "Deterministic Graph Assembly")
+                    Text(receipt.model ?? "No model author")
                         .font(.caption.monospaced().weight(.bold))
                         .foregroundStyle(Pastel.ice)
                 }

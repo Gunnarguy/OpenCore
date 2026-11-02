@@ -8,6 +8,19 @@ import Foundation
 import FoundationModels
 #endif
 
+public enum CompanionConversationRestoreError: Error, Sendable {
+    case busy
+    case scopeMismatch
+    case unavailable
+    case malformedHistory
+}
+
+/// Turns and revision from the same admitted store snapshot, for a later ACK-gated save.
+public struct CompanionRestoredHistory: Sendable {
+    public let turns: [Turn]
+    public let revision: CompanionHistoryRevision
+}
+
 /// A cited passage handed to the model, numbered so the answer can point at it.
 public struct GroundingSource: Sendable, Identifiable, Hashable, Codable {
     public var id: Int { index }
@@ -20,6 +33,9 @@ public struct GroundingSource: Sendable, Identifiable, Hashable, Codable {
     /// Set when this source is one stored claim rather than a passage. Optional so that turns
     /// saved before it existed still decode.
     public let claimID: ClaimID?
+    /// Directly cited or quoted floor objects in this source's text. Older passage-only
+    /// sources omit this and represent their single objectID.
+    public let representedObjectIDs: [ObjectID]?
 
     public init(
         index: Int,
@@ -28,7 +44,8 @@ public struct GroundingSource: Sendable, Identifiable, Hashable, Codable {
         objectID: ObjectID,
         authority: Authority,
         uri: String? = nil,
-        claimID: ClaimID? = nil
+        claimID: ClaimID? = nil,
+        representedObjectIDs: [ObjectID]? = nil
     ) {
         self.index = index
         self.title = title
@@ -37,6 +54,7 @@ public struct GroundingSource: Sendable, Identifiable, Hashable, Codable {
         self.authority = authority
         self.uri = uri
         self.claimID = claimID
+        self.representedObjectIDs = representedObjectIDs
     }
 }
 
@@ -57,6 +75,10 @@ public struct Turn: Sendable, Identifiable {
     /// closing the window. Reported rather than swallowed, because the reader is about to
     /// assume it was saved.
     public var persistenceError: String?
+    /// Exact provenance retained for a companion delivery receipt without saving a chat.
+    public var receiptEvidence: [(EvidenceID, Double)] = []
+    public var receiptClaims: [ClaimID] = []
+    public var receiptPassages: [(Evidence, Double)] = []
     /// True while tokens are still arriving, so the UI can show a caret without guessing.
     public var streaming: Bool
 
@@ -87,6 +109,12 @@ public struct Turn: Sendable, Identifiable {
     }
 
     public var ungrounded: [Grounding.Verdict] { verdicts.filter { !$0.isGrounded } }
+    public var hasDeliverableAnswer: Bool {
+        guard !streaming, receipt != nil else { return false }
+        if error == nil { return true }
+        return !text.isEmpty && !verdicts.isEmpty && verdicts.allSatisfy(\.isGrounded)
+            && receipt?.stages.contains(where: { $0.name == "synthesize_deterministic" }) == true
+    }
 }
 
 /// Conversation over your own history, with a model writing the prose.
@@ -99,17 +127,28 @@ public struct Turn: Sendable, Identifiable {
 /// failing is shown as failing rather than removed.
 ///
 /// So the model is a writer, not a source. That is what keeps `Authority` meaningful: nothing
-/// a model produces is ever stored as a claim, and the receipt records which model actually
-/// ran rather than which one was requested.
+/// a model produces is ever stored as a claim. The receipt records the final prose author;
+/// request-attempt stages separately describe cloud activity, including failed requests.
 ///
 /// The session is held across turns so follow-up questions use the model's own `Transcript`
 /// rather than a hand-rolled summary of previous exchanges pasted into the prompt.
 public actor Conversation {
+    public typealias AuditFailureHandler = @Sendable (String) async -> Void
+    public static let defaultAuditFailureHandler: AuditFailureHandler = { message in
+        // MCP shares this module: diagnostics must never enter stdout.
+        FileHandle.standardError.write(Data(("OpenCore outbound audit: " + message + "\n").utf8))
+    }
     private let store: Store
     private let search: PassageSearch
     private let grounding = Grounding()
     private let currentDate: @Sendable () -> Date
     private let currentCalendar: @Sendable () -> Calendar
+    private let persistHistory: Bool
+    private let auditContext: [ReceiptStage]
+    private let onAuditFailure: AuditFailureHandler
+    private let maximumDomains: Set<Domain>?
+    private var admissionScope = ConversationAdmissionScope()
+    private var answering = false
 
     public struct GenerationConfiguration: Sendable, Equatable {
         public let reasoningLevel: String
@@ -189,6 +228,7 @@ public actor Conversation {
         var evidence: [(EvidenceID, Double)] = []
         /// How many contradictions were put in front of the model.
         var contradictions = 0
+        var passages: [(Evidence, Double)] = []
 
         static let none = ClaimReading()
     }
@@ -208,13 +248,21 @@ public actor Conversation {
         tuning: RetrievalTuning = .default,
         id: String = UUID().uuidString,
         now: @autoclosure @escaping @Sendable () -> Date = Date(),
-        calendar: @autoclosure @escaping @Sendable () -> Calendar = .current
+        calendar: @autoclosure @escaping @Sendable () -> Calendar = .current,
+        persistHistory: Bool = true,
+        maximumDomains: Set<Domain>? = nil,
+        auditContext: [ReceiptStage] = [],
+        onAuditFailure: @escaping AuditFailureHandler = Conversation.defaultAuditFailureHandler
     ) {
         self.store = store
         self.search = PassageSearch(store: store, embedder: embedder, tuning: tuning)
         self.id = id
         self.currentDate = now
         self.currentCalendar = calendar
+        self.persistHistory = persistHistory
+        self.auditContext = auditContext
+        self.onAuditFailure = onAuditFailure
+        self.maximumDomains = maximumDomains
     }
 
     // MARK: - Saved threads
@@ -236,11 +284,16 @@ public actor Conversation {
     /// itself: see `replayedExchanges`.
     @discardableResult
     public func restore() async throws -> [Turn] {
+        guard !answering else { throw CompanionConversationRestoreError.busy }
+        // A domain-limited actor must never reopen unlabelled Mac turns through this path.
+        guard maximumDomains == nil else { throw CompanionConversationRestoreError.scopeMismatch }
+        answering = true; defer { answering = false }
         let stored = try await store.turns(conversationID: id)
         ordinal = stored.count
 
         let decoder = JSONDecoder()
-        let turns: [Turn] = stored.map { row in
+        var turns: [Turn] = []
+        for row in stored {
             var turn = Turn(
                 role: row.role == Turn.Role.you.rawValue ? .you : .core,
                 text: row.text,
@@ -253,18 +306,77 @@ public actor Conversation {
                 id: UUID(uuidString: row.id)
             )
             turn.streaming = false
-            return turn
+            if let receiptID = row.receiptID { turn.receipt = try await store.receipt(code: receiptID.value) }
+            turns.append(turn)
         }
-
-        priorQuestions = turns.filter { $0.role == .you && !$0.text.isEmpty }.map(\.text)
-        if let lastCore = turns.last(where: { $0.role == .core && !$0.sources.isEmpty }) {
-            priorSourceTitles = lastCore.sources.map(\.title)
-        }
-
-        #if canImport(FoundationModels)
-        if #available(macOS 26, *) { rebuildSession(from: turns) }
-        #endif
+        restoreContext(from: turns)
         return turns
+    }
+
+    /// Restore only a fresh, scope-validated companion snapshot. The store checks each saved
+    /// exchange and its current source admission in one read transaction; this method never
+    /// follows that check with an unvalidated raw-turn query.
+    public func restoreCompanionHistory(scope: CompanionHistoryScope, thread: UUID) async throws -> [Turn] {
+        try await restoreCompanionHistoryWithRevision(scope: scope, thread: thread).turns
+    }
+
+    /// The revision belongs to the exact snapshot used to rebuild this actor's context. A caller
+    /// generating a reply must carry it through to the acknowledged save without refreshing it.
+    public func restoreCompanionHistoryWithRevision(scope: CompanionHistoryScope, thread: UUID) async throws -> CompanionRestoredHistory {
+        guard !answering else { throw CompanionConversationRestoreError.busy }
+        guard !persistHistory else { throw CompanionConversationRestoreError.scopeMismatch }
+        answering = true; defer { answering = false }
+        // A failed refresh must not leave previously admitted material in the next request.
+        ordinal = 0
+        clearRestoredContext()
+        guard maximumDomains == scope.domains, id == scope.conversationID(for: thread)
+        else { throw CompanionConversationRestoreError.scopeMismatch }
+        try Task.checkCancellation()
+        guard let snapshot = try await store.companionHistory(scope: scope, thread: thread) else {
+            throw CompanionConversationRestoreError.unavailable
+        }
+        let decoder = JSONDecoder()
+        var turns: [Turn] = []
+        for exchange in snapshot.exchanges {
+            try Task.checkCancellation()
+            guard let questionID = UUID(uuidString: exchange.question.id),
+                  let answerID = UUID(uuidString: exchange.answer.id),
+                  let sources = try? decoder.decode([GroundingSource].self, from: Data(exchange.answer.sourcesJSON.utf8)),
+                  let verdicts = try? decoder.decode([Grounding.Verdict].self, from: Data(exchange.answer.verdictsJSON.utf8))
+            else { throw CompanionConversationRestoreError.malformedHistory }
+            turns.append(Turn(role: .you, text: exchange.question.text, id: questionID))
+            turns.append(Turn(role: .core, text: exchange.answer.text, sources: sources, verdicts: verdicts,
+                receipt: exchange.receipt, modelName: exchange.answer.model, error: exchange.answer.error, id: answerID))
+        }
+        try Task.checkCancellation()
+        ordinal = turns.count
+        restoreContext(from: turns)
+        return CompanionRestoredHistory(turns: turns, revision: snapshot.revision)
+    }
+
+    private func restoreContext(from turns: [Turn]) {
+        // Unknown or mixed historical scopes remain visible in the saved chat, but are not
+        // replayed into a model. A project receipt must not conceal an earlier medical prompt.
+        priorWindow = nil
+        let core = turns.filter { $0.role == .core }
+        let scopes = core.compactMap { $0.receipt.map { Set($0.domainsAdmitted) } }
+        if let scope = scopes.last, scopes.count == core.count, scopes.allSatisfy({ $0 == scope }),
+           maximumDomains.map({ scope.isSubset(of: $0) }) ?? true {
+            // Adopt the recorded set exactly, rather than deriving a different domain set.
+            admissionScope = ConversationAdmissionScope(admitted: scope)
+            priorQuestions = turns.filter { $0.role == .you && !$0.text.isEmpty }.map(\.text)
+            priorSourceTitles = core.last?.sources.map(\.title) ?? []
+            #if canImport(FoundationModels)
+            if #available(macOS 26, *) { rebuildSession(from: turns) }
+            #endif
+        } else {
+            clearRestoredContext()
+        }
+    }
+
+    private func clearRestoredContext() {
+        admissionScope = ConversationAdmissionScope()
+        priorQuestions = []; priorSourceTitles = []; priorWindow = nil; sessionBox = nil
     }
 
     /// What a restored session is told it said: the exchanges a model wrote, as the model wrote
@@ -325,6 +437,7 @@ public actor Conversation {
     /// the caller puts it on the turn, so "this was not saved" reaches the reader who is about to
     /// rely on it being saved.
     private func persist(_ turn: Turn, title: String, reading: ClaimReading = .none) async -> String? {
+        guard persistHistory else { return nil }
         do {
             try await store.openConversation(id: id, title: title)
             // The receipt goes in its own table so `opencore trace` reaches a saved chat turn.
@@ -332,7 +445,8 @@ public actor Conversation {
             // The links are what `trace` reads. Without them a turn that used claims reported
             // them and then traced to "admitted no evidence".
             if let receipt = turn.receipt {
-                try await store.save(receipt, evidence: reading.evidence, claims: reading.claims)
+                try await store.save(receipt, evidence: Reasoner.linkedEvidence(reading.evidence, passages: reading.passages),
+                                     claims: reading.claims, additionalEvidence: reading.passages.map(\.0))
             }
             let encoder = JSONEncoder()
             try await store.append(StoredTurn(
@@ -527,9 +641,9 @@ public actor Conversation {
     ///
     /// Emits the turn repeatedly as it fills in: sources first, so the UI can show what is
     /// being read while the model is still thinking, then text, then verdicts and receipt.
-    public nonisolated func send(_ question: String) -> AsyncStream<Turn> {
+    public nonisolated func send(_ question: String, ownerDomain: Domain? = nil) -> AsyncStream<Turn> {
         AsyncStream { continuation in
-            let producer = Task { await self.answer(question, into: continuation) }
+            let producer = Task { await self.answer(question, ownerDomain: ownerDomain, into: continuation) }
             continuation.onTermination = { @Sendable _ in producer.cancel() }
         }
     }
@@ -544,12 +658,22 @@ public actor Conversation {
     ) async {
         var turn = turn
         turn.streaming = false
-        turn.persistenceError = await persist(turn, title: title, reading: reading)
+        turn.receiptEvidence = reading.evidence
+        turn.receiptClaims = reading.claims
+        turn.receiptPassages = reading.passages
+        let finalError = await persist(turn, title: title, reading: reading)
+        let errors = [turn.persistenceError, finalError].compactMap { $0 }
+        turn.persistenceError = errors.isEmpty ? nil : errors.joined(separator: "\n")
         continuation.yield(turn)
         continuation.finish()
     }
 
-    private func answer(_ question: String, into continuation: AsyncStream<Turn>.Continuation) async {
+    private func answer(_ question: String, ownerDomain: Domain?, into continuation: AsyncStream<Turn>.Continuation) async {
+        guard !answering else {
+            continuation.yield(Turn(role: .core, error: "Another answer is already running in this conversation."))
+            continuation.finish(); return
+        }
+        answering = true; defer { answering = false }
         var turn = Turn(role: .core, streaming: true)
         let started = DispatchTime.now().uptimeNanoseconds
         let title = Self.title(from: question)
@@ -562,12 +686,7 @@ public actor Conversation {
             turn.persistenceError = failure
         }
 
-        let retrievalQuery = Self.contextualizedQuery(
-            question,
-            priorQuestions: priorQuestions,
-            priorSourceTitles: priorSourceTitles
-        )
-        priorQuestions.append(question)
+        var retrievalQuery = question
 
         // ---- Retrieve, before the model is involved at all ----
         let outcome: PassageOutcome
@@ -578,20 +697,22 @@ public actor Conversation {
         var report: WindowReport?
         var reportMilliseconds = 0
         do {
+            policy = AdmissionPolicy.forQuestion(question, knownEntitySurfaces: try await store.aliasSurfaces(),
+                                                  ownerDomain: ownerDomain, maximumDomains: maximumDomains)
+            domain = policy.queryDomain
+            if admissionScope.adopt(policy) {
+                sessionBox = nil; priorQuestions = []; priorSourceTitles = []; priorWindow = nil
+            }
+            retrievalQuery = contextualizedQueryForNextQuestion(question)
+            priorQuestions.append(question)
             queryClass = QueryClassifier().classify(retrievalQuery).queryClass
-            let (queryDomain, requested) = AdmissionPolicy.classifyDomain(
-                retrievalQuery,
-                knownEntitySurfaces: try await store.aliasSurfaces()
-            )
-            domain = queryDomain
-            policy = AdmissionPolicy(queryDomain: queryDomain, explicitlyRequested: requested)
 
             // A time phrase is a filter. See `TemporalIntent` for what it used to be. Read from
             // the question and not from `retrievalQuery`, whose anchors are the last question's
             // words: the phrase asked now has to win over one left over from before.
             let calendar = currentCalendar()
             let ownWindow = TemporalIntent.window(in: question, now: currentDate(), calendar: calendar)
-            let window = ownWindow ?? (Self.readsAsFollowUp(question) ? priorWindow : nil)
+            let window = ownWindow ?? inheritedWindowForNextQuestion(question)
             priorWindow = window
             // Only this question's phrase can be in the text. `contextualizedQuery` keeps the
             // last one out of the anchors.
@@ -610,7 +731,7 @@ public actor Conversation {
                 turn.text = counted.sentence
                 turn.receipt = Self.countedReceipt(
                     question: question,
-                    domain: queryDomain,
+                    domain: domain,
                     admitted: Array(policy.admitted),
                     blocked: Array(policy.blocked),
                     counted: counted,
@@ -618,6 +739,22 @@ public actor Conversation {
                 )
                 await complete(turn, title: title, into: continuation)
                 return
+            }
+
+            // Calendar and reminders hold dates and flags and no claims, so these are read rather
+            // than retrieved, and no model writes them. See `AgendaIntent`. The owner typed this, so
+            // their wording opens `.personal`, under any scope they chose and the phone's ceiling.
+            if let agendaQuestion = AgendaIntent.read(question, now: currentDate(), calendar: calendar) {
+                let owner = AdmissionPolicy.forQuestion(question, ownerDomain: ownerDomain ?? .personal, maximumDomains: maximumDomains)
+                if let agenda = try await AgendaAnswering(store: store).answer(agendaQuestion, policy: owner, now: currentDate(), calendar: calendar) {
+                    turn.text = agenda.sentence
+                    turn.receipt = agenda.receipt(
+                        query: question, queryClass: queryClass, domainsAdmitted: Array(owner.admitted), domainsBlocked: Array(owner.blocked),
+                        milliseconds: Int((DispatchTime.now().uptimeNanoseconds - started) / 1_000_000)
+                    )
+                    await complete(turn, title: title, into: continuation)
+                    return
+                }
             }
 
             if let window {
@@ -733,9 +870,9 @@ public actor Conversation {
         let generationStarted = DispatchTime.now().uptimeNanoseconds
         var modelName: String?
         var objectsTransmitted = 0
-        let hasSensitiveContent = domain.isSensitive
-            || policy.admitted.contains(where: \.isSensitive)
-            || outcome.hits.contains(where: { $0.object.domain.isSensitive })
+        let cloudDomains: Set<Domain> = [.project, .publicRecord]
+        let hasSensitiveContent = !policy.permitsCloudFallback(for: question, explicitOwnerDomain: ownerDomain)
+            || outcome.hits.contains(where: { !cloudDomains.contains($0.object.domain) })
 
         #if canImport(FoundationModels)
         if #available(macOS 26, *) {
@@ -779,6 +916,7 @@ public actor Conversation {
                 await applyFallbackSynthesis(
                     question: question,
                     hasSensitiveContent: hasSensitiveContent,
+                    policy: policy, reading: reading, queryClass: queryClass, objectsSearched: outcome.chunksSearched,
                     reason: message,
                     generationStarted: generationStarted,
                     turn: &turn,
@@ -791,6 +929,7 @@ public actor Conversation {
             await applyFallbackSynthesis(
                 question: question,
                 hasSensitiveContent: hasSensitiveContent,
+                policy: policy, reading: reading, queryClass: queryClass, objectsSearched: outcome.chunksSearched,
                 reason: Readiness.unsupportedOS.message,
                 generationStarted: generationStarted,
                 turn: &turn,
@@ -803,6 +942,7 @@ public actor Conversation {
         await applyFallbackSynthesis(
             question: question,
             hasSensitiveContent: hasSensitiveContent,
+            policy: policy, reading: reading, queryClass: queryClass, objectsSearched: outcome.chunksSearched,
             reason: Readiness.unsupportedOS.message,
             generationStarted: generationStarted,
             turn: &turn,
@@ -861,7 +1001,7 @@ public actor Conversation {
         let reasoner = Reasoner(store: store, search: search)
         let claims = try await reasoner.askedClaims(focus: focus, window: window, policy: policy)
         let shown = Array(claims.prefix(Self.askedClaimsShown))
-        let claimLines = try await claimSources(from: shown, reasoner: reasoner, policy: policy)
+        let claimLines = try await reasoner.claimSources(from: shown, policy: policy)
         let room = Self.sourceCount - claimLines.sources.count
         outcome.hits = Array(try await reasoner.aboutNamedFirst(outcome.hits, focus: focus, policy: policy).prefix(room))
 
@@ -880,72 +1020,21 @@ public actor Conversation {
             outcome: outcome,
             sources: sources,
             reading: ClaimReading(
-                claims: Set(shown.flatMap(\.claimRows)).sorted { $0.value < $1.value },
-                evidence: Reasoner.rankedEvidence(shown),
-                contradictions: claimLines.contradictions
+                claims: claimLines.claims,
+                evidence: Reasoner.rankEvidenceIDs(claimLines.evidence.map(\.id)),
+                contradictions: claimLines.contradictions,
+                passages: Reasoner.passageEvidence(outcome.hits)
             )
         )
-    }
-
-    /// One source per claim, with everything that qualifies it.
-    ///
-    /// One source per line because a shared one could only be labelled from its first line:
-    /// "which projects use Swift" gave three repositories under one repository's title, a
-    /// sentence citing the third line opened the first line's object, and a high-tier first line
-    /// lent its label to a lower one.
-    ///
-    /// The caveats sit on the line because the model reads nothing else. A status with refuting
-    /// evidence or an open contradiction used to arrive as a flat fact, while `core_ask` printed
-    /// the same claim with COUNTER-EVIDENCE beside it.
-    private func claimSources(
-        from points: [AnswerPoint],
-        reasoner: Reasoner,
-        policy: AdmissionPolicy
-    ) async throws -> (sources: [GroundingSource], contradictions: Int) {
-        let touching = try await reasoner.contradictions(touching: Set(points.flatMap(\.claimRows)), policy: policy)
-        var sources: [GroundingSource] = []
-        var surfaced = Set<ContradictionID>()
-
-        for point in points {
-            guard let evidence = point.supporting.first else { continue }
-            let rows = Set(point.claimRows)
-            var lines = [point.statement]
-            if point.derivation == .inferred {
-                lines.append("Inferred by OpenCore from other records. No source states this.")
-            }
-            for counter in point.counter.prefix(Self.caveatsShown) {
-                lines.append("Counter-evidence: \(Self.quoted(counter.snippet))")
-            }
-            let standing = touching
-                .filter { Reasoner.standsAgainst($0, rows: rows) }
-                .sorted { ($0.resolution == .unresolved ? 0 : 1, $0.id.value) < ($1.resolution == .unresolved ? 0 : 1, $1.id.value) }
-            for contradiction in standing.prefix(Self.caveatsShown) {
-                surfaced.insert(contradiction.id)
-                let label = contradiction.resolution == .unresolved ? "Open contradiction" : "Overruled"
-                let rival = try await reasoner.rivalStatement(in: contradiction, against: rows)
-                lines.append("\(label): \(rival.map { "\($0) " } ?? "")(\(Self.quoted(contradiction.reason)))")
-            }
-
-            let subject = try await store.entity(point.subject)?.canonicalName ?? point.subject.value
-            sources.append(GroundingSource(
-                index: sources.count + 1,
-                title: subject + Self.claimTitleSuffix,
-                text: lines.joined(separator: "\n"),
-                objectID: evidence.objectID,
-                authority: point.authority,
-                claimID: point.claimID
-            ))
-        }
-        return (sources, surfaced.count)
-    }
-
-    private static func quoted(_ text: String) -> String {
-        String(text.replacingOccurrences(of: "\n", with: " ").prefix(caveatLength))
     }
 
     private func applyFallbackSynthesis(
         question: String,
         hasSensitiveContent: Bool,
+        policy: AdmissionPolicy,
+        reading: ClaimReading,
+        queryClass: QueryClass,
+        objectsSearched: Int,
         reason: String,
         generationStarted: UInt64,
         turn: inout Turn,
@@ -986,43 +1075,60 @@ public actor Conversation {
 
         guard !Task.isCancelled else { turn.error = "Stopped by you."; return }
 
-        // Optional cloud fallback: only when explicitly opted in AND neither the query domain,
-        // the admitted policy domains, nor any retrieved hit touches a sensitive domain
-        // (.medical, .financial, and .relationships never leave the device).
+        // Optional cloud fallback: environment opt-in AND the independent raw-question,
+        // owner-selection and source-domain gate above. Personal/work remain local too;
+        // selecting Project cannot turn a private question into outbound consent.
         if !hasSensitiveContent,
-           let gemini = await Self.generateWithGemini(question: question, sources: turn.sources) {
-            modelName = Self.geminiModelIdentity
-            turn.modelName = Self.geminiModelIdentity
-            objectsTransmitted = turn.sources.count
-            turn.text = Self.render(gemini.sentences)
-            turn.verdicts = gemini.sentences.map {
-                grounding.verify(sentence: $0.text, citedSource: $0.source, sources: turn.sources)
+           let attempt = await Self.generateWithGemini(question: question, sources: turn.sources) {
+            stages.append(attempt.stage)
+            let audit = await auditCloudAttempt(attempt, question: question, queryClass: queryClass, policy: policy,
+                reading: reading, objectsSearched: objectsSearched, sources: turn.sources)
+            stages.append(audit.stage)
+            if let error = audit.persistenceError { turn.persistenceError = error }
+            objectsTransmitted = max(objectsTransmitted, attempt.confirmedObjectCount)
+            if let gemini = attempt.answer {
+                modelName = Self.geminiModelIdentity
+                turn.modelName = Self.geminiModelIdentity
+                turn.text = Self.render(gemini.sentences)
+                turn.verdicts = gemini.sentences.map {
+                    grounding.verify(sentence: $0.text, citedSource: $0.source, sources: turn.sources)
+                }
+                if gemini.insufficient {
+                    turn.text = "The sources retrieved do not answer that."
+                        + (gemini.sentences.isEmpty ? "" : " The closest they come:\n\n" + Self.render(gemini.sentences))
+                }
+                stages.append(ReceiptStage(
+                    name: "generate",
+                    counters: [
+                        "sentences": gemini.sentences.count,
+                        "objectsTransmitted": objectsTransmitted,
+                    ],
+                    milliseconds: Int((DispatchTime.now().uptimeNanoseconds - generationStarted) / 1_000_000),
+                    note: Self.geminiModelIdentity
+                ))
+                return
             }
-            if gemini.insufficient {
-                turn.text = "The sources retrieved do not answer that."
-                    + (gemini.sentences.isEmpty ? "" : " The closest they come:\n\n" + Self.render(gemini.sentences))
-            }
-            stages.append(ReceiptStage(
-                name: "generate",
-                counters: [
-                    "sentences": gemini.sentences.count,
-                    "objectsTransmitted": objectsTransmitted,
-                ],
-                milliseconds: Int((DispatchTime.now().uptimeNanoseconds - generationStarted) / 1_000_000),
-                note: Self.geminiModelIdentity
-            ))
-            return
         }
 
+        Self.applyDeterministicFallback(reason: reason, generationStarted: generationStarted,
+            turn: &turn, stages: &stages, modelName: &modelName)
+    }
+
+    static func applyDeterministicFallback(reason: String, generationStarted: UInt64,
+        turn: inout Turn, stages: inout [ReceiptStage], modelName: inout String?) {
         // Deterministic on-device fallback: extract verbatim cited sentences from the top
         // retrieved passages so a guardrail refusal or unavailable model still yields a
-        // grounded, inspectable answer with zero bytes transmitted off-device.
+        // grounded, inspectable answer. Earlier cloud submission accounting stays in its receipt.
+        modelName = nil
+        turn.modelName = nil
+        turn.text = ""
+        turn.verdicts = []
         turn.error = reason
         let synthesized = Self.deterministicSynthesis(from: turn.sources)
         if !synthesized.isEmpty {
             turn.text = Self.render(synthesized)
             turn.verdicts = synthesized.map {
-                grounding.verify(sentence: $0.text, citedSource: $0.source, sources: turn.sources)
+                Grounding().verify(sentence: $0.text, citedSource: $0.source, sources: turn.sources)
             }
             stages.append(ReceiptStage(
                 name: "synthesize_deterministic",
@@ -1030,6 +1136,45 @@ public actor Conversation {
                 milliseconds: Int((DispatchTime.now().uptimeNanoseconds - generationStarted) / 1_000_000),
                 note: "deterministic passage synthesis"
             ))
+        }
+    }
+
+    struct CloudAuditResult: Sendable {
+        var stage: ReceiptStage
+        var persistenceError: String?
+    }
+
+    /// A submitted cloud request is audited even when chat history is disabled or no phone ACK
+    /// ever arrives. This is a separate request receipt, not a completed answer/delivery receipt.
+    func auditCloudAttempt(_ attempt: GeminiGenerationAttempt, question: String, queryClass: QueryClass,
+        policy: AdmissionPolicy, reading: ClaimReading, objectsSearched: Int, sources: [GroundingSource]) async -> CloudAuditResult {
+        guard attempt.submitted else {
+            return CloudAuditResult(stage: ReceiptStage(name: "cloud.audit", counters: ["audit_saved": 0], milliseconds: 0,
+                note: "No request submitted; no separate audit required."))
+        }
+        let start = DispatchTime.now().uptimeNanoseconds
+        let evidence = Reasoner.linkedEvidence(reading.evidence, passages: reading.passages)
+        let marker = ReceiptStage(name: "cloud.request-audit", milliseconds: 0,
+            note: "Metadata marker: outbound request audit, not a completed answer or phone delivery.")
+        let receipt = Receipt(query: question, queryClass: queryClass,
+            domainsAdmitted: policy.admitted.sorted { $0.rawValue < $1.rawValue },
+            domainsBlocked: policy.blocked.sorted { $0.rawValue < $1.rawValue },
+            stages: auditContext + [marker, attempt.stage], objectsSearched: objectsSearched,
+            objectsRetrieved: sources.filter { $0.claimID == nil }.count, evidenceAdmitted: evidence.count,
+            claimsConsulted: reading.claims.count, contradictionsSurfaced: reading.contradictions,
+            model: nil, objectsTransmitted: attempt.confirmedObjectCount, confidence: nil, createdAt: currentDate())
+        do {
+            try await store.save(receipt, evidence: evidence, claims: reading.claims, additionalEvidence: reading.passages.map(\.0))
+            return CloudAuditResult(stage: ReceiptStage(name: "cloud.audit", counters: ["audit_saved": 1],
+                milliseconds: Int((DispatchTime.now().uptimeNanoseconds - start) / 1_000_000),
+                note: "Independent request audit saved as \(receipt.shortCode), before answer delivery."))
+        } catch {
+            let message = "The cloud request was submitted to transport, but its independent audit receipt could not be saved."
+            await onAuditFailure(message)
+            return CloudAuditResult(stage: ReceiptStage(name: "cloud.audit", counters: ["audit_saved": 0],
+                milliseconds: Int((DispatchTime.now().uptimeNanoseconds - start) / 1_000_000),
+                note: "Independent outbound audit could not be saved."),
+                persistenceError: message)
         }
     }
 
@@ -1108,7 +1253,8 @@ public actor Conversation {
                 objectID: src.objectID,
                 authority: src.authority,
                 uri: src.uri,
-                claimID: src.claimID
+                claimID: src.claimID,
+                representedObjectIDs: src.representedObjectIDs
             )
         }
     }
@@ -1205,16 +1351,37 @@ public actor Conversation {
         question: String,
         sources: [GroundingSource]
     ) async -> GroundedBrief? {
-        guard !sources.isEmpty else { return nil }
-        if let fmResult = await generateWithFoundationModelsCLI(question: question, sources: sources) {
+        await synthesizeBriefWithTrace(question: question, sources: sources).brief
+    }
+
+    struct BriefSynthesis: Sendable {
+        var brief: GroundedBrief?
+        var requestedModel: String?
+        var outcome: String
+    }
+
+    static func synthesizeBriefWithTrace(question: String, sources: [GroundingSource]) async -> BriefSynthesis {
+        guard !sources.isEmpty else { return BriefSynthesis(outcome: "No sources; no writer requested.") }
+        let requestedModel = isFoundationModelsCLIAvailable() ? fmCLIModelIdentity : nil
+        var outcome = "Local writer unavailable."
+        if requestedModel != nil {
+            if let fmResult = await generateWithFoundationModelsCLI(question: question, sources: sources) {
             // An explicit insufficient answer is respected. A failed citation is never printed
             // as grounded prose, even when other sentences passed the lexical check.
-            guard !fmResult.insufficient else { return nil }
-            if let brief = checkedBrief(sentences: fmResult.sentences, sources: sources, modelName: fmCLIModelIdentity) {
-                return brief
+                guard !fmResult.insufficient else {
+                    return BriefSynthesis(requestedModel: requestedModel, outcome: "Local writer returned insufficient evidence; no supplemental prose.")
+                }
+                if let brief = checkedBrief(sentences: fmResult.sentences, sources: sources, modelName: fmCLIModelIdentity) {
+                    return BriefSynthesis(brief: brief, requestedModel: requestedModel, outcome: "Local writer returned checked supplemental prose.")
+                }
+                outcome = "Local response had no accepted sentences."
+            } else {
+                outcome = "Local writer requested; no structured response returned."
             }
         }
-        return checkedBrief(sentences: deterministicSynthesis(from: sources), sources: sources, modelName: "Deterministic Passage Synthesis")
+        let brief = checkedBrief(sentences: deterministicSynthesis(from: sources), sources: sources, modelName: "Deterministic Passage Synthesis")
+        return BriefSynthesis(brief: brief, requestedModel: requestedModel,
+            outcome: outcome + (brief == nil ? " No supplemental prose." : " Deterministic supplemental prose used."))
     }
 
     static func checkedBrief(
@@ -1321,22 +1488,9 @@ public actor Conversation {
         return out
     }
 
-    private struct GeminiPayload: Decodable {
-        struct Candidate: Decodable {
-            struct Content: Decodable {
-                struct Part: Decodable { let text: String? }
-                let parts: [Part]?
-            }
-            let content: Content?
-        }
-        let candidates: [Candidate]?
-    }
-
+    // Also used by the existing Foundation Models CLI decoder.
     private struct GeminiStructuredAnswer: Decodable {
-        struct Sentence: Decodable {
-            let text: String
-            let source: Int?
-        }
+        struct Sentence: Decodable { let text: String; let source: Int? }
         let insufficient: Bool?
         let sentences: [Sentence]?
     }
@@ -1344,13 +1498,10 @@ public actor Conversation {
     private static func generateWithGemini(
         question: String,
         sources: [GroundingSource]
-    ) async -> (insufficient: Bool, sentences: [(text: String, source: Int?)])? {
+    ) async -> GeminiGenerationAttempt? {
         let env = ProcessInfo.processInfo.environment
         guard env["OPENCORE_GEMINI_FALLBACK"] == "1" else { return nil }
-        guard let apiKey = env["GEMINI_API_KEY"] ?? env["GOOGLE_API_KEY"],
-              !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=\(apiKey)")
-        else { return nil }
+        guard let apiKey = env["GEMINI_API_KEY"] ?? env["GOOGLE_API_KEY"] else { return nil }
 
         let body: [String: Any] = [
             "systemInstruction": [
@@ -1384,27 +1535,12 @@ public actor Conversation {
             ]
         ]
 
-        guard let requestData = try? JSONSerialization.data(withJSONObject: body) else { return nil }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = requestData
-        request.timeoutInterval = 15
+        guard let requestData = try? JSONSerialization.data(withJSONObject: body),
+              let request = GeminiRequest.make(apiKey: apiKey, body: requestData) else { return nil }
 
-        guard let (data, response) = try? await URLSession.shared.data(for: request),
-              let http = response as? HTTPURLResponse,
-              (200..<300).contains(http.statusCode),
-              let decoded = try? JSONDecoder().decode(GeminiPayload.self, from: data),
-              let jsonText = decoded.candidates?.first?.content?.parts?.first?.text,
-              let structured = try? JSONDecoder().decode(GeminiStructuredAnswer.self, from: Data(jsonText.utf8))
-        else { return nil }
-
-        let parsed = (structured.sentences ?? []).compactMap { item -> (text: String, source: Int?)? in
-            let trimmed = item.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { return nil }
-            return (text: trimmed, source: item.source)
+        return await GeminiGenerationAttempt.perform(request, sources: sources) {
+            try await URLSession.shared.data(for: $0)
         }
-        return (insufficient: structured.insufficient ?? false, sentences: parsed)
     }
 
     // MARK: - The model call
@@ -1716,16 +1852,15 @@ public actor Conversation {
             stages: stages,
             objectsSearched: outcome.chunksSearched,
             objectsRetrieved: passages,
-            // `Receipt.answeredFromClaims` says which of the two this is. With claims it is the
-            // evidence rows behind them, as on `Reasoner`'s path, and the same rows a trace lists.
-            evidenceAdmitted: reading.claims.isEmpty ? passages : reading.evidence.count,
+            // The same distinct evidence rows saved atomically with this receipt.
+            evidenceAdmitted: Reasoner.linkedEvidence(reading.evidence, passages: reading.passages).count,
             // Zero means no claim was asked for, not that none could be. This path reads the
             // claim table only for a question naming both a subject and something about it.
             claimsConsulted: reading.claims.count,
             contradictionsSurfaced: reading.contradictions,
             model: model,
-            // Zero for on-device and deterministic synthesis; equals `sources.count` when
-            // opted-in non-sensitive Gemini fallback transmits retrieved passages.
+            // Application-acknowledged distinct source objects. Unconfirmed cloud submissions
+            // remain explicit in stages even when deterministic fallback supplies the prose.
             objectsTransmitted: objectsTransmitted,
             confidence: nil
         )
@@ -1816,6 +1951,16 @@ public actor Conversation {
         guard !uniqueAnchors.isEmpty else { return question }
 
         return "\(question) (\(uniqueAnchors.joined(separator: " ")))"
+    }
+
+    /// The actual retrieval query for this actor's current follow-up context.
+    func contextualizedQueryForNextQuestion(_ question: String) -> String {
+        Self.contextualizedQuery(question, priorQuestions: priorQuestions, priorSourceTitles: priorSourceTitles)
+    }
+
+    /// A follow-up inherits a prior time window only while the actor retains that context.
+    func inheritedWindowForNextQuestion(_ question: String) -> QueryTimeWindow? {
+        Self.readsAsFollowUp(question) ? priorWindow : nil
     }
 
     /// Whether `question` leans on the one before it. Whether it picked up any anchors is a

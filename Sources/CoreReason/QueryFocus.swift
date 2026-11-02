@@ -59,6 +59,20 @@ struct QueryFocus: Sendable {
         (["met", "meet", "attended"], [Predicate.metWith, Predicate.attended]),
     ]
 
+    /// The value "which projects are dormant" wants listed, or nil.
+    ///
+    /// The bug: `status` was only something to rank, so with no project named this pooled whatever
+    /// the retrieved passages touched, and the answer to "which are dormant" opened with active ones.
+    /// A value read from the question is a filter, and the store holds exactly these three.
+    static func statusAsked(in query: String) -> String? {
+        let lowered = query.lowercased()
+        let has: (String) -> Bool = { AdmissionPolicy.containsWord($0, in: lowered) }
+        guard ["which", "what", "list", "show"].contains(where: has),
+              ["project", "projects", "repo", "repos", "repository", "repositories", "apps"].contains(where: has)
+        else { return nil }
+        return ["dormant", "archived", "active"].first(where: has)
+    }
+
     /// The longest name a query is scanned for, in words. **Chosen, not measured:** the longest
     /// name known to be worth finding is three words ("Local Automation Hub"), and each extra
     /// word adds one more alias lookup per position in the question.

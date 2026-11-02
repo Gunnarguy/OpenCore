@@ -686,3 +686,82 @@ No-value actions are not probed with GET. Read failure hides generic writes here
 remove Picture’s configured brightness fallback. Provider values are not hardware measurements.
 Fresh connection identity resets failure history; rereading can clear a failed check. Switching
 ports must not reuse old evidence. No broad automatic probing or physical writes run on entry.
+
+
+## iPhone companion builds: verified 2026-10-31 [test]
+
+```bash
+./script/build_phone.sh --simulator
+./script/build_phone.sh --device
+```
+
+[test] Both commands exited 0 with BUILD SUCCEEDED using Xcode 27.0 (27A266a) and iOS 27 SDK.
+Device build is development signed. Both are build-only: they do not install, launch, pair or enable
+any network listener. The phone deployment target is iOS 26. The shared CoreCompanion module builds
+for iOS; the engine stays on the Mac. Generated Xcode projects and Info.plist stay outside Documents.
+
+[source] Staging is `/private/tmp/OpenCore-phone-source`, DerivedData `/private/tmp/opencore-phone-dd`.
+Products: `Build/Products/Debug-iphonesimulator/OpenCorePhone.app` and
+`Build/Products/Debug-iphoneos/OpenCorePhone.app` within that DerivedData folder. Mac builds remain at
+`/private/tmp/opencore-review-dd/Build/Products/Debug/OpenCore.app`. The scripts share a build lock and
+refuse a concurrent xcodebuild. No build folder goes on the SD card or into the repository.
+
+[measured] A dedicated iPhone simulator accepted install/launch of this companion. Unpaired Home,
+Library navigation, locked Claims and Connection were inspected. Simulator cannot prove Face ID or
+Secure Enclave pairing, so no software-key fallback exists. The app labels that limitation explicitly.
+
+### Owner's physical review [design, not run]
+
+1. Review `Docs/ai/PHONE.md`. Matching Mac deployment was authorized by the owner's full-send
+   instruction. The physical iPhone companion 0.1.0 (1) was installed at the owner's word on 2026-10-31.
+   Mac `--verify` is an owner operation: it replaces/launches the app and scheduled sync starts about
+   twenty seconds later. Never use that mode as a test against the live store.
+2. In the Mac app's Settings section, choose iPhone Companion. Enable only the assigned Tailscale
+   interface, choose full-owner or project/public scope and generate the two-minute in-person code.
+   Pair on the physical phone. Pass Face ID to start each five-minute session.
+3. Compare the same question's answer, evidence, caveats and receipt with the Mac, including a
+   passage-only answer. Check exact receipt traces. Generative output is not asserted byte-identical.
+4. Revoke the phone on the Mac while it reads. It must lose access. Confirm a stranger/unpaired
+   phone cannot read. Test an expired code, sleep/closed Mac and expired Tailscale sign-in. Check the
+   last-reached timestamp and reconnect. A resumed response must keep its original generation time.
+5. Background the phone: evidence clears and the session locks. Inspect the app switcher privacy
+   cover. Change no biometric enrollment for a test; if enrollment changes naturally and invalidates
+   the key, Forget this Mac resets it and requires a fresh in-person pairing. Revoke the old Mac entry.
+6. Report the phase result before Phase 2. No sync/correction/operator action is exposed by this build.
+
+[measured] Authorized Mac deployments have built, replaced and launched the app successfully.
+[source] The real listener, Face ID, sleep/reconnection and model parity have not been exercised by the agent. No actual address, device identifier or owner-store content belongs in
+tracked verification output. The full feature-by-surface checklist remains in Notion.
+
+
+### Physical phone install: verified 2026-10-31 [measured]
+
+The owner said “build it to my iphone.” The existing development-signed bundle verified, twenty
+phone/wire inputs matched its staged source, and devicectl installation exited 0. A separate
+`device info apps --bundle-id com.gunndamental.OpenCorePhone` confirmed version 0.1.0, build 1.
+No uninstall, data-container access, launch, pairing or Mac replacement was performed.
+
+[source] Use a locally selected device identifier from `xcrun devicectl list devices`; never put
+its value in this public repository. The current Xcode 27 command help was checked before use.
+
+```bash
+xcrun devicectl device install app --device "$PHONE_DEVICE" /private/tmp/opencore-phone-dd/Build/Products/Debug-iphoneos/OpenCorePhone.app --timeout 60
+xcrun devicectl device info apps --device "$PHONE_DEVICE" --bundle-id com.gunndamental.OpenCorePhone --timeout 30
+```
+
+
+### Isolated Mac review bootstrap [test, verified 2026-11-01]
+
+```bash
+bash script/build_and_run.sh --build-only OpenCoreReview
+OPENCORE_RUN_REVIEW_BOOTSTRAP=1 OPENCORE_GEMINI_FALLBACK=0 swift test --skip-build --scratch-path /private/tmp/opencore-build --filter packagedReviewBootstrapUsesOnlyFixture
+```
+
+[test] Build and opt-in fixture execution exited 0. The review selector refuses install/run modes
+before staging. Its Foundation-only binary reads only an explicitly admitted immutable fixture copy
+and exits; no real screen is constructed. Test opt-in is required so a missing/stale review product
+cannot silently count as runtime verification. Full final suite with opt-in: 677 passed.
+[source] Real copies require store-copy procedure and private self-contained preparation, never cp
+of a live WAL database. The package copy helper and immutable factory are documented in ARCHITECTURE.
+[design] Keep the bootstrap target thin. Actual view reuse needs safe settings/model injection first;
+a placeholder or disabled button cannot certify production tasks or screen behavior.

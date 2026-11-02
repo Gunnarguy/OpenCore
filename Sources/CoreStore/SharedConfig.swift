@@ -46,6 +46,92 @@ public struct SharedConfig: Codable, Sendable, Equatable {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try encoder.encode(self).write(to: path, options: .atomic)
     }
+
+    public enum MCPExposureWriteResult: Equatable, Sendable {
+        /// The requested value was observed after writing. Running servers are unchanged.
+        case confirmed(Bool)
+        /// This operation did not start its write; existing configuration is not certified.
+        case notWritten(String)
+        /// Writing started; the file may contain the change even though it was not confirmed.
+        case unconfirmed(String)
+
+        public var failureDescription: String? {
+            switch self {
+            case .confirmed: nil
+            case .notWritten(let message), .unconfirmed(let message): message
+            }
+        }
+    }
+
+    /// Patch only the privacy field, preserving other JSON fields. Refuse malformed/unreadable
+    /// inputs instead of replacing them with permissive defaults. Confirmation is readback,
+    /// not a durable-write guarantee, a lock against other writers, or running-server revocation.
+    public static func setMCPExposure(_ enabled: Bool, at url: URL? = nil) -> MCPExposureWriteResult {
+        updateMCPExposure(enabled, at: url ?? defaultPath(), read: readConfigDocument,
+            write: { data, path in
+                try FileManager.default.createDirectory(at: path.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try data.write(to: path, options: .atomic)
+            })
+    }
+
+    /// A strict observation for UI revalidation. Absence/errors are unknown here; legacy CLI
+    /// startup retains its separate restrictive fallback. This is not a lock against other writers.
+    public static func readMCPExposure(at url: URL? = nil) -> Bool? {
+        guard let data = try? readConfigDocument(url ?? defaultPath()),
+              let config = try? JSONDecoder().decode(SharedConfig.self, from: data) else { return nil }
+        return config.exposeSensitiveDomainsOverMCP
+    }
+
+    private static func readConfigDocument(_ path: URL) throws -> Data? {
+        let attributes: [FileAttributeKey: Any]
+        do { attributes = try FileManager.default.attributesOfItem(atPath: path.path) }
+        catch let error as CocoaError where error.code == .fileReadNoSuchFile { return nil }
+        guard attributes[.type] as? FileAttributeType == .typeRegular else {
+            throw ConfigDocumentError.invalid("Configuration must be an ordinary file.")
+        }
+        return try Data(contentsOf: path)
+    }
+
+    private enum ConfigDocumentError: LocalizedError {
+        case invalid(String)
+        var errorDescription: String? { if case .invalid(let message) = self { message } else { nil } }
+    }
+
+    static func updateMCPExposure(_ enabled: Bool, at path: URL,
+                                  read: (URL) throws -> Data?,
+                                  write: (Data, URL) throws -> Void) -> MCPExposureWriteResult {
+        let data: Data
+        do {
+            var document: [String: Any] = [:]
+            if let existing = try read(path) {
+                guard let object = try JSONSerialization.jsonObject(with: existing) as? [String: Any] else {
+                    throw ConfigDocumentError.invalid("Configuration is not a JSON object.")
+                }
+                // Codable validates a present field as an actual Boolean, not the number 0/1.
+                if object.keys.contains("exposeSensitiveDomainsOverMCP") {
+                    _ = try JSONDecoder().decode(SharedConfig.self, from: existing)
+                }
+                document = object
+            }
+            document["exposeSensitiveDomainsOverMCP"] = enabled
+            data = try JSONSerialization.data(withJSONObject: document, options: [.prettyPrinted, .sortedKeys])
+        } catch {
+            return .notWritten("The shared configuration could not be prepared: \(error.localizedDescription)")
+        }
+        do { try write(data, path) }
+        catch {
+            return .unconfirmed("The write returned an error; the file may already have changed: \(error.localizedDescription)")
+        }
+        do {
+            guard let observed = try read(path),
+                  try JSONDecoder().decode(SharedConfig.self, from: observed).exposeSensitiveDomainsOverMCP == enabled else {
+                return .unconfirmed("The requested startup value was not confirmed by readback.")
+            }
+            return .confirmed(enabled)
+        } catch {
+            return .unconfirmed("The write finished, but readback failed: \(error.localizedDescription)")
+        }
+    }
 }
 
 extension Store {

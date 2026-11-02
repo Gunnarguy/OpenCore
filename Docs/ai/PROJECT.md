@@ -50,8 +50,10 @@ it on 2026-08-12 for opposite reasons, and both had been sitting here contradict
   row. It is not built as an agent over the store. Be exact about the rest of the app, though: it
   schedules syncs, and the operator console drives a Local Hub, changes monitor settings and can
   run live computer control, which stays on dry run until its gaps are fixed. None of that goes
-  through a receipt. `Receipt.objectsTransmitted` is `0` for answers, and opt-in Gemini chat is the
-  exception it has to report. Acting on the store's data will mean transmitting.
+  through an answer receipt. Opt-in Gemini and acknowledged owner-phone deliveries have distinct
+  receipt stages. The legacy integer counts application-acknowledged source objects; submitted cloud
+  requests without acknowledgment remain explicitly unconfirmed. Zero is not a packet audit. Separate
+  request audits survive missing phone acknowledgments and disabled chat history. [source]
 
 ## Major constraints
 

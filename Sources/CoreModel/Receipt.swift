@@ -79,10 +79,11 @@ public struct Receipt: Hashable, Sendable, Codable, Identifiable {
     public var evidenceAdmitted: Int
     public var claimsConsulted: Int
     public var contradictionsSurfaced: Int
-    /// Which model wrote the prose, if any. `nil` means the answer was assembled
-    /// deterministically from claims and no model ran.
+    /// Which model authored the final prose, if any. `nil` means no model authored that prose;
+    /// requested, failed or refused attempts are recorded separately in stages.
     public var model: String?
-    /// Objects whose text left the device. `0` unless a cloud model was used.
+    /// Distinct source objects in application-acknowledged cloud responses or owner-phone
+    /// deliveries. Unconfirmed cloud submissions remain in stages; zero is not proof of no egress.
     public var objectsTransmitted: Int
     /// Set only when a calibrated confidence exists. `nil` renders as "not measured".
     public var confidence: Double?
@@ -140,23 +141,9 @@ public struct Receipt: Hashable, Sendable, Codable, Identifiable {
     /// Short human-readable handle, e.g. `oc_8f2a91`.
     public var shortCode: String { "oc_" + id.value.prefix(6) }
 
-    /// True when this answer was assembled from the claim graph, so `receipt_evidence` has
-    /// rows behind it and a trace can resolve them.
-    ///
-    /// True for a chat turn that read claims too. It links them, and its `claimsConsulted`
-    /// counts only the rows behind lines the model was actually shown.
-    ///
-    /// False for an answer built from passages alone, which is what chat produces for a question
-    /// that names no subject. That is **not** an emptier receipt and it is not a worse one: it
-    /// reports `objectsRetrieved` passages and every one of them is shown, with its text, in
-    /// chat's own receipt sheet. It simply has no *claim* evidence to trace, because it did not
-    /// read the claim table, and `claimsConsulted: 0` records that honestly rather than as a gap.
-    ///
-    /// This exists because `evidenceAdmitted` counts passages on that path and claim evidence
-    /// on the other, so a screen reading the counter alone offered "trace evidence" on a
-    /// receipt with nothing traceable, then told the reader "this answer admitted no
-    /// evidence" two inches below a number saying six. One word, two meanings, and the screen
-    /// whose entire job is showing where an answer came from was the one contradicting itself.
+    /// Whether this answer consulted claim rows. Passage-only answers keep this false while
+    /// still linking their exact passage spans through `receipt_evidence`. Older passage-only
+    /// receipts may have no saved trace; that absence does not mean no passages were retrieved.
     public var answeredFromClaims: Bool { claimsConsulted > 0 }
 }
 
