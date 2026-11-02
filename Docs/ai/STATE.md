@@ -17,8 +17,9 @@ Phone coverage/acceptance: PHONE.md.
 [measured, 2026-11-02] Three steps are the owner's, in this order. Sync Apple Calendar once from
 Sources and allow it: the schedule record says Calendar was never allowed, so it last synced
 2026-08-14. Do the same for Notes, which holds no objects. Then turn Tailscale on and pair the phone.
-No copy of this commit exists off this Mac: the backup to the always-on machine needs Tailscale. Once it
-is on, make a new git bundle and copy it with `Local/`.
+[measured] A bundle of 70c3c48 and `Local/` are in `~/Backups/OpenCore-2026-11-02` on the always-on
+machine, checksum matched. That network dropped Tailscale packets over about 1,150 bytes, so large copies
+hung until the owner lowered the tunnel MTU to 1150, which resets when Tailscale reconnects.
 
 [test, measured, 2026-11-02] Answers now work for his plain questions, measured on a store copy before
 and after. Calendar and reminders are read directly (`AgendaIntent`, `Store.agendaEvents`,
